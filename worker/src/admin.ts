@@ -6,12 +6,17 @@
 
 import type { ApiKeyMeta, Env, StoredSession } from "./types";
 import {
-  adminHasPassword,
+  adminChangePassword,
+  adminPasswordSource,
   adminSetupPassword,
   adminVerifyPassword,
   clearAdminCookie,
+  clientIP,
   createAdminToken,
   isAdminAuthed,
+  lockoutCheck,
+  lockoutClear,
+  lockoutRecord,
   setAdminCookie,
 } from "./auth";
 import { sessionHeaders } from "./session";
@@ -84,13 +89,13 @@ function generateApiKey(): string {
 async function handleStatus(env: Env, request: Request): Promise<Response> {
   const session = await getSession(env);
   const keys = await listApiKeys(env);
-  const hasSecret = Boolean(env.ADMIN_PASSWORD);
+  const source = await adminPasswordSource(env);
 
   const origin = new URL(request.url).origin;
-  const hasKvPassword = !hasSecret && (await adminHasPassword(env));
   return json({
     ok: true,
-    adminPasswordMode: hasSecret ? "secret" : hasKvPassword ? "kv" : "none",
+    adminPasswordMode: source,
+    passwordSource: source,
     session: session
       ? {
           imported: true,
@@ -118,10 +123,37 @@ async function issueSession(
 }
 
 async function handleLogin(env: Env, request: Request): Promise<Response> {
+  const source = await adminPasswordSource(env);
+  if (source === "none") {
+    return json(
+      { ok: false, error: "管理员密码尚未设置，请先完成首次设置。", needSetup: true },
+      403,
+    );
+  }
   const body = await readBody(request);
   const password = typeof body.password === "string" ? body.password : "";
+  const ip = clientIP(request);
+  if (ip !== "") {
+    const lock = lockoutCheck(ip);
+    if (lock.locked) {
+      return new Response(
+        JSON.stringify({ ok: false, error: "登录失败次数过多，请稍后重试。" }),
+        {
+          status: 429,
+          headers: {
+            "content-type": "application/json",
+            "retry-after": String(lock.retryAfterSec ?? 900),
+          },
+        },
+      );
+    }
+  }
   const authed = await adminVerifyPassword(env, password);
-  if (!authed) return fail("密码错误。", 401);
+  if (!authed) {
+    if (ip !== "") lockoutRecord(ip);
+    return fail("密码错误。", 401);
+  }
+  if (ip !== "") lockoutClear(ip);
   return issueSession(env, request, {});
 }
 
@@ -142,6 +174,25 @@ async function handleSetup(env: Env, request: Request): Promise<Response> {
 async function handleLogout(env: Env, request: Request): Promise<Response> {
   const isHttps = new URL(request.url).protocol === "https:";
   return new Response(JSON.stringify({ ok: true }), {
+    headers: { "content-type": "application/json", "set-cookie": clearAdminCookie(isHttps) },
+  });
+}
+
+async function handleChangePassword(env: Env, request: Request): Promise<Response> {
+  const body = await readBody(request);
+  const current = typeof body.current_password === "string" ? body.current_password : "";
+  const next = typeof body.new_password === "string" ? body.new_password : "";
+  if (!current) return fail("请填写当前密码。");
+  if (!next) return fail("请填写新密码。");
+  try {
+    await adminChangePassword(env, current, next);
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : "修改密码失败。", 400);
+  }
+  // The epoch bump invalidated every session, ours included: clear the cookie
+  // and let the UI route back to the login view.
+  const isHttps = new URL(request.url).protocol === "https:";
+  return new Response(JSON.stringify({ ok: true, reauthenticate: true }), {
     headers: { "content-type": "application/json", "set-cookie": clearAdminCookie(isHttps) },
   });
 }
@@ -270,8 +321,17 @@ export async function handleAdminApiRequest(
   if (method === "POST" && path === "/admin/api/setup") return handleSetup(env, request);
   if (method === "POST" && path === "/admin/api/logout") return handleLogout(env, request);
 
-  // Everything else requires admin auth
-  if (!(await isAdminAuthed(env, request))) {
+  // Everything else requires admin auth, and is blocked outright while no
+  // admin password exists yet (mirrors M365: the console must be set up first).
+  const source = await adminPasswordSource(env);
+  const authed = await isAdminAuthed(env, request);
+  if (!authed || source === "none") {
+    if (source === "none") {
+      return json(
+        { ok: false, error: "管理员密码尚未设置，请先完成首次设置。", needSetup: true },
+        403,
+      );
+    }
     return json({ ok: false, error: "未登录或会话已过期。", needLogin: true }, 401);
   }
 
@@ -286,6 +346,8 @@ export async function handleAdminApiRequest(
       return handleCreateKey(env, request);
     case "DELETE /admin/api/keys":
       return handleDeleteKey(env, request);
+    case "POST /admin/api/password":
+      return handleChangePassword(env, request);
     default:
       return json({ ok: false, error: "未知的管理接口。" }, 404);
   }
@@ -293,5 +355,5 @@ export async function handleAdminApiRequest(
 
 /** Whether /admin should show the "set password" view instead of the login view. */
 export async function adminNeedsSetup(env: Env): Promise<boolean> {
-  return !(await adminHasPassword(env));
+  return (await adminPasswordSource(env)) === "none";
 }

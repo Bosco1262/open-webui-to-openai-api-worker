@@ -14,6 +14,7 @@ const K_SESSION = "session";
 const K_API_KEY_PREFIX = "apikey:";
 const K_PASSWORD_HASH = "admin:password_hash";
 const K_SESSION_SECRET = "admin:session_secret";
+const K_SESSION_EPOCH = "admin:session_epoch";
 
 /** Instance-level read cache TTL (ms). */
 const CACHE_TTL_MS = 60_000;
@@ -169,4 +170,24 @@ export async function getOrCreateSessionSecret(env: Env): Promise<string> {
   }
   sessionSecretCache = secret;
   return secret;
+}
+
+// --------------------------------------------------------------------------- //
+// Admin session epoch
+// --------------------------------------------------------------------------- //
+//
+// Read/written directly on every admin-authenticated path (no instance cache):
+// bumping the epoch on a password change must invalidate every previously
+// issued stateless token immediately, so a stale cached value is unacceptable.
+
+/** Current epoch embedded in admin session tokens (default 0). */
+export async function getSessionEpoch(env: Env): Promise<number> {
+  const raw = await env.KV.get(K_SESSION_EPOCH);
+  const n = raw === null ? NaN : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+}
+
+/** Increment the epoch, invalidating every previously issued admin session. */
+export async function bumpSessionEpoch(env: Env): Promise<void> {
+  await env.KV.put(K_SESSION_EPOCH, String((await getSessionEpoch(env)) + 1));
 }

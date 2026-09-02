@@ -73,6 +73,11 @@ OpenAI 客户端 ──▶ Bearer sk-xxx ──▶  /v1/*        │
 
 **设置管理密码（可选）**：Cloudflare Dashboard → 该 Worker → **Settings → Variables** → 添加 **Secret** `ADMIN_PASSWORD`。若未设置，首次访问 `/admin` 时会在网页引导设置。
 
+> 密码来源与优先级（与 M365-Copilot2API-on-Cloudflare-Worker 对齐）：
+> - 配置了 `ADMIN_PASSWORD` 时登录直接与 Secret 比对，**不写入 KV**；
+> - 首次网页自助设密或后台「修改密码」后，密码以 PBKDF2 哈希存入 **KV**；
+> - KV 与 Secret 并存时 **KV 优先**；在管理页修改密码会**覆盖 Secret 生效**，并使所有已登录管理会话立即失效。
+
 > 免费计划包含一定月度构建配额，超出后需升级付费计划；日常增量部署消耗很小。
 
 ### 方式二：命令行部署（wrangler CLI）
@@ -112,7 +117,7 @@ npx wrangler secret put ADMIN_PASSWORD
 
 部署完成后访问 `https://<你的worker域名>/admin`。
 
-> 管理密码两种模式：优先使用 `ADMIN_PASSWORD` secret；未设置时，首次访问 `/admin` 会在网页上引导设置管理密码（哈希存于 KV）。
+> 管理密码：配置了 `ADMIN_PASSWORD` Secret 则登录时直接与之比对（不写入 KV）；未设置时首次访问 `/admin` 会在网页引导设置（PBKDF2 哈希存入 KV）。若在后台「修改密码」，新密码会写入 KV 并覆盖 Secret 生效，同时踢掉所有旧会话。无任何密码配置（`none`）时，除首次设密相关的必要接口外，其余管理接口一律返回 403。
 
 ## 使用流程
 
@@ -158,6 +163,7 @@ for chunk in resp:
 | GET             | `/admin`                                | 管理会话 | 管理界面                           |
 | GET             | `/admin/api/status`                     | 管理会话 | 状态总览                           |
 | POST            | `/admin/api/login` / `setup` / `logout` | —        | 管理登录                           |
+| POST            | `/admin/api/password`                  | 管理会话 | 修改管理密码（旧会话全部失效）         |
 | POST            | `/admin/api/session`                    | 管理会话 | 导入 Session（支持 `test`/`save`） |
 | GET/POST/DELETE | `/admin/api/keys`                       | 管理会话 | API Key 管理                       |
 | GET             | `/v1/models`                            | API Key  | 模型列表（规范化）                 |
@@ -171,7 +177,7 @@ for chunk in resp:
 
 | 配置                 | 方式                                        | 说明                                                                                     |
 | -------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `ADMIN_PASSWORD`     | `wrangler secret put` / Dashboard Variables | 管理密码（可选，未设则网页首次访问设置）                                                 |
+| `ADMIN_PASSWORD`     | `wrangler secret put` / Dashboard Variables | 管理密码（可选；Secret 直接验证不写 KV，后台改密后存 KV 并覆盖它） |
 | `SESSION_SECRET`     | `wrangler secret put`                       | 会话签名密钥（可选，未设则自动派生存 KV）                                                |
 | KV Namespace         | `wrangler.jsonc`（自动创建）                | 存储 session / API Key / 管理密码；绑定省略 `id` 即自动资源供应，首次部署自动创建 |
 
@@ -185,5 +191,8 @@ for chunk in resp:
 ## 安全提示
 
 - 管理界面与 `/admin/api/*` 全部要求登录会话，请务必设置强密码。
+- 无任何密码配置（`none`，如 `ADMIN_PASSWORD` 被移除且从未设过网页密码）时，除首次设密相关接口外管理接口一律返回 403，管理功能不可用，需先在网页设置密码。
+- 后台「修改密码」会使所有已登录管理会话立即失效并需重新登录；来自 Secret 的密码在未被后台覆盖前不会写入 KV。
+- 登录接口带失败锁定：同一客户端 IP 15 分钟内连续失败 5 次将返回 429 并锁定，可有效减缓暴力破解。
 - 客户端 API Key 请妥善保管；完整 Key 仅在生成时显示一次。
 - 导入的 Open WebUI 凭证仅存于 KV，界面只展示脱敏摘要。

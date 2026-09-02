@@ -377,6 +377,31 @@ export const ADMIN_UI = `<!DOCTYPE html>
       <div class="banner" id="keys-banner"></div>
     </div>
 
+    <!-- Change admin password -->
+    <div class="card">
+      <h3><span class="ic">▸</span> 修改管理密码 <span id="pw-src-badge" class="badge gray"></span></h3>
+      <div class="desc">修改后密码将保存于 KV 并立即覆盖当前生效来源；所有已登录的管理会话将失效，需重新登录。</div>
+      <div class="banner warn" id="pw-src-note" style="display:none"></div>
+      <div style="max-width:520px;">
+        <div class="form-row">
+          <label class="lbl">当前密码</label>
+          <input id="pw-cur" type="password" autocomplete="current-password" />
+        </div>
+        <div class="form-row">
+          <label class="lbl">新密码（至少 8 位）</label>
+          <input id="pw-new" type="password" autocomplete="new-password" />
+        </div>
+        <div class="form-row">
+          <label class="lbl">确认新密码</label>
+          <input id="pw-new2" type="password" autocomplete="new-password" />
+        </div>
+        <div class="btn-row" style="margin-top:4px;">
+          <button class="btn btn-primary" onclick="changePassword()">修改密码</button>
+        </div>
+      </div>
+      <div class="banner" id="pw-banner"></div>
+    </div>
+
     <div class="footer">
       <div style="margin-bottom:10px;">接入示例</div>
       <code>Base URL: <span class="mono" id="api-base-code"></span></code>
@@ -543,6 +568,60 @@ export const ADMIN_UI = `<!DOCTYPE html>
     }).catch(function () { showLogin(); });
   }
 
+  // ---------- change password ----------
+  var _pwSource = 'none';
+
+  function updatePwSourceUI(s) {
+    var src = (s && (s.passwordSource || s.adminPasswordMode)) || 'none';
+    _pwSource = src;
+    var badgeEl = $('pw-src-badge');
+    var noteEl = $('pw-src-note');
+    if (!badgeEl || !noteEl) return;
+    if (src === 'secret') {
+      badgeEl.className = 'badge warn';
+      badgeEl.textContent = 'Secret（ADMIN_PASSWORD）';
+      noteEl.textContent = '当前密码来自部署配置 ADMIN_PASSWORD。修改后将以新密码为准并保存在 KV（控制台），该 Secret 将不再被使用，除非在 Cloudflare Dashboard 将其改回一致的值。';
+      noteEl.style.display = 'block';
+    } else if (src === 'kv') {
+      badgeEl.className = 'badge info';
+      badgeEl.textContent = 'KV（控制台修改）';
+      noteEl.style.display = 'none';
+    } else {
+      badgeEl.className = 'badge gray';
+      badgeEl.textContent = '';
+      noteEl.style.display = 'none';
+    }
+  }
+
+  function changePassword() {
+    var btn = event.target;
+    var cur = $('pw-cur').value;
+    var n1 = $('pw-new').value;
+    var n2 = $('pw-new2').value;
+    clearBanner('pw-banner');
+    if (!cur) { showBanner('pw-banner', '请填写当前密码', 'err'); return; }
+    if (n1.length < 8) { showBanner('pw-banner', '新密码长度至少 8 位', 'err'); return; }
+    if (n1 === cur) { showBanner('pw-banner', '新密码不能与当前密码相同', 'err'); return; }
+    if (n1 !== n2) { showBanner('pw-banner', '两次输入的新密码不一致', 'err'); return; }
+    if (_pwSource === 'secret' && !confirm(
+      '当前管理员密码来自 Cloudflare Secret（ADMIN_PASSWORD）。\n\n' +
+      '在此修改会把生效密码覆盖为 KV 中保存的新密码，之后该 Secret 将不再被使用（除非把 Secret 改成与新密码一致）。\n' +
+      '如不想覆盖，请前往 Cloudflare Dashboard 更新 Secret。\n\n' +
+      '确定要继续吗？'
+    )) return;
+    setLoading(btn, true);
+    api('/admin/api/password', { method: 'POST', body: { current_password: cur, new_password: n1 } })
+      .then(function () {
+        toast('密码已修改，所有旧会话已失效，请使用新密码重新登录', 'ok');
+        $('pw-cur').value = '';
+        $('pw-new').value = '';
+        $('pw-new2').value = '';
+        showLogin();
+      })
+      .catch(function (err) { showBanner('pw-banner', err.message, 'err'); })
+      .finally(function () { setLoading(btn, false); });
+  }
+
   // ---------- status ----------
   function badge(type, text) {
     return '<span class="badge ' + type + '">' + text + '</span>';
@@ -570,6 +649,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
       // keys
       $('st-keys').textContent = String(s.apiKeys.count);
+
+      // admin password source badge / overwrite hint
+      updatePwSourceUI(s);
     }).catch(function (err) {
       toast(err.message, 'err');
     });

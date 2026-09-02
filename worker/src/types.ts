@@ -6,16 +6,31 @@
  *   - "apikey:{key}"               -> ApiKeyMeta (key itself is the KV key, O(1) lookup)
  *   - "admin:password_hash"        -> { salt, hash } (PBKDF2 via WebCrypto)
  *   - "admin:session_secret"       -> auto-derived HMAC secret for admin cookies
+ *   - "admin:session_epoch"        -> number; bumped on every password change so all
+ *                                     previously issued admin session tokens die at once
+ *
+ * Admin password sources (mirror of M365-Copilot2API-on-Cloudflare-Worker):
+ *   - ADMIN_PASSWORD secret is verified directly and is NEVER written to KV.
+ *   - The KV hash is written only by the web console: first-visit setup ("none"
+ *     mode) or the "change password" flow.
+ *   - When a KV hash exists it always wins over the secret binding.
  */
 
 export interface Env {
   /** KV binding: session / config / api keys / admin credentials. */
   KV: KVNamespace;
-  /** Optional: preset admin password via `wrangler secret put ADMIN_PASSWORD`. */
+  /**
+   * Optional: preset admin password via `wrangler secret put ADMIN_PASSWORD`.
+   * Verified directly (never stored in KV); a KV password, once set via the
+   * console, takes priority over this binding.
+   */
   ADMIN_PASSWORD?: string;
   /** Optional: HMAC signing secret for admin session cookies. */
   SESSION_SECRET?: string;
 }
+
+/** Where the effective admin password currently comes from. */
+export type AdminPasswordSource = "none" | "secret" | "kv";
 
 /** Credentials captured by the local login tool (mirrors session.json). */
 export interface StoredSession {
