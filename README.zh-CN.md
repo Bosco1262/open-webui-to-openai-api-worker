@@ -66,7 +66,7 @@ OpenAI 客户端 ──▶ Bearer sk-xxx ──▶  /v1/*        │
 
    | 字段                |  值              |
    | ------------------- | ---------------- |
-   | **高级设置 - 路径**  |   `worker`       |
+   | **高级设置 - 路径**  |   `/worker`      |
    | **构建命令**         |   `npm install`  |
 
    > 因为 Worker 代码位于仓库的 `worker/` 子目录，根目录必须填 `/worker`；`npm install` 按 `package-lock.json` 安装依赖，`npx wrangler deploy` 执行 `wrangler deploy`。
