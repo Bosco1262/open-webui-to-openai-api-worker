@@ -604,9 +604,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
     if (n1 === cur) { showBanner('pw-banner', '新密码不能与当前密码相同', 'err'); return; }
     if (n1 !== n2) { showBanner('pw-banner', '两次输入的新密码不一致', 'err'); return; }
     if (_pwSource === 'secret' && !confirm(
-      '当前管理员密码来自 Cloudflare Secret（ADMIN_PASSWORD）。\n\n' +
-      '在此修改会把生效密码覆盖为 KV 中保存的新密码，之后该 Secret 将不再被使用（除非把 Secret 改成与新密码一致）。\n' +
-      '如不想覆盖，请前往 Cloudflare Dashboard 更新 Secret。\n\n' +
+      '当前管理员密码来自 Cloudflare Secret（ADMIN_PASSWORD）。\\n\\n' +
+      '在此修改会把生效密码覆盖为 KV 中保存的新密码，之后该 Secret 将不再被使用（除非把 Secret 改成与新密码一致）。\\n' +
+      '如不想覆盖，请前往 Cloudflare Dashboard 更新 Secret。\\n\\n' +
       '确定要继续吗？'
     )) return;
     setLoading(btn, true);
