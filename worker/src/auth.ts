@@ -126,10 +126,10 @@ export async function adminHasPassword(env: Env): Promise<boolean> {
 /** Set the admin password from the web UI (only allowed in "none" mode). */
 export async function adminSetupPassword(env: Env, password: string): Promise<void> {
   if (env.ADMIN_PASSWORD) {
-    throw new Error("管理员密码已由部署配置（ADMIN_PASSWORD）提供，无需在网页设置。");
+    throw new Error("err.setup_secret_exists");
   }
   if (await getPasswordHash(env)) {
-    throw new Error("管理员密码已设置。");
+    throw new Error("err.already_setup");
   }
   await setPasswordHash(env, await hashPassword(password));
 }
@@ -161,9 +161,9 @@ export async function adminChangePassword(
   nextPassword: string,
 ): Promise<void> {
   const ok = await adminVerifyPassword(env, currentPassword);
-  if (!ok) throw new Error("当前密码不正确。");
-  if (nextPassword.length < 8) throw new Error("新密码长度至少 8 位。");
-  if (nextPassword === currentPassword) throw new Error("新密码不能与当前密码相同。");
+  if (!ok) throw new Error("err.pw_cur_wrong");
+  if (nextPassword.length < 8) throw new Error("err.pw_new_short");
+  if (nextPassword === currentPassword) throw new Error("err.pw_new_same");
   await setPasswordHash(env, await hashPassword(nextPassword));
   await bumpSessionEpoch(env);
 }

@@ -125,10 +125,7 @@ async function issueSession(
 async function handleLogin(env: Env, request: Request): Promise<Response> {
   const source = await adminPasswordSource(env);
   if (source === "none") {
-    return json(
-      { ok: false, error: "管理员密码尚未设置，请先完成首次设置。", needSetup: true },
-      403,
-    );
+    return json({ ok: false, error: "err.need_setup", needSetup: true }, 403);
   }
   const body = await readBody(request);
   const password = typeof body.password === "string" ? body.password : "";
@@ -136,9 +133,7 @@ async function handleLogin(env: Env, request: Request): Promise<Response> {
   if (ip !== "") {
     const lock = lockoutCheck(ip);
     if (lock.locked) {
-      return new Response(
-        JSON.stringify({ ok: false, error: "登录失败次数过多，请稍后重试。" }),
-        {
+      return new Response(JSON.stringify({ ok: false, error: "err.too_many" }), {
           status: 429,
           headers: {
             "content-type": "application/json",
@@ -151,7 +146,7 @@ async function handleLogin(env: Env, request: Request): Promise<Response> {
   const authed = await adminVerifyPassword(env, password);
   if (!authed) {
     if (ip !== "") lockoutRecord(ip);
-    return fail("密码错误。", 401);
+    return fail("err.wrong_password", 401);
   }
   if (ip !== "") lockoutClear(ip);
   return issueSession(env, request, {});
@@ -161,12 +156,12 @@ async function handleSetup(env: Env, request: Request): Promise<Response> {
   const body = await readBody(request);
   const password = typeof body.password === "string" ? body.password : "";
   const confirm = typeof body.confirm === "string" ? body.confirm : "";
-  if (password.length < 8) return fail("密码长度至少 8 位。");
-  if (password !== confirm) return fail("两次输入的密码不一致。");
+  if (password.length < 8) return fail("err.pw_too_short");
+  if (password !== confirm) return fail("err.pw_mismatch");
   try {
     await adminSetupPassword(env, password);
   } catch (err) {
-    return fail(err instanceof Error ? err.message : "设置密码失败。", 400);
+    return fail(err instanceof Error ? err.message : "err.setup_failed", 400);
   }
   return issueSession(env, request, {});
 }
@@ -182,12 +177,12 @@ async function handleChangePassword(env: Env, request: Request): Promise<Respons
   const body = await readBody(request);
   const current = typeof body.current_password === "string" ? body.current_password : "";
   const next = typeof body.new_password === "string" ? body.new_password : "";
-  if (!current) return fail("请填写当前密码。");
-  if (!next) return fail("请填写新密码。");
+  if (!current) return fail("err.pw_cur_required");
+  if (!next) return fail("err.pw_new_required");
   try {
     await adminChangePassword(env, current, next);
   } catch (err) {
-    return fail(err instanceof Error ? err.message : "修改密码失败。", 400);
+    return fail(err instanceof Error ? err.message : "err.pw_change_failed", 400);
   }
   // The epoch bump invalidated every session, ours included: clear the cookie
   // and let the UI route back to the login view.
@@ -203,15 +198,15 @@ async function handleImportSession(env: Env, request: Request): Promise<Response
   const shouldTest = body.test === true;
   const shouldSave = body.save === true;
 
-  if (!rawJson) return fail("请粘贴 session.json 的 JSON 内容。");
+  if (!rawJson) return fail("err.session_empty");
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawJson);
   } catch {
-    return fail("JSON 解析失败，请检查粘贴内容。");
+    return fail("err.session_json_bad");
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return fail("内容格式不正确，应为 JSON 对象。");
+    return fail("err.session_format_bad");
   }
 
   const raw = parsed as Record<string, unknown>;
@@ -226,13 +221,20 @@ async function handleImportSession(env: Env, request: Request): Promise<Response
     base_url: typeof lower.base_url === "string" ? lower.base_url : "",
   };
   if (!sessionIsUsable(session)) {
-    return fail("缺少 Authorization 与 Cookie（至少需要其一）。");
+    return fail("err.session_missing_credentials");
   }
   if (!session.base_url || !isValidBaseUrl(session.base_url)) {
-    return fail("base_url 缺失或不是合法地址（需 http/https 开头）。");
+    return fail("err.session_bad_base_url");
   }
 
-  let test: { ok: boolean; detail: string } | null = null;
+  // Structured test result; the UI composes the localized message.
+  let test: {
+    ok: boolean;
+    code: string;
+    prefix?: string;
+    status?: number;
+    error?: string;
+  } | null = null;
   if (shouldTest) {
     // Direct connectivity test
     for (const prefix of PREFIX_CANDIDATES) {
@@ -243,15 +245,15 @@ async function handleImportSession(env: Env, request: Request): Promise<Response
         await resp.text().catch(() => {});
         if (resp.status === 404) continue;
         test = resp.ok
-          ? { ok: true, detail: `直连连通（前缀 ${prefix}，HTTP ${resp.status}）` }
-          : { ok: false, detail: `上游返回 HTTP ${resp.status}（前缀 ${prefix}），凭证可能已过期` };
+          ? { ok: true, code: "up.test_ok", prefix, status: resp.status }
+          : { ok: false, code: "up.test_http", prefix, status: resp.status };
         break;
       } catch (err) {
-        test = { ok: false, detail: `无法连接上游：${String(err)}` };
+        test = { ok: false, code: "up.test_network", error: String(err) };
         break;
       }
     }
-    if (!test) test = { ok: false, detail: "所有候选前缀均返回 404，请确认地址指向 Open WebUI" };
+    if (!test) test = { ok: false, code: "up.test_404" };
   }
 
   if (shouldSave) {
@@ -298,7 +300,7 @@ async function handleCreateKey(env: Env, request: Request): Promise<Response> {
 async function handleDeleteKey(env: Env, request: Request): Promise<Response> {
   const body = await readBody(request);
   const key = typeof body.key === "string" ? body.key : "";
-  if (!key) return fail("缺少要删除的 API Key。");
+  if (!key) return fail("err.key_missing");
   await deleteApiKey(env, key);
   return json({ ok: true });
 }
@@ -328,11 +330,11 @@ export async function handleAdminApiRequest(
   if (!authed || source === "none") {
     if (source === "none") {
       return json(
-        { ok: false, error: "管理员密码尚未设置，请先完成首次设置。", needSetup: true },
+        { ok: false, error: "err.need_setup", needSetup: true },
         403,
       );
     }
-    return json({ ok: false, error: "未登录或会话已过期。", needLogin: true }, 401);
+    return json({ ok: false, error: "err.not_logged_in", needLogin: true }, 401);
   }
 
   switch (`${method} ${path}`) {
@@ -349,7 +351,7 @@ export async function handleAdminApiRequest(
     case "POST /admin/api/password":
       return handleChangePassword(env, request);
     default:
-      return json({ ok: false, error: "未知的管理接口。" }, 404);
+      return json({ ok: false, error: "err.unknown_endpoint" }, 404);
   }
 }
 

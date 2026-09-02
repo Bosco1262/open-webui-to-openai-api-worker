@@ -1,6 +1,7 @@
 /**
  * Self-contained admin console (single HTML page, zero external dependencies).
- * Layout: top title bar + left sidebar navigation + right content area.
+ * Layout: top title bar + fixed left sidebar navigation + right content area.
+ * Built-in i18n (zh-CN / en): manual choice > browser language > English fallback.
  * Dark console aesthetic with glassmorphism cards and orange accents.
  */
 
@@ -147,11 +148,15 @@ export const ADMIN_UI = `<!DOCTYPE html>
   .topbar-name small { font-size: 11px; color: var(--text-1); font-weight: 400; margin-left: 8px; }
   .topbar-actions { display: flex; align-items: center; gap: 10px; }
 
-  /* Body: sidebar + content */
+  /* Body: fixed sidebar + content */
   .layout-body { display: flex; min-height: calc(100vh - var(--topbar-h)); }
 
   .sidebar {
     width: var(--sidebar-w); flex: none;
+    position: sticky; top: var(--topbar-h);
+    height: calc(100vh - var(--topbar-h));
+    overflow-y: auto;
+    display: flex; flex-direction: column;
     padding: 18px 12px;
     border-right: 1px solid var(--border);
     background: rgba(15, 20, 32, 0.45);
@@ -186,7 +191,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   .side-item.active .side-badge { color: var(--accent-2); }
 
   .side-foot {
-    margin-top: 16px; padding: 12px; border-top: 1px solid var(--border);
+    margin-top: auto; padding: 12px; border-top: 1px solid var(--border);
     font-size: 11px; color: var(--text-1); line-height: 1.7;
   }
 
@@ -236,6 +241,17 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   .grid2 .full { grid-column: 1 / -1; }
+
+  .setting-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; flex-wrap: wrap;
+    background: rgba(15, 20, 32, 0.45); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .setting-info { min-width: 0; }
+  .setting-label { font-size: 13px; color: var(--text-0); margin-bottom: 5px; }
+  .setting-value { display: flex; align-items: center; gap: 8px; }
+  .setting-hint { font-size: 12px; color: var(--text-1); margin-top: 4px; }
 
   label.lbl { display: block; font-size: 12.5px; color: var(--text-1); margin-bottom: 6px; }
   input, textarea, select {
@@ -324,7 +340,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   @media (max-width: 860px) {
     .layout-body { flex-direction: column; }
     .sidebar {
-      width: 100%; padding: 10px 12px;
+      width: 100%; height: auto; overflow: visible; padding: 10px 12px;
       border-right: none; border-bottom: 1px solid var(--border);
       position: sticky; top: var(--topbar-h); z-index: 15;
       background: rgba(15, 20, 32, 0.85);
@@ -354,26 +370,26 @@ export const ADMIN_UI = `<!DOCTYPE html>
         <path d="M13 10l4 4 4-4"/>
       </svg>
     </div>
-    <div class="login-title">Open WebUI 代理控制台</div>
-    <div class="login-sub">将 Open WebUI 反代为 OpenAI 兼容 API</div>
+    <div class="login-title" data-i18n="brand.name">Open WebUI 代理控制台</div>
+    <div class="login-sub" id="login-sub" data-i18n="login.subtitle">将 Open WebUI 反代为 OpenAI 兼容 API</div>
     <div id="login-mode" data-mode="login">
       <form id="form-login" autocomplete="current-password">
         <div class="field">
-          <input id="pw" type="password" placeholder="管理密码" autocomplete="current-password" required />
-          <button type="button" class="eye" data-target="pw" aria-label="显示/隐藏密码">👁</button>
+          <input id="pw" type="password" data-i18n-ph="login.pw_ph" placeholder="管理密码" autocomplete="current-password" required />
+          <button type="button" class="eye" data-target="pw" aria-label="show/hide password">👁</button>
         </div>
-        <button class="btn btn-primary" id="btn-login" type="submit">登 录</button>
+        <button class="btn btn-primary" id="btn-login" type="submit" data-i18n="login.btn">登 录</button>
       </form>
       <form id="form-setup" style="display:none" autocomplete="new-password">
         <div class="field">
-          <input id="pw1" type="password" placeholder="设置管理密码（至少 8 位）" autocomplete="new-password" required />
-          <button type="button" class="eye" data-target="pw1" aria-label="显示/隐藏密码">👁</button>
+          <input id="pw1" type="password" data-i18n-ph="login.pw1_ph" placeholder="设置管理密码（至少 8 位）" autocomplete="new-password" required />
+          <button type="button" class="eye" data-target="pw1" aria-label="show/hide password">👁</button>
         </div>
         <div class="field">
-          <input id="pw2" type="password" placeholder="确认管理密码" autocomplete="new-password" required />
-          <button type="button" class="eye" data-target="pw2" aria-label="显示/隐藏密码">👁</button>
+          <input id="pw2" type="password" data-i18n-ph="login.pw2_ph" placeholder="确认管理密码" autocomplete="new-password" required />
+          <button type="button" class="eye" data-target="pw2" aria-label="show/hide password">👁</button>
         </div>
-        <button class="btn btn-primary" id="btn-setup" type="submit">设置密码并进入</button>
+        <button class="btn btn-primary" id="btn-setup" type="submit" data-i18n="login.setup_btn">设置密码并进入</button>
       </form>
     </div>
     <div class="hint" id="login-msg"></div>
@@ -393,10 +409,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
           <path d="M13 10l4 4 4-4"/>
         </svg>
       </div>
-      <div class="topbar-name">Open WebUI 代理控制台<small>v${VERSION}</small></div>
+      <div class="topbar-name"><span data-i18n="brand.name">Open WebUI 代理控制台</span><small>v${VERSION}</small></div>
     </div>
     <div class="topbar-actions">
-      <button class="btn btn-ghost btn-sm" onclick="logout()">退出登录</button>
+      <button class="btn btn-ghost btn-sm" onclick="logout()" data-i18n="nav.logout">退出登录</button>
     </div>
   </header>
 
@@ -404,27 +420,27 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
     <!-- Sidebar -->
     <aside class="sidebar">
-      <div class="side-label">导航</div>
+      <div class="side-label" data-i18n="nav.label">导航</div>
       <nav class="side-nav">
         <button class="side-item active" data-page="dashboard" onclick="switchPage('dashboard')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/>
             <rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>
           </svg>
-          仪表盘
+          <span data-i18n="nav.dashboard">仪表盘</span>
         </button>
         <button class="side-item" data-page="upstream" onclick="switchPage('upstream')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/>
             <path d="M7 7h.01M7 17h.01"/>
           </svg>
-          上游服务端
+          <span data-i18n="nav.upstream">上游服务端</span>
         </button>
         <button class="side-item" data-page="keys" onclick="switchPage('keys')">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 20 3"/><path d="M16.5 6.5l3 3"/><path d="M14 9l2.5 2.5"/>
           </svg>
-          API 管理
+          <span data-i18n="nav.keys">API 管理</span>
           <span class="side-badge" id="nav-key-count">·</span>
         </button>
         <button class="side-item" data-page="settings" onclick="switchPage('settings')">
@@ -432,11 +448,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
           </svg>
-          网页设置
+          <span data-i18n="nav.settings">网页设置</span>
         </button>
       </nav>
       <div class="side-foot">
-        登录后可管理上游凭证、<br />API Key 与控制台设置。
+        <span data-i18n="nav.foot1">登录后可管理上游凭证、</span><br />
+        <span data-i18n="nav.foot2">API Key 与控制台设置。</span>
       </div>
     </aside>
 
@@ -447,34 +464,34 @@ export const ADMIN_UI = `<!DOCTYPE html>
         <!-- ============ Page: Dashboard ============ -->
         <section class="page active" id="page-dashboard">
           <div class="page-head">
-            <h2>仪表盘</h2>
-            <p>代理服务整体运行状态一览。</p>
+            <h2 data-i18n="nav.dashboard">仪表盘</h2>
+            <p data-i18n="dash.subtitle">代理服务整体运行状态一览。</p>
           </div>
 
           <div class="stats" style="margin-bottom:18px;">
             <div class="stat">
-              <div class="label">Session 凭证</div>
+              <div class="label" data-i18n="stat.session">Session 凭证</div>
               <div class="value"><span id="st-session">—</span></div>
               <div class="sub" id="st-session-sub"></div>
             </div>
             <div class="stat">
-              <div class="label">上游地址</div>
+              <div class="label" data-i18n="stat.upstream">上游地址</div>
               <div class="value" id="st-upstream">—</div>
               <div class="sub" id="st-upstream-sub"></div>
             </div>
             <div class="stat">
-              <div class="label">API Key 数量</div>
+              <div class="label" data-i18n="stat.keys">API Key 数量</div>
               <div class="value" id="st-keys">—</div>
-              <div class="sub">生成的客户端密钥</div>
+              <div class="sub" data-i18n="stat.keys_sub">生成的客户端密钥</div>
             </div>
           </div>
 
           <div class="card">
-            <h3><span class="ic">▸</span> 客户端接入</h3>
-            <div class="desc">在任何 OpenAI 兼容客户端中使用以下地址与密钥接入本代理。</div>
-            <span class="url-chip" title="客户端接入地址，点击复制">
+            <h3><span class="ic">▸</span> <span data-i18n="dash.access_title">客户端接入</span></h3>
+            <div class="desc" data-i18n="dash.access_desc">在任何 OpenAI 兼容客户端中使用以下地址与密钥接入本代理。</div>
+            <span class="url-chip" data-i18n-title="dash.chip_title" title="客户端接入地址，点击复制">
               <span class="dot"></span><span class="txt" id="chip-url">/v1</span>
-              <button class="btn btn-ghost btn-sm" onclick="copyText(document.getElementById('chip-url').textContent.trim(), '已复制接入地址')">复制</button>
+              <button class="btn btn-ghost btn-sm" onclick="copyText(document.getElementById('chip-url').textContent.trim(), t('msg.copied'))" data-i18n="dash.copy">复制</button>
             </span>
             <div class="code-block">
               <b>Base URL</b>&nbsp;&nbsp;<span id="api-base-code">—</span><br />
@@ -486,39 +503,36 @@ export const ADMIN_UI = `<!DOCTYPE html>
         <!-- ============ Page: Upstream ============ -->
         <section class="page" id="page-upstream">
           <div class="page-head">
-            <h2>上游服务端</h2>
-            <p>导入并管理 Open WebUI 的 Session 凭证。</p>
+            <h2 data-i18n="nav.upstream">上游服务端</h2>
+            <p data-i18n="up.subtitle">导入并管理 Open WebUI 的 Session 凭证。</p>
           </div>
 
           <div class="card">
-            <h3><span class="ic">▸</span> 导入 Session</h3>
-            <div class="desc">
-              在本地运行 <code>python login.py --base-url https://你的-open-webui 地址</code>，完成浏览器登录后，
-              将终端输出的 <b>session.json 全部 JSON 内容</b> 粘贴到下方并导入。
-            </div>
+            <h3><span class="ic">▸</span> <span data-i18n="up.import_title">导入 Session</span></h3>
+            <div class="desc" data-i18n-html="up.import_desc">在本地运行 <code>python login.py --base-url https://你的-open-webui 地址</code>，完成浏览器登录后，将终端输出的 <b>session.json 全部 JSON 内容</b> 粘贴到下方并导入。</div>
             <div class="form-row">
-              <label class="lbl">session.json 内容</label>
+              <label class="lbl" data-i18n="up.json_label">session.json 内容</label>
               <textarea id="session-json" placeholder='{\n  "authorization": "Bearer eyJ...",\n  "cookie": "...",\n  "base_url": "https://..."\n}'></textarea>
             </div>
             <div class="btn-row">
-              <button class="btn btn-ghost" onclick="testSession()">校验并测试连通</button>
-              <button class="btn btn-primary" style="width:auto;" onclick="importSession()">导入 Session</button>
-              <button class="btn btn-danger btn-sm" onclick="deleteSession()">删除</button>
+              <button class="btn btn-ghost" onclick="testSession()" data-i18n="up.test">校验并测试连通</button>
+              <button class="btn btn-primary" style="width:auto;" onclick="importSession()" data-i18n="up.import">导入 Session</button>
+              <button class="btn btn-danger btn-sm" onclick="deleteSession()" data-i18n="common.delete">删除</button>
             </div>
             <div class="banner" id="session-banner"></div>
           </div>
 
           <div class="card">
-            <h3><span class="ic">▸</span> 当前凭证状态</h3>
-            <div class="desc">最近一次导入的凭证摘要，凭证过期后请重新登录上游并再次导入。</div>
+            <h3><span class="ic">▸</span> <span data-i18n="up.status_title">当前凭证状态</span></h3>
+            <div class="desc" data-i18n="up.status_desc">最近一次导入的凭证摘要，凭证过期后请重新登录上游并再次导入。</div>
             <div class="stats" style="grid-template-columns:1fr 1fr;">
               <div class="stat">
-                <div class="label">状态</div>
+                <div class="label" data-i18n="up.state">状态</div>
                 <div class="value"><span id="up-session">—</span></div>
                 <div class="sub" id="up-session-sub"></div>
               </div>
               <div class="stat">
-                <div class="label">上游地址</div>
+                <div class="label" data-i18n="stat.upstream">上游地址</div>
                 <div class="value" id="up-upstream">—</div>
                 <div class="sub" id="up-upstream-sub"></div>
               </div>
@@ -529,26 +543,34 @@ export const ADMIN_UI = `<!DOCTYPE html>
         <!-- ============ Page: API Keys ============ -->
         <section class="page" id="page-keys">
           <div class="page-head">
-            <h2>API 管理</h2>
-            <p>生成与管理客户端使用的 API Key。</p>
+            <h2 data-i18n="nav.keys">API 管理</h2>
+            <p data-i18n="keys.subtitle">生成与管理客户端使用的 API Key。</p>
           </div>
 
           <div class="card">
-            <h3><span class="ic">▸</span> 管理 API Key</h3>
-            <div class="desc">客户端使用以下 API Key 访问 <span class="mono" id="api-base-desc"></span>。完整 Key 仅在创建时显示一次。</div>
+            <h3><span class="ic">▸</span> <span data-i18n="keys.title">管理 API Key</span></h3>
+            <div class="desc">
+              <span data-i18n="keys.desc1">客户端使用以下 API Key 访问 </span><span class="mono" id="api-base-desc"></span><span data-i18n="keys.desc2">。完整 Key 仅在创建时显示一次。</span>
+            </div>
             <div class="grid2" style="max-width:420px;">
               <div class="form-row" style="margin-bottom:0;">
-                <label class="lbl">Key 名称（可选）</label>
-                <input id="key-name" placeholder="如：Cherry Studio" />
+                <label class="lbl" data-i18n="keys.name_label">Key 名称（可选）</label>
+                <input id="key-name" data-i18n-ph="keys.name_ph" placeholder="如：Cherry Studio" />
               </div>
               <div class="form-row" style="margin-bottom:0; display:flex; align-items:flex-end;">
-                <button class="btn btn-primary" style="width:100%;" onclick="createKey()">生成 Key</button>
+                <button class="btn btn-primary" style="width:100%;" onclick="createKey()" data-i18n="keys.create">生成 Key</button>
               </div>
             </div>
             <div style="margin-top:18px;">
               <table class="table">
-                <thead><tr><th>名称</th><th>Key</th><th>创建时间</th><th>最近使用</th><th style="text-align:right">操作</th></tr></thead>
-                <tbody id="key-tbody"><tr><td colspan="5" class="empty">加载中…</td></tr></tbody>
+                <thead><tr>
+                  <th data-i18n="keys.th_name">名称</th>
+                  <th data-i18n="keys.th_key">Key</th>
+                  <th data-i18n="keys.th_created">创建时间</th>
+                  <th data-i18n="keys.th_used">最近使用</th>
+                  <th style="text-align:right" data-i18n="common.actions">操作</th>
+                </tr></thead>
+                <tbody id="key-tbody"><tr><td colspan="5" class="empty" data-i18n="common.loading">加载中…</td></tr></tbody>
               </table>
             </div>
             <div class="banner" id="keys-banner"></div>
@@ -558,32 +580,34 @@ export const ADMIN_UI = `<!DOCTYPE html>
         <!-- ============ Page: Settings ============ -->
         <section class="page" id="page-settings">
           <div class="page-head">
-            <h2>网页设置</h2>
-            <p>控制台自身账号与安全配置。</p>
+            <h2 data-i18n="nav.settings">网页设置</h2>
+            <p data-i18n="set.subtitle">控制台自身账号与安全配置。</p>
           </div>
 
           <div class="card">
-            <h3><span class="ic">▸</span> 修改管理密码 <span id="pw-src-badge" class="badge gray"></span></h3>
-            <div class="desc">修改后密码将保存于 KV 并立即覆盖当前生效来源；所有已登录的管理会话将失效，需重新登录。</div>
-            <div class="banner warn" id="pw-src-note" style="display:none"></div>
-            <div style="max-width:520px;">
-              <div class="form-row">
-                <label class="lbl">当前密码</label>
-                <input id="pw-cur" type="password" autocomplete="current-password" />
+            <h3><span class="ic">▸</span> <span data-i18n="set.pw_title">密码设置</span></h3>
+            <div class="desc" data-i18n="set.pw_desc">管理控制台的登录密码。修改后所有已登录的管理会话将失效，需重新登录。</div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="set.pw_src_label">当前密码储存位置</div>
+                <div class="setting-value"><span id="pw-src-badge" class="badge gray">—</span></div>
               </div>
-              <div class="form-row">
-                <label class="lbl">新密码（至少 8 位）</label>
-                <input id="pw-new" type="password" autocomplete="new-password" />
-              </div>
-              <div class="form-row">
-                <label class="lbl">确认新密码</label>
-                <input id="pw-new2" type="password" autocomplete="new-password" />
-              </div>
-              <div class="btn-row" style="margin-top:4px;">
-                <button class="btn btn-primary" style="width:auto;" onclick="changePassword()">修改密码</button>
-              </div>
+              <button class="btn btn-primary" style="width:auto;" onclick="openPwModal()" data-i18n="set.pw_change">修改密码</button>
             </div>
-            <div class="banner" id="pw-banner"></div>
+          </div>
+
+          <div class="card">
+            <h3><span class="ic">▸</span> <span data-i18n="set.lang_title">语言设置</span></h3>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="set.lang_label">界面语言</div>
+                <div class="setting-hint" data-i18n="set.lang_hint">手动选择优先于浏览器语言；未选择时自动检测，默认英文。</div>
+              </div>
+              <select id="lang-select" style="width:180px;" onchange="switchLang(this.value)">
+                <option value="zh-CN" data-i18n="set.lang_zh">简体中文</option>
+                <option value="en" data-i18n="set.lang_en">English</option>
+              </select>
+            </div>
           </div>
         </section>
 
@@ -595,12 +619,37 @@ export const ADMIN_UI = `<!DOCTYPE html>
 <!-- Modal: show generated key -->
 <div class="modal-mask" id="key-modal">
   <div class="modal">
-    <h4>API Key 已生成</h4>
-    <div class="note">请立即复制保存，关闭后将无法再次查看完整 Key。</div>
+    <h4 data-i18n="km.title">API Key 已生成</h4>
+    <div class="note" data-i18n="km.note">请立即复制保存，关闭后将无法再次查看完整 Key。</div>
     <div class="key-box" id="key-modal-value"></div>
     <div class="btn-row">
-      <button class="btn btn-primary" style="flex:1;" onclick="copyText(document.getElementById('key-modal-value').textContent, '已复制 API Key')">复制</button>
-      <button class="btn btn-ghost" onclick="closeModal()">关闭</button>
+      <button class="btn btn-primary" style="flex:1;" onclick="copyText(document.getElementById('key-modal-value').textContent, t('msg.copied'))" data-i18n="common.copy">复制</button>
+      <button class="btn btn-ghost" onclick="closeModal()" data-i18n="common.close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: change password -->
+<div class="modal-mask" id="pw-modal">
+  <div class="modal">
+    <h4 data-i18n="pm.title">修改管理密码</h4>
+    <div class="note" data-i18n="pm.note">修改后密码将保存于 KV 并立即生效，所有已登录的管理会话将失效，需使用新密码重新登录。</div>
+    <div class="form-row">
+      <label class="lbl" data-i18n="pm.cur">当前密码</label>
+      <input id="pw-cur" type="password" autocomplete="current-password" />
+    </div>
+    <div class="form-row">
+      <label class="lbl" data-i18n="pm.new">新密码（至少 8 位）</label>
+      <input id="pw-new" type="password" autocomplete="new-password" />
+    </div>
+    <div class="form-row">
+      <label class="lbl" data-i18n="pm.new2">确认新密码</label>
+      <input id="pw-new2" type="password" autocomplete="new-password" />
+    </div>
+    <div class="banner" id="pw-modal-banner"></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-submit-pw" style="flex:1;" onclick="submitPasswordChange()" data-i18n="pm.submit">确认修改</button>
+      <button class="btn btn-ghost" onclick="closePwModal()" data-i18n="common.cancel">取消</button>
     </div>
   </div>
 </div>
@@ -610,15 +659,350 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   function $(id) { return document.getElementById(id); }
 
+  // ---------- i18n ----------
+  var I18N = {
+    'zh-CN': {
+      'app.title': 'Open WebUI 代理控制台',
+      'brand.name': 'Open WebUI 代理控制台',
+      'login.subtitle': '将 Open WebUI 反代为 OpenAI 兼容 API',
+      'login.subtitle_setup': '首次使用，请先设置管理密码',
+      'login.pw_ph': '管理密码',
+      'login.pw1_ph': '设置管理密码（至少 8 位）',
+      'login.pw2_ph': '确认管理密码',
+      'login.btn': '登 录',
+      'login.setup_btn': '设置密码并进入',
+      'login.err_short': '密码长度至少 8 位',
+      'login.err_mismatch': '两次输入的密码不一致',
+      'nav.logout': '退出登录',
+      'nav.label': '导航',
+      'nav.dashboard': '仪表盘',
+      'nav.upstream': '上游服务端',
+      'nav.keys': 'API 管理',
+      'nav.settings': '网页设置',
+      'nav.foot1': '登录后可管理上游凭证、',
+      'nav.foot2': 'API Key 与控制台设置。',
+      'dash.subtitle': '代理服务整体运行状态一览。',
+      'stat.session': 'Session 凭证',
+      'stat.upstream': '上游地址',
+      'stat.keys': 'API Key 数量',
+      'stat.keys_sub': '生成的客户端密钥',
+      'dash.access_title': '客户端接入',
+      'dash.access_desc': '在任何 OpenAI 兼容客户端中使用以下地址与密钥接入本代理。',
+      'dash.chip_title': '客户端接入地址，点击复制',
+      'dash.copy': '复制',
+      'up.subtitle': '导入并管理 Open WebUI 的 Session 凭证。',
+      'up.import_title': '导入 Session',
+      'up.import_desc': '在本地运行 <code>python login.py --base-url https://你的-open-webui 地址</code>，完成浏览器登录后，将终端输出的 <b>session.json 全部 JSON 内容</b> 粘贴到下方并导入。',
+      'up.json_label': 'session.json 内容',
+      'up.test': '校验并测试连通',
+      'up.import': '导入 Session',
+      'up.status_title': '当前凭证状态',
+      'up.status_desc': '最近一次导入的凭证摘要，凭证过期后请重新登录上游并再次导入。',
+      'up.state': '状态',
+      'st.imported': '已导入',
+      'st.unusable': '凭证不可用',
+      'st.not_imported': '未导入',
+      'st.not_imported_hint': '请先导入 session.json',
+      'up.import_ok': '导入成功。',
+      'up.import_summary': ' 凭证摘要：',
+      'up.test_ok': '直连连通（前缀 {prefix}，HTTP {status}）',
+      'up.test_http': '上游返回 HTTP {status}（前缀 {prefix}），凭证可能已过期',
+      'up.test_network': '无法连接上游：{error}',
+      'up.test_404': '所有候选前缀均返回 404，请确认地址指向 Open WebUI',
+      'err.need_setup': '管理员密码尚未设置，请先完成首次设置。',
+      'err.too_many': '登录失败次数过多，请稍后重试。',
+      'err.wrong_password': '密码错误。',
+      'err.not_logged_in': '未登录或会话已过期。',
+      'err.unknown_endpoint': '未知的管理接口。',
+      'err.pw_too_short': '密码长度至少 8 位。',
+      'err.pw_mismatch': '两次输入的密码不一致。',
+      'err.pw_cur_required': '请填写当前密码。',
+      'err.pw_new_required': '请填写新密码。',
+      'err.pw_cur_wrong': '当前密码不正确。',
+      'err.pw_new_short': '新密码长度至少 8 位。',
+      'err.pw_new_same': '新密码不能与当前密码相同。',
+      'err.pw_change_failed': '修改密码失败。',
+      'err.setup_failed': '设置密码失败。',
+      'err.setup_secret_exists': '管理员密码已由部署配置（ADMIN_PASSWORD）提供，无需在网页设置。',
+      'err.already_setup': '管理员密码已设置。',
+      'err.session_empty': '请粘贴 session.json 的 JSON 内容。',
+      'err.session_json_bad': 'JSON 解析失败，请检查粘贴内容。',
+      'err.session_format_bad': '内容格式不正确，应为 JSON 对象。',
+      'err.session_missing_credentials': '缺少 Authorization 与 Cookie（至少需要其一）。',
+      'err.session_bad_base_url': 'base_url 缺失或不是合法地址（需 http/https 开头）。',
+      'err.key_missing': '缺少要删除的 API Key。',
+      'up.del_confirm': '确认删除已导入的 Session？客户端将无法使用代理。',
+      'up.deleted': 'Session 已删除',
+      'keys.subtitle': '生成与管理客户端使用的 API Key。',
+      'keys.title': '管理 API Key',
+      'keys.desc1': '客户端使用以下 API Key 访问 ',
+      'keys.desc2': '。完整 Key 仅在创建时显示一次。',
+      'keys.name_label': 'Key 名称（可选）',
+      'keys.name_ph': '如：Cherry Studio',
+      'keys.create': '生成 Key',
+      'keys.th_name': '名称',
+      'keys.th_key': 'Key',
+      'keys.th_created': '创建时间',
+      'keys.th_used': '最近使用',
+      'keys.never_used': '从未使用',
+      'keys.empty': '暂无 API Key',
+      'keys.del_confirm': '确认删除 Key ',
+      'keys.del_confirm_end': '？',
+      'keys.deleted': 'Key 已删除',
+      'set.subtitle': '控制台自身账号与安全配置。',
+      'set.pw_title': '密码设置',
+      'set.pw_desc': '管理控制台的登录密码。修改后所有已登录的管理会话将失效，需重新登录。',
+      'set.pw_src_label': '当前密码储存位置',
+      'set.src_secret': 'Secret（ADMIN_PASSWORD）',
+      'set.src_kv': 'KV（控制台修改）',
+      'set.src_none': '未设置',
+      'set.pw_change': '修改密码',
+      'set.lang_title': '语言设置',
+      'set.lang_label': '界面语言',
+      'set.lang_hint': '手动选择优先于浏览器语言；未选择时自动检测，默认英文。',
+      'set.lang_zh': '简体中文',
+      'set.lang_en': 'English',
+      'set.lang_saved': '语言偏好已保存',
+      'km.title': 'API Key 已生成',
+      'km.note': '请立即复制保存，关闭后将无法再次查看完整 Key。',
+      'pm.title': '修改管理密码',
+      'pm.note': '修改后密码将保存于 KV 并立即生效，所有已登录的管理会话将失效，需使用新密码重新登录。',
+      'pm.cur': '当前密码',
+      'pm.new': '新密码（至少 8 位）',
+      'pm.new2': '确认新密码',
+      'pm.submit': '确认修改',
+      'pm.confirm_secret': '当前管理员密码来自 Cloudflare Secret（ADMIN_PASSWORD）。\\n\\n在此修改会把生效密码覆盖为 KV 中保存的新密码，之后该 Secret 将不再被使用（除非把 Secret 改成与新密码一致）。\\n如不想覆盖，请前往 Cloudflare Dashboard 更新 Secret。\\n\\n确定要继续吗？',
+      'msg.copied': '已复制',
+      'msg.copy_failed': '复制失败',
+      'msg.processing': ' 处理中…',
+      'msg.session_expired': '登录已过期，请重新登录',
+      'msg.fill_cur': '请填写当前密码',
+      'msg.pw_short': '新密码长度至少 8 位',
+      'msg.pw_same': '新密码不能与当前密码相同',
+      'msg.pw_mismatch': '两次输入的新密码不一致',
+      'msg.pw_changed': '密码已修改，所有旧会话已失效，请使用新密码重新登录',
+      'common.delete': '删除',
+      'common.copy': '复制',
+      'common.close': '关闭',
+      'common.cancel': '取消',
+      'common.loading': '加载中…',
+      'common.actions': '操作'
+    },
+    'en': {
+      'app.title': 'Open WebUI Proxy Console',
+      'brand.name': 'Open WebUI Proxy Console',
+      'login.subtitle': 'Expose Open WebUI as an OpenAI-compatible API',
+      'login.subtitle_setup': 'First run — set an admin password',
+      'login.pw_ph': 'Admin password',
+      'login.pw1_ph': 'Set admin password (min 8 chars)',
+      'login.pw2_ph': 'Confirm admin password',
+      'login.btn': 'Sign in',
+      'login.setup_btn': 'Set password and continue',
+      'login.err_short': 'Password must be at least 8 characters',
+      'login.err_mismatch': 'Passwords do not match',
+      'nav.logout': 'Sign out',
+      'nav.label': 'Navigation',
+      'nav.dashboard': 'Dashboard',
+      'nav.upstream': 'Upstream Server',
+      'nav.keys': 'API Management',
+      'nav.settings': 'Settings',
+      'nav.foot1': 'Manage upstream credentials,',
+      'nav.foot2': 'API keys and console settings after signing in.',
+      'dash.subtitle': 'Overview of the proxy service status.',
+      'stat.session': 'Session credential',
+      'stat.upstream': 'Upstream URL',
+      'stat.keys': 'API keys',
+      'stat.keys_sub': 'Client keys generated',
+      'dash.access_title': 'Client access',
+      'dash.access_desc': 'Use the address and key below in any OpenAI-compatible client.',
+      'dash.chip_title': 'Client base URL, click to copy',
+      'dash.copy': 'Copy',
+      'up.subtitle': 'Import and manage Open WebUI session credentials.',
+      'up.import_title': 'Import Session',
+      'up.import_desc': 'Run <code>python login.py --base-url https://your-open-webui-url</code> locally and finish the browser login, then paste the <b>full JSON content of session.json</b> below and import.',
+      'up.json_label': 'session.json content',
+      'up.test': 'Validate and test',
+      'up.import': 'Import Session',
+      'up.status_title': 'Current credential status',
+      'up.status_desc': 'Summary of the last imported credential. If it expires, sign in upstream again and re-import.',
+      'up.state': 'Status',
+      'st.imported': 'Imported',
+      'st.unusable': 'Credential unusable',
+      'st.not_imported': 'Not imported',
+      'st.not_imported_hint': 'Import session.json first',
+      'up.import_ok': 'Import succeeded. ',
+      'up.import_summary': ' Credential summary: ',
+      'up.test_ok': 'Direct connection OK (prefix {prefix}, HTTP {status})',
+      'up.test_http': 'Upstream returned HTTP {status} (prefix {prefix}); credentials may have expired',
+      'up.test_network': 'Cannot connect to upstream: {error}',
+      'up.test_404': 'All candidate prefixes returned 404; please verify the URL points to Open WebUI',
+      'err.need_setup': 'Admin password is not set. Complete the first-time setup first.',
+      'err.too_many': 'Too many failed attempts. Please try again later.',
+      'err.wrong_password': 'Incorrect password.',
+      'err.not_logged_in': 'Not signed in or session expired.',
+      'err.unknown_endpoint': 'Unknown admin endpoint.',
+      'err.pw_too_short': 'Password must be at least 8 characters.',
+      'err.pw_mismatch': 'Passwords do not match.',
+      'err.pw_cur_required': 'Please enter the current password.',
+      'err.pw_new_required': 'Please enter the new password.',
+      'err.pw_cur_wrong': 'Current password is incorrect.',
+      'err.pw_new_short': 'New password must be at least 8 characters.',
+      'err.pw_new_same': 'New password must differ from the current one.',
+      'err.pw_change_failed': 'Failed to change password.',
+      'err.setup_failed': 'Failed to set password.',
+      'err.setup_secret_exists': 'The admin password is already provided by the deployment config (ADMIN_PASSWORD); no need to set it here.',
+      'err.already_setup': 'Admin password is already set.',
+      'err.session_empty': 'Please paste the JSON content of session.json.',
+      'err.session_json_bad': 'JSON parsing failed. Please check the pasted content.',
+      'err.session_format_bad': 'Invalid content format; expected a JSON object.',
+      'err.session_missing_credentials': 'Missing Authorization and Cookie (at least one is required).',
+      'err.session_bad_base_url': 'base_url is missing or not a valid URL (must start with http/https).',
+      'err.key_missing': 'Missing the API key to delete.',
+      'up.del_confirm': 'Delete the imported session? Clients will no longer be able to use the proxy.',
+      'up.deleted': 'Session deleted',
+      'keys.subtitle': 'Generate and manage client API keys.',
+      'keys.title': 'Manage API Keys',
+      'keys.desc1': 'Clients use these API keys to access ',
+      'keys.desc2': '. The full key is shown only once at creation.',
+      'keys.name_label': 'Key name (optional)',
+      'keys.name_ph': 'e.g. Cherry Studio',
+      'keys.create': 'Generate key',
+      'keys.th_name': 'Name',
+      'keys.th_key': 'Key',
+      'keys.th_created': 'Created',
+      'keys.th_used': 'Last used',
+      'keys.never_used': 'Never used',
+      'keys.empty': 'No API keys yet',
+      'keys.del_confirm': 'Delete key ',
+      'keys.del_confirm_end': '?',
+      'keys.deleted': 'Key deleted',
+      'set.subtitle': 'Console account and security configuration.',
+      'set.pw_title': 'Password',
+      'set.pw_desc': 'Manage the console login password. Changing it signs out all admin sessions.',
+      'set.pw_src_label': 'Current password storage',
+      'set.src_secret': 'Secret (ADMIN_PASSWORD)',
+      'set.src_kv': 'KV (changed in console)',
+      'set.src_none': 'Not set',
+      'set.pw_change': 'Change password',
+      'set.lang_title': 'Language',
+      'set.lang_label': 'Interface language',
+      'set.lang_hint': 'Manual choice overrides browser language; otherwise auto-detected, English fallback.',
+      'set.lang_zh': '简体中文',
+      'set.lang_en': 'English',
+      'set.lang_saved': 'Language preference saved',
+      'km.title': 'API key generated',
+      'km.note': 'Copy and store it now — the full key cannot be viewed again after closing.',
+      'pm.title': 'Change admin password',
+      'pm.note': 'The new password is stored in KV and takes effect immediately; all admin sessions will be signed out.',
+      'pm.cur': 'Current password',
+      'pm.new': 'New password (min 8 chars)',
+      'pm.new2': 'Confirm new password',
+      'pm.submit': 'Confirm change',
+      'pm.confirm_secret': 'The admin password currently comes from the Cloudflare Secret (ADMIN_PASSWORD).\\n\\nChanging it here overrides the effective password with the new one stored in KV; the Secret will no longer be used (unless you set the Secret to the same new value).\\nTo keep using the Secret, update it in the Cloudflare Dashboard instead.\\n\\nContinue?',
+      'msg.copied': 'Copied',
+      'msg.copy_failed': 'Copy failed',
+      'msg.processing': ' Working…',
+      'msg.session_expired': 'Session expired, please sign in again',
+      'msg.fill_cur': 'Please enter the current password',
+      'msg.pw_short': 'New password must be at least 8 characters',
+      'msg.pw_same': 'New password must differ from the current one',
+      'msg.pw_mismatch': 'Passwords do not match',
+      'msg.pw_changed': 'Password changed. All old sessions are signed out — sign in with the new password.',
+      'common.delete': 'Delete',
+      'common.copy': 'Copy',
+      'common.close': 'Close',
+      'common.cancel': 'Cancel',
+      'common.loading': 'Loading…',
+      'common.actions': 'Actions'
+    }
+  };
+
+  var _lang = 'en';
+
+  function t(key) {
+    var d = I18N[_lang] || I18N['en'];
+    if (Object.prototype.hasOwnProperty.call(d, key)) return d[key];
+    if (Object.prototype.hasOwnProperty.call(I18N['en'], key)) return I18N['en'][key];
+    return key;
+  }
+
+  // Translate an API error code; falls back to the raw text when unknown
+  function etext(m) {
+    if (m && Object.prototype.hasOwnProperty.call(I18N[_lang] || I18N['en'], m)) return t(m);
+    if (m && Object.prototype.hasOwnProperty.call(I18N['en'], m)) return I18N['en'][m];
+    return m;
+  }
+
+  // Simple {placeholder} interpolation on a translation key
+  function tfmt(key, params) {
+    var s = t(key);
+    if (params) {
+      for (var p in params) {
+        if (Object.prototype.hasOwnProperty.call(params, p)) s = s.split('{' + p + '}').join(String(params[p]));
+      }
+    }
+    return s;
+  }
+
+  // Compose a localized message from the structured connectivity test result
+  function testDetail(tst) {
+    if (!tst) return '';
+    if (tst.code === 'up.test_network') return tfmt('up.test_network', { error: tst.error || '' });
+    if (tst.code === 'up.test_ok' || tst.code === 'up.test_http') {
+      return tfmt(tst.code, { prefix: tst.prefix || '', status: tst.status == null ? '' : tst.status });
+    }
+    return t(tst.code);
+  }
+
+  // Manual setting > browser language > English fallback
+  function detectLang() {
+    try {
+      var saved = localStorage.getItem('admin_lang');
+      if (saved && I18N[saved]) return saved;
+    } catch (e) {}
+    var langs = (navigator.languages && navigator.languages.length)
+      ? navigator.languages
+      : [navigator.language || 'en'];
+    for (var i = 0; i < langs.length; i++) {
+      var l = String(langs[i] || '').toLowerCase();
+      if (l.indexOf('zh') === 0) return 'zh-CN';
+      if (l.indexOf('en') === 0) return 'en';
+    }
+    return 'en';
+  }
+
+  function applyI18n() {
+    document.documentElement.lang = _lang;
+    document.title = t('app.title');
+    var nodes = document.querySelectorAll('[data-i18n]');
+    for (var i = 0; i < nodes.length; i++) nodes[i].textContent = t(nodes[i].getAttribute('data-i18n'));
+    var htmlNodes = document.querySelectorAll('[data-i18n-html]');
+    for (var j = 0; j < htmlNodes.length; j++) htmlNodes[j].innerHTML = t(htmlNodes[j].getAttribute('data-i18n-html'));
+    var phNodes = document.querySelectorAll('[data-i18n-ph]');
+    for (var k = 0; k < phNodes.length; k++) phNodes[k].setAttribute('placeholder', t(phNodes[k].getAttribute('data-i18n-ph')));
+    var titleNodes = document.querySelectorAll('[data-i18n-title]');
+    for (var m = 0; m < titleNodes.length; m++) titleNodes[m].setAttribute('title', t(titleNodes[m].getAttribute('data-i18n-title')));
+  }
+
+  function switchLang(v) {
+    if (!I18N[v] || v === _lang) return;
+    _lang = v;
+    try { localStorage.setItem('admin_lang', v); } catch (e) {}
+    applyI18n();
+    loadStatus();
+    loadKeys();
+    toast(t('set.lang_saved'), 'ok');
+  }
+
   function toast(msg, type) {
-    var t = document.createElement('div');
-    t.className = 'toast ' + (type || '');
-    t.textContent = msg;
-    $('toasts').appendChild(t);
-    requestAnimationFrame(function () { t.classList.add('show'); });
+    var t2 = document.createElement('div');
+    t2.className = 'toast ' + (type || '');
+    t2.textContent = msg;
+    $('toasts').appendChild(t2);
+    requestAnimationFrame(function () { t2.classList.add('show'); });
     setTimeout(function () {
-      t.classList.remove('show');
-      setTimeout(function () { t.remove(); }, 350);
+      t2.classList.remove('show');
+      setTimeout(function () { t2.remove(); }, 350);
     }, 3200);
   }
 
@@ -630,12 +1014,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
   function clearBanner(id) { var el = $(id); el.className = 'banner'; el.textContent = ''; el.style.display = 'none'; }
 
-  function setLoading(btn, loading, text) {
+  function setLoading(btn, loading) {
     if (!btn) return;
     if (loading) {
       btn.dataset.orig = btn.innerHTML;
       btn.disabled = true;
-      btn.innerHTML = '<span class="spinner"></span> 处理中…';
+      btn.innerHTML = '<span class="spinner"></span>' + t('msg.processing');
     } else {
       btn.disabled = false;
       if (btn.dataset.orig) { btn.innerHTML = btn.dataset.orig; delete btn.dataset.orig; }
@@ -652,11 +1036,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
     var data = {};
     try { data = await res.json(); } catch (e) {}
     if (res.status === 401 && data.needLogin) {
-      toast('登录已过期，请重新登录', 'warn');
+      toast(t('msg.session_expired'), 'warn');
       showLogin();
       throw new Error('not authed');
     }
-    if (!data.ok) throw new Error(data.error || ('请求失败（HTTP ' + res.status + '）'));
+    if (!data.ok) throw new Error(data.error || ('HTTP ' + res.status));
     return data;
   }
 
@@ -664,7 +1048,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   function copyText(text, msg) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(function () {
-        toast(msg || '已复制', 'ok');
+        toast(msg || t('msg.copied'), 'ok');
       }, function () { fallbackCopy(text, msg); });
     } else { fallbackCopy(text, msg); }
   }
@@ -672,7 +1056,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     var ta = document.createElement('textarea');
     ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
     document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); toast(msg || '已复制', 'ok'); } catch (e) { toast('复制失败', 'err'); }
+    try { document.execCommand('copy'); toast(msg || t('msg.copied'), 'ok'); } catch (e) { toast(t('msg.copy_failed'), 'err'); }
     document.body.removeChild(ta);
   }
 
@@ -726,12 +1110,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
       if (needsSetup) {
         $('form-login').style.display = 'none';
         $('form-setup').style.display = 'block';
-        $('login-sub').textContent = '首次使用，请先设置管理密码';
+        $('login-sub').textContent = t('login.subtitle_setup');
       } else {
         showPanel();
       }
     }).catch(function (err) {
-      $('login-msg').textContent = err.message;
+      $('login-msg').textContent = etext(err.message);
       $('login-msg').className = 'hint err';
     });
   });
@@ -741,19 +1125,19 @@ export const ADMIN_UI = `<!DOCTYPE html>
     setLoading(btn, true);
     api('/admin/api/login', { method: 'POST', body: { password: $('pw').value } })
       .then(function () { showPanel(); })
-      .catch(function (err) { $('login-msg').textContent = err.message; $('login-msg').className = 'hint err'; })
+      .catch(function (err) { $('login-msg').textContent = etext(err.message); $('login-msg').className = 'hint err'; })
       .finally(function () { setLoading(btn, false); });
   }
 
   function setup() {
     var btn = $('btn-setup');
     var p1 = $('pw1').value, p2 = $('pw2').value;
-    if (p1.length < 8) { $('login-msg').textContent = '密码长度至少 8 位'; $('login-msg').className = 'hint err'; return; }
-    if (p1 !== p2) { $('login-msg').textContent = '两次输入的密码不一致'; $('login-msg').className = 'hint err'; return; }
+    if (p1.length < 8) { $('login-msg').textContent = t('login.err_short'); $('login-msg').className = 'hint err'; return; }
+    if (p1 !== p2) { $('login-msg').textContent = t('login.err_mismatch'); $('login-msg').className = 'hint err'; return; }
     setLoading(btn, true);
     api('/admin/api/setup', { method: 'POST', body: { password: p1, confirm: p2 } })
       .then(function () { showPanel(); })
-      .catch(function (err) { $('login-msg').textContent = err.message; $('login-msg').className = 'hint err'; })
+      .catch(function (err) { $('login-msg').textContent = etext(err.message); $('login-msg').className = 'hint err'; })
       .finally(function () { setLoading(btn, false); });
   }
 
@@ -770,50 +1154,53 @@ export const ADMIN_UI = `<!DOCTYPE html>
     var src = (s && (s.passwordSource || s.adminPasswordMode)) || 'none';
     _pwSource = src;
     var badgeEl = $('pw-src-badge');
-    var noteEl = $('pw-src-note');
-    if (!badgeEl || !noteEl) return;
+    if (!badgeEl) return;
     if (src === 'secret') {
       badgeEl.className = 'badge warn';
-      badgeEl.textContent = 'Secret（ADMIN_PASSWORD）';
-      noteEl.textContent = '当前密码来自部署配置 ADMIN_PASSWORD。修改后将以新密码为准并保存在 KV（控制台），该 Secret 将不再被使用，除非在 Cloudflare Dashboard 将其改回一致的值。';
-      noteEl.style.display = 'block';
+      badgeEl.textContent = t('set.src_secret');
     } else if (src === 'kv') {
       badgeEl.className = 'badge info';
-      badgeEl.textContent = 'KV（控制台修改）';
-      noteEl.style.display = 'none';
+      badgeEl.textContent = t('set.src_kv');
     } else {
       badgeEl.className = 'badge gray';
-      badgeEl.textContent = '';
-      noteEl.style.display = 'none';
+      badgeEl.textContent = t('set.src_none');
     }
   }
 
-  function changePassword() {
-    var btn = event.target;
+  function openPwModal() {
+    clearBanner('pw-modal-banner');
+    // Secret override warning: shown only after clicking the button, before the modal opens
+    if (_pwSource === 'secret' && !confirm(t('pm.confirm_secret'))) return;
+    $('pw-modal').classList.add('show');
+    setTimeout(function () { $('pw-cur').focus(); }, 60);
+  }
+
+  function closePwModal() {
+    $('pw-modal').classList.remove('show');
+    $('pw-cur').value = '';
+    $('pw-new').value = '';
+    $('pw-new2').value = '';
+    clearBanner('pw-modal-banner');
+  }
+
+  function submitPasswordChange() {
+    var btn = $('btn-submit-pw');
     var cur = $('pw-cur').value;
     var n1 = $('pw-new').value;
     var n2 = $('pw-new2').value;
-    clearBanner('pw-banner');
-    if (!cur) { showBanner('pw-banner', '请填写当前密码', 'err'); return; }
-    if (n1.length < 8) { showBanner('pw-banner', '新密码长度至少 8 位', 'err'); return; }
-    if (n1 === cur) { showBanner('pw-banner', '新密码不能与当前密码相同', 'err'); return; }
-    if (n1 !== n2) { showBanner('pw-banner', '两次输入的新密码不一致', 'err'); return; }
-    if (_pwSource === 'secret' && !confirm(
-      '当前管理员密码来自 Cloudflare Secret（ADMIN_PASSWORD）。\\n\\n' +
-      '在此修改会把生效密码覆盖为 KV 中保存的新密码，之后该 Secret 将不再被使用（除非把 Secret 改成与新密码一致）。\\n' +
-      '如不想覆盖，请前往 Cloudflare Dashboard 更新 Secret。\\n\\n' +
-      '确定要继续吗？'
-    )) return;
+    clearBanner('pw-modal-banner');
+    if (!cur) { showBanner('pw-modal-banner', t('msg.fill_cur'), 'err'); return; }
+    if (n1.length < 8) { showBanner('pw-modal-banner', t('msg.pw_short'), 'err'); return; }
+    if (n1 === cur) { showBanner('pw-modal-banner', t('msg.pw_same'), 'err'); return; }
+    if (n1 !== n2) { showBanner('pw-modal-banner', t('msg.pw_mismatch'), 'err'); return; }
     setLoading(btn, true);
     api('/admin/api/password', { method: 'POST', body: { current_password: cur, new_password: n1 } })
       .then(function () {
-        toast('密码已修改，所有旧会话已失效，请使用新密码重新登录', 'ok');
-        $('pw-cur').value = '';
-        $('pw-new').value = '';
-        $('pw-new2').value = '';
+        toast(t('msg.pw_changed'), 'ok');
+        closePwModal();
         showLogin();
       })
-      .catch(function (err) { showBanner('pw-banner', err.message, 'err'); })
+      .catch(function (err) { showBanner('pw-modal-banner', etext(err.message), 'err'); })
       .finally(function () { setLoading(btn, false); });
   }
 
@@ -824,13 +1211,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   function fillSessionStatus(prefix, s) {
     if (s.session && s.session.imported) {
-      $(prefix + '-session').innerHTML = s.session.usable ? badge('ok', '已导入') : badge('err', '凭证不可用');
+      $(prefix + '-session').innerHTML = s.session.usable ? badge('ok', t('st.imported')) : badge('err', t('st.unusable'));
       $(prefix + '-session-sub').textContent = s.session.summary || '';
       $(prefix + '-upstream').textContent = s.session.base_url || '—';
       $(prefix + '-upstream-sub').textContent = s.session.captured_at ? new Date(s.session.captured_at * 1000).toLocaleString() : '';
     } else {
-      $(prefix + '-session').innerHTML = badge('err', '未导入');
-      $(prefix + '-session-sub').textContent = '请先导入 session.json';
+      $(prefix + '-session').innerHTML = badge('err', t('st.not_imported'));
+      $(prefix + '-session-sub').textContent = t('st.not_imported_hint');
       $(prefix + '-upstream').textContent = '—';
       $(prefix + '-upstream-sub').textContent = '';
     }
@@ -852,10 +1239,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
       $('st-keys').textContent = String(s.apiKeys.count);
       $('nav-key-count').textContent = String(s.apiKeys.count);
 
-      // admin password source badge / overwrite hint
+      // admin password source badge
       updatePwSourceUI(s);
     }).catch(function (err) {
-      toast(err.message, 'err');
+      toast(etext(err.message), 'err');
     });
   }
 
@@ -866,9 +1253,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
     clearBanner('session-banner');
     api('/admin/api/session', { method: 'POST', body: { json: $('session-json').value, test: true, save: false } })
       .then(function (d) {
-        showBanner('session-banner', d.test.detail, d.test.ok ? 'ok' : 'warn');
+        showBanner('session-banner', testDetail(d.test), d.test.ok ? 'ok' : 'warn');
       })
-      .catch(function (err) { showBanner('session-banner', err.message, 'err'); })
+      .catch(function (err) { showBanner('session-banner', etext(err.message), 'err'); })
       .finally(function () { setLoading(btn, false); });
   }
 
@@ -878,19 +1265,19 @@ export const ADMIN_UI = `<!DOCTYPE html>
     clearBanner('session-banner');
     api('/admin/api/session', { method: 'POST', body: { json: $('session-json').value, test: true, save: true } })
       .then(function (d) {
-        var msg = '导入成功。' + (d.test ? ' ' + d.test.detail : '') + ' 凭证摘要：' + d.summary;
+        var msg = t('up.import_ok') + (d.test ? ' ' + testDetail(d.test) : '') + t('up.import_summary') + d.summary;
         showBanner('session-banner', msg, 'ok');
         loadStatus();
       })
-      .catch(function (err) { showBanner('session-banner', err.message, 'err'); })
+      .catch(function (err) { showBanner('session-banner', etext(err.message), 'err'); })
       .finally(function () { setLoading(btn, false); });
   }
 
   function deleteSession() {
-    if (!confirm('确认删除已导入的 Session？客户端将无法使用代理。')) return;
+    if (!confirm(t('up.del_confirm'))) return;
     api('/admin/api/session', { method: 'DELETE' })
-      .then(function () { toast('Session 已删除', 'ok'); loadStatus(); clearBanner('session-banner'); })
-      .catch(function (err) { toast(err.message, 'err'); });
+      .then(function () { toast(t('up.deleted'), 'ok'); loadStatus(); clearBanner('session-banner'); })
+      .catch(function (err) { toast(etext(err.message), 'err'); });
   }
 
   // ---------- api keys ----------
@@ -906,7 +1293,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
         loadStatus();
         loadKeys();
       })
-      .catch(function (err) { showBanner('keys-banner', err.message, 'err'); })
+      .catch(function (err) { showBanner('keys-banner', etext(err.message), 'err'); })
       .finally(function () { setLoading(btn, false); });
   }
 
@@ -916,28 +1303,28 @@ export const ADMIN_UI = `<!DOCTYPE html>
     api('/admin/api/keys').then(function (d) {
       var tbody = $('key-tbody');
       if (!d.keys || !d.keys.length) {
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无 API Key</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">' + t('keys.empty') + '</td></tr>';
         return;
       }
       tbody.innerHTML = d.keys.map(function (k) {
         var created = new Date(k.created_at * 1000).toLocaleString();
-        var used = k.last_used ? new Date(k.last_used * 1000).toLocaleString() : '从未使用';
+        var used = k.last_used ? new Date(k.last_used * 1000).toLocaleString() : t('keys.never_used');
         return '<tr>' +
           '<td>' + esc(k.name) + '</td>' +
           '<td class="mono">' + esc(k.masked) + '</td>' +
           '<td>' + created + '</td>' +
           '<td>' + used + '</td>' +
-          '<td style="text-align:right"><button class="btn btn-danger btn-sm" onclick="deleteKey(\\'' + k.key + '\\',\\'' + esc(k.masked) + '\\')">删除</button></td>' +
+          '<td style="text-align:right"><button class="btn btn-danger btn-sm" onclick="deleteKey(\\'' + k.key + '\\',\\'' + esc(k.masked) + '\\')">' + t('common.delete') + '</button></td>' +
           '</tr>';
       }).join('');
-    }).catch(function (err) { toast(err.message, 'err'); });
+    }).catch(function (err) { toast(etext(err.message), 'err'); });
   }
 
   function deleteKey(fullKey, masked) {
-    if (!confirm('确认删除 Key ' + masked + ' ？')) return;
+    if (!confirm(t('keys.del_confirm') + masked + t('keys.del_confirm_end'))) return;
     api('/admin/api/keys', { method: 'DELETE', body: { key: fullKey } })
-      .then(function () { toast('Key 已删除', 'ok'); loadKeys(); loadStatus(); })
-      .catch(function (err) { toast(err.message, 'err'); });
+      .then(function () { toast(t('keys.deleted'), 'ok'); loadKeys(); loadStatus(); })
+      .catch(function (err) { toast(etext(err.message), 'err'); });
   }
 
   function esc(s) {
@@ -946,9 +1333,17 @@ export const ADMIN_UI = `<!DOCTYPE html>
     return div.innerHTML;
   }
 
-  // close modal on mask click
+  // init language before first paint of dynamic content
+  _lang = detectLang();
+  applyI18n();
+  (function () { var sel = $('lang-select'); if (sel) sel.value = _lang; })();
+
+  // close modals on mask click / Escape
   $('key-modal').addEventListener('click', function (e) { if (e.target === this) closeModal(); });
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeModal(); });
+  $('pw-modal').addEventListener('click', function (e) { if (e.target === this) closePwModal(); });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') { closeModal(); closePwModal(); }
+  });
 </script>
 </body>
 </html>`;
