@@ -3,7 +3,7 @@
 将「仅支持浏览器登录的 Open WebUI」反代为 **OpenAI 兼容 API** 的 Cloudflare Worker 版本，采用双端架构适配免费层资源限制：
 
 - **本地认证获取端**（`local/`，Python + Playwright）：浏览器登录捕获凭证 → 终端输出 `session.json`。
-- **Worker 端**（`worker/`，TypeScript）：对外提供 `/v1/*` OpenAI 兼容接口 + 中文网页管理后台；已配置 Cloudflare API Key 时经 **AI Gateway** 转发（获得响应缓存、限流、日志统计），未配置时直连上游。
+- **Worker 端**（`worker/`，TypeScript）：对外提供 `/v1/*` OpenAI 兼容接口 + 中文网页管理后台，直接连接上游 Open WebUI。
 
 > 本项目为 [open-webui-to-openai-api](https://github.com/Bosco1262/open-webui-to-openai-api) 的 Cloudflare Worker 迁移版，代理行为与原项目对齐（前缀探测回退、模型列表规范化、SSE 流式、OpenAI 风格错误体）。
 
@@ -18,8 +18,6 @@
 └─────────────┘                    └──────────────┬────────────────┘
 OpenAI 客户端 ──▶ Bearer sk-xxx ──▶  /v1/*        │
                                                   ▼
-                                   AI Gateway（已配置）或直连
-                                                  ▼
                                             Open WebUI 上游
 ```
 
@@ -32,7 +30,7 @@ OpenAI 客户端 ──▶ Bearer sk-xxx ──▶  /v1/*        │
 │   │   ├── types.ts                 # 共享类型
 │   │   ├── kv.ts                    # KV 数据层（内存缓存）
 │   │   ├── auth.ts                  # 管理员/客户端鉴权
-│   │   ├── ai-gateway.ts            # AI Gateway 注册与路由
+│   │   ├── session.ts               # 上游凭证请求头
 │   │   ├── proxy.ts                 # /v1/* OpenAI 兼容代理
 │   │   ├── admin.ts                 # 管理 REST API
 │   │   └── ui.ts                    # 管理界面（内嵌单页）
@@ -120,14 +118,8 @@ npx wrangler secret put ADMIN_PASSWORD
 
 1. **本地获取凭证**：按 `local/README.md` 运行 `python login.py --base-url <Open WebUI 地址>`，完成浏览器登录，复制终端输出的 JSON。
 2. **导入 Session**：打开 `/admin` → **导入 Session** 卡片 → 粘贴 JSON → 点「校验并测试连通」→「导入 Session」。
-3. **（可选）接入 AI Gateway**：
-   - 打开 **Cloudflare / AI Gateway** 卡片；
-   - 填写 Cloudflare API Token（需 `AI Gateway - Edit` 权限）与 Account ID；
-   - 点「一键接入 AI Gateway」：Worker 会自动创建 Gateway（Gateway ID 留空时）→ 注册 Custom Provider（指向你导入的 Open WebUI 地址）→ 经网关连通测试；
-   - 接入后代理请求走 AI Gateway（可在缓存 TTL 开启非流式响应缓存），状态总览显示转发地址。
-   - 不接入则直接连接上游。
-4. **生成 API Key**：在 **管理 API Key** 卡片生成 `sk-` 开头的密钥（完整 Key 仅创建时显示一次）。
-5. **客户端接入**：
+3. **生成 API Key**：在 **管理 API Key** 卡片生成 `sk-` 开头的密钥（完整 Key 仅创建时显示一次）。
+4. **客户端接入**：
 
 ```
 Base URL:  https://<你的worker域名>/v1
@@ -167,8 +159,6 @@ for chunk in resp:
 | GET             | `/admin/api/status`                     | 管理会话 | 状态总览                           |
 | POST            | `/admin/api/login` / `setup` / `logout` | —        | 管理登录                           |
 | POST            | `/admin/api/session`                    | 管理会话 | 导入 Session（支持 `test`/`save`） |
-| POST            | `/admin/api/cloudflare`                 | 管理会话 | 保存 Cloudflare 配置               |
-| POST            | `/admin/api/ai-gateway/setup`           | 管理会话 | 一键接入 AI Gateway                |
 | GET/POST/DELETE | `/admin/api/keys`                       | 管理会话 | API Key 管理                       |
 | GET             | `/v1/models`                            | API Key  | 模型列表（规范化）                 |
 | POST            | `/v1/chat/completions`                  | API Key  | 对话补全（含 SSE 流式）            |
@@ -183,12 +173,11 @@ for chunk in resp:
 | -------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `ADMIN_PASSWORD`     | `wrangler secret put` / Dashboard Variables | 管理密码（可选，未设则网页首次访问设置）                                                 |
 | `SESSION_SECRET`     | `wrangler secret put`                       | 会话签名密钥（可选，未设则自动派生存 KV）                                                |
-| KV Namespace         | `wrangler.jsonc`（自动创建）                | 存储 session / 配置 / API Key / 管理密码；绑定省略 `id` 即自动资源供应，首次部署自动创建 |
-| Cloudflare API Token | 管理界面                                    | AI Gateway 注册与转发（需 `AI Gateway - Edit`）                                          |
+| KV Namespace         | `wrangler.jsonc`（自动创建）                | 存储 session / API Key / 管理密码；绑定省略 `id` 即自动资源供应，首次部署自动创建 |
 
 ## 免费层资源适配
 
-- 存储仅使用 **Workers KV**（100k 读/天、1k 写/天）：session 与 Cloudflare 配置在 Worker 实例内缓存 60 秒；代理路径每次请求仅 1 次 KV 读（API Key 校验）。
+- 存储仅使用 **Workers KV**（100k 读/天、1k 写/天）：session 在 Worker 实例内缓存 60 秒；代理路径每次请求仅 1 次 KV 读（API Key 校验）。
 - API Key 校验为 O(1)：Key 明文即 KV 键名，无需遍历。
 - `last_used` 更新节流（10 分钟/Key）并通过 `ctx.waitUntil` 异步写入。
 - SSE 流式通过 `response.body` 直通，CPU 消耗极低。
@@ -197,5 +186,4 @@ for chunk in resp:
 
 - 管理界面与 `/admin/api/*` 全部要求登录会话，请务必设置强密码。
 - 客户端 API Key 请妥善保管；完整 Key 仅在生成时显示一次。
-- 导入的 Open WebUI 凭证与 Cloudflare API Token 仅存于 KV，界面只展示脱敏摘要。
-- 如无需 AI Gateway，切勿将 Cloudflare API Token 填入管理界面。
+- 导入的 Open WebUI 凭证仅存于 KV，界面只展示脱敏摘要。

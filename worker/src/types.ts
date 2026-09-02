@@ -3,7 +3,6 @@
  *
  * Storage layout in the KV namespace:
  *   - "session"                    -> StoredSession (imported from the local login tool)
- *   - "config:cloudflare"          -> CloudflareConfig (AI Gateway / CF API settings)
  *   - "apikey:{key}"               -> ApiKeyMeta (key itself is the KV key, O(1) lookup)
  *   - "admin:password_hash"        -> { salt, hash } (PBKDF2 via WebCrypto)
  *   - "admin:session_secret"       -> auto-derived HMAC secret for admin cookies
@@ -29,21 +28,6 @@ export interface StoredSession {
   captured_at: number;
   /** Upstream root URL, e.g. "https://chat.example.com". */
   base_url: string;
-}
-
-/** AI Gateway / Cloudflare API settings managed from the admin UI. */
-export interface CloudflareConfig {
-  /** Cloudflare API token with "AI Gateway - Edit" permission. */
-  api_token: string;
-  account_id: string;
-  /** Leave empty to auto-create on one-click setup. */
-  gateway_id: string;
-  /** Custom provider slug; the gateway route is "custom-{slug}". */
-  provider_slug: string;
-  /** cf-aig-cache-ttl in seconds for non-streaming requests (0 = disabled). */
-  cache_ttl: number;
-  /** true = route through AI Gateway, false = direct upstream. */
-  enabled: boolean;
 }
 
 /** Metadata for a generated client API key (KV key: "apikey:{key}"). */

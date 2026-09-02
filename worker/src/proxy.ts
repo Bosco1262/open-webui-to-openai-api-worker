@@ -8,14 +8,12 @@
  *   - OpenAI-style error bodies
  *   - upstream 401/403 -> clear "re-import session" error
  *
- * Two upstream modes:
- *   - AI Gateway mode:   https://gateway.ai.cloudflare.com/v1/{account}/{gateway}/custom-{slug}/{path}
- *   - Direct mode:       {session.base_url}/{path}
+ * Upstream: direct connection to {session.base_url}/{path}.
  */
 
-import type { CloudflareConfig, Env, StoredSession } from "./types";
-import { buildGatewayUrl, gatewayAuthHeader, sessionHeaders } from "./ai-gateway";
-import { getCloudflareConfig, getSession } from "./kv";
+import type { Env, StoredSession } from "./types";
+import { sessionHeaders } from "./session";
+import { getSession } from "./kv";
 import { verifyClientApiKey } from "./auth";
 
 /** Upstream prefixes in probe priority order (Open WebUI >= 0.6 vs legacy). */
@@ -143,12 +141,7 @@ function filterResponseHeaders(src: Headers): Headers {
 }
 
 /** Build the request headers for the upstream: client headers + session credentials. */
-function buildUpstreamHeaders(
-  request: Request,
-  session: StoredSession,
-  config: CloudflareConfig | null,
-  usingGateway: boolean,
-): Headers {
+function buildUpstreamHeaders(request: Request, session: StoredSession): Headers {
   const headers = new Headers();
   for (const [key, value] of request.headers.entries()) {
     const lk = key.toLowerCase();
@@ -159,21 +152,7 @@ function buildUpstreamHeaders(
   for (const [key, value] of Object.entries(sessionHeaders(session))) {
     headers.set(key, value);
   }
-  if (usingGateway && config) {
-    for (const [key, value] of Object.entries(gatewayAuthHeader(config))) {
-      headers.set(key, value);
-    }
-  }
   return headers;
-}
-
-function getUpstreamBase(
-  config: CloudflareConfig | null,
-  session: StoredSession,
-  usingGateway: boolean,
-): string {
-  if (usingGateway && config) return buildGatewayUrl(config);
-  return session.base_url;
 }
 
 // --------------------------------------------------------------------------- //
@@ -183,30 +162,24 @@ function getUpstreamBase(
 let cachedPrefixKey = "";
 let cachedPrefix = PREFIX_CANDIDATES[0];
 
-async function detectPrefix(
-  request: Request,
-  session: StoredSession,
-  config: CloudflareConfig | null,
-  usingGateway: boolean,
-): Promise<string> {
-  const base = getUpstreamBase(config, session, usingGateway);
-  const cacheKey = `${usingGateway ? "gw:" : "direct:"}${base}`;
-  if (cachedPrefixKey === cacheKey) return cachedPrefix;
+async function detectPrefix(request: Request, session: StoredSession): Promise<string> {
+  const base = session.base_url;
+  if (cachedPrefixKey === base) return cachedPrefix;
 
   for (const prefix of PREFIX_CANDIDATES) {
     const resp = await fetch(`${base}${prefix}/models`, {
       method: "GET",
-      headers: buildUpstreamHeaders(request, session, config, usingGateway),
+      headers: buildUpstreamHeaders(request, session),
     });
     await resp.text().catch(() => {});
     if (resp.status === 404) continue; // route does not exist, try the next prefix
     cachedPrefix = prefix;
-    cachedPrefixKey = cacheKey;
+    cachedPrefixKey = base;
     return prefix;
   }
   // All candidates 404: fall back to the first so the caller gets a real error.
   cachedPrefix = PREFIX_CANDIDATES[0];
-  cachedPrefixKey = cacheKey;
+  cachedPrefixKey = base;
   return cachedPrefix;
 }
 
@@ -214,18 +187,10 @@ async function detectPrefix(
 // Route handlers
 // --------------------------------------------------------------------------- //
 
-async function handleModels(
-  request: Request,
-  session: StoredSession,
-  config: CloudflareConfig | null,
-  usingGateway: boolean,
-): Promise<Response> {
-  const prefix = await detectPrefix(request, session, config, usingGateway);
-  const base = getUpstreamBase(config, session, usingGateway);
-  const headers = buildUpstreamHeaders(request, session, config, usingGateway);
-  if (usingGateway && config && (config.cache_ttl ?? 0) > 0) {
-    headers.set("cf-aig-cache-ttl", String(config.cache_ttl));
-  }
+async function handleModels(request: Request, session: StoredSession): Promise<Response> {
+  const prefix = await detectPrefix(request, session);
+  const base = session.base_url;
+  const headers = buildUpstreamHeaders(request, session);
 
   let resp: Response;
   try {
@@ -265,12 +230,7 @@ async function handleModels(
   return Response.json({ object: "list", data: models });
 }
 
-async function handleChat(
-  request: Request,
-  session: StoredSession,
-  config: CloudflareConfig | null,
-  usingGateway: boolean,
-): Promise<Response> {
+async function handleChat(request: Request, session: StoredSession): Promise<Response> {
   let payload: Record<string, unknown>;
   try {
     payload = (await request.json()) as Record<string, unknown>;
@@ -288,12 +248,9 @@ async function handleChat(
   }
 
   const isStream = Boolean(payload.stream);
-  const prefix = await detectPrefix(request, session, config, usingGateway);
-  const base = getUpstreamBase(config, session, usingGateway);
-  const headers = buildUpstreamHeaders(request, session, config, usingGateway);
-  if (usingGateway && config && (config.cache_ttl ?? 0) > 0 && !isStream) {
-    headers.set("cf-aig-cache-ttl", String(config.cache_ttl));
-  }
+  const prefix = await detectPrefix(request, session);
+  const base = session.base_url;
+  const headers = buildUpstreamHeaders(request, session);
 
   let resp: Response;
   try {
@@ -349,12 +306,7 @@ async function handleChat(
   return new Response(resp.body, { status: resp.status, headers: headersOut });
 }
 
-async function handleEmbeddings(
-  request: Request,
-  session: StoredSession,
-  config: CloudflareConfig | null,
-  usingGateway: boolean,
-): Promise<Response> {
+async function handleEmbeddings(request: Request, session: StoredSession): Promise<Response> {
   let payload: Record<string, unknown>;
   try {
     payload = (await request.json()) as Record<string, unknown>;
@@ -365,12 +317,9 @@ async function handleEmbeddings(
     return openaiError("缺少必填字段：model / input。", 400, { code: "missing_required_field" });
   }
 
-  const prefix = await detectPrefix(request, session, config, usingGateway);
-  const base = getUpstreamBase(config, session, usingGateway);
-  const headers = buildUpstreamHeaders(request, session, config, usingGateway);
-  if (usingGateway && config && (config.cache_ttl ?? 0) > 0) {
-    headers.set("cf-aig-cache-ttl", String(config.cache_ttl));
-  }
+  const prefix = await detectPrefix(request, session);
+  const base = session.base_url;
+  const headers = buildUpstreamHeaders(request, session);
 
   let resp: Response;
   try {
@@ -404,22 +353,17 @@ async function handleEmbeddings(
   return new Response(resp.body, { status: resp.status, headers: filterResponseHeaders(resp.headers) });
 }
 
-async function handlePassthrough(
-  request: Request,
-  session: StoredSession,
-  config: CloudflareConfig | null,
-  usingGateway: boolean,
-): Promise<Response> {
+async function handlePassthrough(request: Request, session: StoredSession): Promise<Response> {
   const url = new URL(request.url);
   const subpath = url.pathname.slice("/v1".length);
   if (!subpath.replace(/^\//, "")) {
     return openaiError("请在路径中指定要转发的上游接口。", 404, { code: "not_found" });
   }
 
-  const prefix = await detectPrefix(request, session, config, usingGateway);
-  const base = getUpstreamBase(config, session, usingGateway);
+  const prefix = await detectPrefix(request, session);
+  const base = session.base_url;
   const target = `${base}${prefix}${subpath}${url.search}`;
-  const headers = buildUpstreamHeaders(request, session, config, usingGateway);
+  const headers = buildUpstreamHeaders(request, session);
   const body = await request.text();
 
   let resp: Response;
@@ -471,23 +415,20 @@ export async function handleV1Request(
     });
   }
 
-  const config = await getCloudflareConfig(env);
-  const usingGateway = Boolean(config && config.enabled && config.gateway_id);
-
   const url = new URL(request.url);
   const subpath = url.pathname.slice("/v1".length) || "/";
 
   try {
     if (subpath === "/models" || subpath === "/models/") {
-      return await handleModels(request, session, config, usingGateway);
+      return await handleModels(request, session);
     }
     if (subpath === "/chat/completions" || subpath === "/chat/completions/") {
-      return await handleChat(request, session, config, usingGateway);
+      return await handleChat(request, session);
     }
     if (subpath === "/embeddings" || subpath === "/embeddings/") {
-      return await handleEmbeddings(request, session, config, usingGateway);
+      return await handleEmbeddings(request, session);
     }
-    return await handlePassthrough(request, session, config, usingGateway);
+    return await handlePassthrough(request, session);
   } catch (err) {
     return openaiError(`代理请求失败：${String(err)}`, 502, {
       type: "server_error",

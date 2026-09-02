@@ -3,21 +3,14 @@
  *
  * Everything the Worker persists lives in the single KV namespace. Reads on
  * the hot proxy path are minimized (one API-key lookup per request) and the
- * session / Cloudflare config are cached in the instance for 60s so management
- * writes don't force repeated KV reads.
+ * session is cached in the instance for 60s so management writes don't force
+ * repeated KV reads.
  */
 
-import type {
-  ApiKeyMeta,
-  CloudflareConfig,
-  Env,
-  PasswordHash,
-  StoredSession,
-} from "./types";
+import type { ApiKeyMeta, Env, PasswordHash, StoredSession } from "./types";
 
 /** KV key constants. */
 const K_SESSION = "session";
-const K_CLOUDFLARE = "config:cloudflare";
 const K_API_KEY_PREFIX = "apikey:";
 const K_PASSWORD_HASH = "admin:password_hash";
 const K_SESSION_SECRET = "admin:session_secret";
@@ -100,29 +93,6 @@ export async function setSession(env: Env, session: StoredSession): Promise<void
 export async function deleteSession(env: Env): Promise<void> {
   await env.KV.delete(K_SESSION);
   cacheDelete(K_SESSION);
-}
-
-// --------------------------------------------------------------------------- //
-// Cloudflare / AI Gateway config
-// --------------------------------------------------------------------------- //
-
-export async function getCloudflareConfig(env: Env): Promise<CloudflareConfig | null> {
-  const cached = cacheGet<CloudflareConfig>(K_CLOUDFLARE);
-  if (cached) return cached;
-  const raw = await env.KV.get<CloudflareConfig>(K_CLOUDFLARE, "json");
-  if (!raw) return null;
-  cacheSet(K_CLOUDFLARE, raw);
-  return raw;
-}
-
-export async function setCloudflareConfig(env: Env, config: CloudflareConfig): Promise<void> {
-  await env.KV.put(K_CLOUDFLARE, JSON.stringify(config));
-  cacheSet(K_CLOUDFLARE, config);
-}
-
-export async function deleteCloudflareConfig(env: Env): Promise<void> {
-  await env.KV.delete(K_CLOUDFLARE);
-  cacheDelete(K_CLOUDFLARE);
 }
 
 // --------------------------------------------------------------------------- //

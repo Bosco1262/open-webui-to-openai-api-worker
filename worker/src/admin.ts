@@ -4,7 +4,7 @@
  * All routes (except login/setup) require a valid admin session cookie.
  */
 
-import type { ApiKeyMeta, CloudflareConfig, Env, StoredSession } from "./types";
+import type { ApiKeyMeta, Env, StoredSession } from "./types";
 import {
   adminHasPassword,
   adminSetupPassword,
@@ -14,29 +14,19 @@ import {
   isAdminAuthed,
   setAdminCookie,
 } from "./auth";
-import {
-  buildGatewayUrl,
-  ensureGateway,
-  sessionHeaders,
-  testViaGateway,
-  upsertCustomProvider,
-} from "./ai-gateway";
+import { sessionHeaders } from "./session";
 import {
   bytesToBase64Url,
   deleteApiKey,
-  deleteCloudflareConfig,
   deleteSession,
-  getCloudflareConfig,
   getSession,
   listApiKeys,
   putApiKey,
   randomBytes,
-  setCloudflareConfig,
   setSession,
 } from "./kv";
 
 const PREFIX_CANDIDATES = ["/api/v1", "/api"];
-const DEFAULT_PROVIDER_SLUG = "open-webui";
 
 interface JsonResult {
   ok: boolean;
@@ -83,18 +73,6 @@ function describeSession(s: StoredSession): string {
   return parts.join(", ") || "<empty>";
 }
 
-function normalizeConfig(raw: CloudflareConfig | null): CloudflareConfig | null {
-  if (!raw) return null;
-  return {
-    api_token: raw.api_token ?? "",
-    account_id: raw.account_id ?? "",
-    gateway_id: raw.gateway_id ?? "",
-    provider_slug: raw.provider_slug || DEFAULT_PROVIDER_SLUG,
-    cache_ttl: Number(raw.cache_ttl ?? 0),
-    enabled: Boolean(raw.enabled),
-  };
-}
-
 function generateApiKey(): string {
   return `sk-${bytesToBase64Url(randomBytes(36))}`;
 }
@@ -105,14 +83,8 @@ function generateApiKey(): string {
 
 async function handleStatus(env: Env, request: Request): Promise<Response> {
   const session = await getSession(env);
-  const config = normalizeConfig(await getCloudflareConfig(env));
   const keys = await listApiKeys(env);
   const hasSecret = Boolean(env.ADMIN_PASSWORD);
-
-  let gatewayUrl: string | null = null;
-  if (config && config.enabled && config.gateway_id) {
-    gatewayUrl = buildGatewayUrl(config);
-  }
 
   const origin = new URL(request.url).origin;
   const hasKvPassword = !hasSecret && (await adminHasPassword(env));
@@ -128,16 +100,6 @@ async function handleStatus(env: Env, request: Request): Promise<Response> {
           usable: sessionIsUsable(session),
         }
       : { imported: false },
-    cloudflare: config
-      ? {
-          configured: Boolean(config.api_token && config.account_id),
-          enabled: config.enabled,
-          gateway_id: config.gateway_id,
-          provider_slug: config.provider_slug,
-          cache_ttl: config.cache_ttl,
-        }
-      : null,
-    gatewayUrl,
     apiKeys: { count: keys.length },
     baseUrl: `${origin}/v1`,
   });
@@ -221,30 +183,24 @@ async function handleImportSession(env: Env, request: Request): Promise<Response
 
   let test: { ok: boolean; detail: string } | null = null;
   if (shouldTest) {
-    const config = normalizeConfig(await getCloudflareConfig(env));
-    if (config && config.enabled && config.gateway_id) {
-      const r = await testViaGateway(config, session, PREFIX_CANDIDATES);
-      test = { ok: r.ok, detail: r.ok ? `通过 AI Gateway 连通（前缀 ${r.prefix}，HTTP ${r.status}）` : `AI Gateway 连通失败（HTTP ${r.status}${r.detail ? `，${r.detail}` : ""}）` };
-    } else {
-      // Direct connectivity test
-      for (const prefix of PREFIX_CANDIDATES) {
-        try {
-          const resp = await fetch(`${session.base_url}${prefix}/models`, {
-            headers: sessionHeaders(session),
-          });
-          await resp.text().catch(() => {});
-          if (resp.status === 404) continue;
-          test = resp.ok
-            ? { ok: true, detail: `直连连通（前缀 ${prefix}，HTTP ${resp.status}）` }
-            : { ok: false, detail: `上游返回 HTTP ${resp.status}（前缀 ${prefix}），凭证可能已过期` };
-          break;
-        } catch (err) {
-          test = { ok: false, detail: `无法连接上游：${String(err)}` };
-          break;
-        }
+    // Direct connectivity test
+    for (const prefix of PREFIX_CANDIDATES) {
+      try {
+        const resp = await fetch(`${session.base_url}${prefix}/models`, {
+          headers: sessionHeaders(session),
+        });
+        await resp.text().catch(() => {});
+        if (resp.status === 404) continue;
+        test = resp.ok
+          ? { ok: true, detail: `直连连通（前缀 ${prefix}，HTTP ${resp.status}）` }
+          : { ok: false, detail: `上游返回 HTTP ${resp.status}（前缀 ${prefix}），凭证可能已过期` };
+        break;
+      } catch (err) {
+        test = { ok: false, detail: `无法连接上游：${String(err)}` };
+        break;
       }
-      if (!test) test = { ok: false, detail: "所有候选前缀均返回 404，请确认地址指向 Open WebUI" };
     }
+    if (!test) test = { ok: false, detail: "所有候选前缀均返回 404，请确认地址指向 Open WebUI" };
   }
 
   if (shouldSave) {
@@ -257,72 +213,6 @@ async function handleImportSession(env: Env, request: Request): Promise<Response
 async function handleDeleteSession(env: Env): Promise<Response> {
   await deleteSession(env);
   return json({ ok: true });
-}
-
-async function handleSaveCloudflare(env: Env, request: Request): Promise<Response> {
-  const body = await readBody(request);
-  const prev = normalizeConfig(await getCloudflareConfig(env));
-  const config: CloudflareConfig = {
-    api_token: typeof body.api_token === "string" ? body.api_token.trim() : (prev?.api_token ?? ""),
-    account_id: typeof body.account_id === "string" ? body.account_id.trim() : (prev?.account_id ?? ""),
-    gateway_id: typeof body.gateway_id === "string" ? body.gateway_id.trim() : (prev?.gateway_id ?? ""),
-    provider_slug: typeof body.provider_slug === "string" && body.provider_slug.trim()
-      ? body.provider_slug.trim()
-      : (prev?.provider_slug || DEFAULT_PROVIDER_SLUG),
-    cache_ttl: Number(body.cache_ttl ?? prev?.cache_ttl ?? 0),
-    enabled: body.enabled === undefined ? (prev?.enabled ?? false) : body.enabled === true,
-  };
-  if (config.cache_ttl < 0) config.cache_ttl = 0;
-  if (config.enabled && (!config.api_token || !config.account_id)) {
-    return fail("启用 AI Gateway 前请先填写 Cloudflare API Token 与 Account ID。");
-  }
-  await setCloudflareConfig(env, config);
-  return json({ ok: true, config: normalizeConfig(config) });
-}
-
-async function handleAiGatewaySetup(env: Env): Promise<Response> {
-  const config = normalizeConfig(await getCloudflareConfig(env));
-  if (!config || !config.api_token || !config.account_id) {
-    return fail("请先保存 Cloudflare API Token 与 Account ID。");
-  }
-  const session = await getSession(env);
-  if (!session || !session.base_url) {
-    return fail("请先导入 session.json（需要其中的 base_url 作为上游地址）。");
-  }
-
-  // 1. ensure gateway
-  const gatewayId = await ensureGateway(config);
-  config.gateway_id = gatewayId;
-
-  // 2. register/update custom provider
-  const { gatewayUrl } = await upsertCustomProvider(config, session.base_url);
-
-  // 3. persist the gateway id
-  await setCloudflareConfig(env, { ...config, enabled: true });
-
-  // 4. connectivity test through the gateway
-  const r = await testViaGateway(config, session, PREFIX_CANDIDATES);
-  if (!r.ok) {
-    return json({
-      ok: true,
-      warning: true,
-      message: `Custom Provider 已注册，但经网关连通测试未通过（HTTP ${r.status}${r.detail ? `，${r.detail}` : ""}）。请在导入新的 Session 后重试。`,
-      gatewayUrl,
-    });
-  }
-  return json({
-    ok: true,
-    message: `AI Gateway 接入成功（前缀 ${r.prefix}，HTTP ${r.status}）。`,
-    gatewayUrl,
-  });
-}
-
-async function handleAiGatewayDisconnect(env: Env): Promise<Response> {
-  const config = normalizeConfig(await getCloudflareConfig(env));
-  if (config) {
-    await setCloudflareConfig(env, { ...config, enabled: false });
-  }
-  return json({ ok: true, message: "已切换为直连上游模式。" });
 }
 
 async function handleListKeys(env: Env): Promise<Response> {
@@ -362,11 +252,6 @@ async function handleDeleteKey(env: Env, request: Request): Promise<Response> {
   return json({ ok: true });
 }
 
-async function handleDeleteCloudflare(env: Env): Promise<Response> {
-  await deleteCloudflareConfig(env);
-  return json({ ok: true });
-}
-
 // --------------------------------------------------------------------------- //
 // Router
 // --------------------------------------------------------------------------- //
@@ -395,14 +280,6 @@ export async function handleAdminApiRequest(
       return handleImportSession(env, request);
     case "DELETE /admin/api/session":
       return handleDeleteSession(env);
-    case "POST /admin/api/cloudflare":
-      return handleSaveCloudflare(env, request);
-    case "DELETE /admin/api/cloudflare":
-      return handleDeleteCloudflare(env);
-    case "POST /admin/api/ai-gateway/setup":
-      return handleAiGatewaySetup(env);
-    case "POST /admin/api/ai-gateway/disconnect":
-      return handleAiGatewayDisconnect(env);
     case "GET /admin/api/keys":
       return handleListKeys(env);
     case "POST /admin/api/keys":

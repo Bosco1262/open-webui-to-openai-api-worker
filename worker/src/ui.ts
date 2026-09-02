@@ -1,6 +1,6 @@
 /**
  * Self-contained admin console (single HTML page, zero external dependencies).
- * Dark console aesthetic with glassmorphism cards and Cloudflare-orange accents.
+ * Dark console aesthetic with glassmorphism cards and orange accents.
  */
 
 const VERSION = "1.0.0";
@@ -144,7 +144,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
   .url-chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); animation: pulse 2s infinite; }
 
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 6px 0 22px; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 6px 0 22px; }
   .stat {
     background: rgba(26, 34, 51, 0.6); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 16px; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
@@ -330,11 +330,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
         <div class="sub" id="st-upstream-sub"></div>
       </div>
       <div class="stat">
-        <div class="label">AI Gateway</div>
-        <div class="value"><span id="st-gateway">—</span></div>
-        <div class="sub" id="st-gateway-sub"></div>
-      </div>
-      <div class="stat">
         <div class="label">API Key 数量</div>
         <div class="value" id="st-keys">—</div>
         <div class="sub">生成的客户端密钥</div>
@@ -358,53 +353,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
         <button class="btn btn-danger btn-sm" onclick="deleteSession()">删除</button>
       </div>
       <div class="banner" id="session-banner"></div>
-    </div>
-
-    <!-- Cloudflare / AI Gateway -->
-    <div class="card">
-      <h3><span class="ic">▸</span> Cloudflare / AI Gateway</h3>
-      <div class="desc">
-        填写 Cloudflare API Token（需 <b>AI Gateway - Edit</b> 权限）与 Account ID，一键接入后，
-        代理请求将经 AI Gateway 转发（获得响应缓存、限流与日志统计）；未接入时直连上游。
-      </div>
-      <div class="grid2">
-        <div class="form-row">
-          <label class="lbl">Cloudflare API Token</label>
-          <input id="cf-token" type="password" placeholder="已配置则留空保持不变" autocomplete="off" />
-          <div class="hint" id="cf-token-status"></div>
-        </div>
-        <div class="form-row">
-          <label class="lbl">Account ID</label>
-          <input id="cf-account" placeholder="dashboard 首页可复制" />
-        </div>
-        <div class="form-row">
-          <label class="lbl">Gateway ID（留空自动创建）</label>
-          <input id="cf-gateway" placeholder="如 ow2-ai-gateway" />
-        </div>
-        <div class="form-row">
-          <label class="lbl">Provider Slug</label>
-          <input id="cf-slug" placeholder="open-webui" />
-        </div>
-        <div class="form-row">
-          <label class="lbl">缓存 TTL（秒，0 关闭）</label>
-          <input id="cf-ttl" type="number" min="0" placeholder="如 3600" />
-        </div>
-        <div class="form-row" style="display:flex; align-items:flex-end; padding-bottom:2px;">
-          <label class="lbl" style="flex:1; margin:0;">启用 AI Gateway</label>
-          <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-            <input id="cf-enabled" type="checkbox" style="width:auto;" />
-            <span style="font-size:13px;" id="cf-enabled-label">直连</span>
-          </label>
-        </div>
-      </div>
-      <div class="btn-row">
-        <button class="btn btn-ghost" onclick="saveCloudflare()">保存配置</button>
-        <button class="btn btn-primary" onclick="setupGateway()" id="btn-setup-gateway">一键接入 AI Gateway</button>
-        <button class="btn btn-danger btn-sm" onclick="disconnectGateway()">断开（直连）</button>
-        <button class="btn btn-danger btn-sm" onclick="clearCloudflare()">清除配置</button>
-      </div>
-      <div class="banner" id="cf-banner"></div>
-      <div class="banner info" id="cf-gateway-url"></div>
     </div>
 
     <!-- API keys -->
@@ -620,37 +568,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
         $('st-upstream-sub').textContent = '';
       }
 
-      // gateway stat
-      if (s.cloudflare && s.cloudflare.enabled && s.gatewayUrl) {
-        $('st-gateway').innerHTML = badge('ok', '已接入');
-        $('st-gateway-sub').textContent = s.gatewayUrl;
-      } else if (s.cloudflare && s.cloudflare.configured) {
-        $('st-gateway').innerHTML = badge('warn', '未启用');
-        $('st-gateway-sub').textContent = s.cloudflare.enabled ? '缺少 Gateway' : '直连模式';
-      } else {
-        $('st-gateway').innerHTML = badge('gray', '未配置');
-        $('st-gateway-sub').textContent = '直连上游';
-      }
-
       // keys
       $('st-keys').textContent = String(s.apiKeys.count);
-
-      // cloudflare form fill (token is not returned, show status)
-      if (s.cloudflare) {
-        $('cf-account').value = s.cloudflare.account_id || '';
-        $('cf-gateway').value = s.cloudflare.gateway_id || '';
-        $('cf-slug').value = s.cloudflare.provider_slug || 'open-webui';
-        $('cf-ttl').value = s.cloudflare.cache_ttl || 0;
-        $('cf-enabled').checked = s.cloudflare.enabled;
-        $('cf-enabled-label').textContent = s.cloudflare.enabled ? '经 AI Gateway' : '直连';
-        $('cf-token-status').textContent = s.cloudflare.configured ? '✓ 已配置' : '未配置';
-        $('cf-token-status').className = 'hint ' + (s.cloudflare.configured ? 'ok' : '');
-      }
-      if (s.gatewayUrl) {
-        showBanner('cf-gateway-url', 'AI Gateway 转发地址：' + s.gatewayUrl, 'info');
-      } else {
-        clearBanner('cf-gateway-url');
-      }
     }).catch(function (err) {
       toast(err.message, 'err');
     });
@@ -689,73 +608,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
       .then(function () { toast('Session 已删除', 'ok'); loadStatus(); clearBanner('session-banner'); })
       .catch(function (err) { toast(err.message, 'err'); });
   }
-
-  // ---------- cloudflare ----------
-  function cfPayload() {
-    var p = {
-      account_id: $('cf-account').value.trim(),
-      gateway_id: $('cf-gateway').value.trim(),
-      provider_slug: $('cf-slug').value.trim() || 'open-webui',
-      cache_ttl: parseInt($('cf-ttl').value || '0', 10) || 0,
-      enabled: $('cf-enabled').checked
-    };
-    if ($('cf-token').value.trim()) p.api_token = $('cf-token').value.trim();
-    return p;
-  }
-
-  function saveCloudflare() {
-    var btn = event.target;
-    setLoading(btn, true);
-    clearBanner('cf-banner');
-    api('/admin/api/cloudflare', { method: 'POST', body: cfPayload() })
-      .then(function (d) {
-        $('cf-token').value = '';
-        toast('Cloudflare 配置已保存', 'ok');
-        loadStatus();
-      })
-      .catch(function (err) { showBanner('cf-banner', err.message, 'err'); })
-      .finally(function () { setLoading(btn, false); });
-  }
-
-  function setupGateway() {
-    var btn = $('btn-setup-gateway');
-    setLoading(btn, true);
-    clearBanner('cf-banner');
-    // save config first so api_token etc. are persisted, then run setup
-    api('/admin/api/cloudflare', { method: 'POST', body: cfPayload() })
-      .then(function () { return api('/admin/api/ai-gateway/setup', { method: 'POST', body: {} }); })
-      .then(function (d) {
-        showBanner('cf-banner', d.message, 'ok');
-        if (d.gatewayUrl) showBanner('cf-gateway-url', 'AI Gateway 转发地址：' + d.gatewayUrl, 'info');
-        loadStatus();
-      })
-      .catch(function (err) { showBanner('cf-banner', err.message, 'err'); })
-      .finally(function () { setLoading(btn, false); });
-  }
-
-  function disconnectGateway() {
-    if (!confirm('切换为直连上游模式？')) return;
-    api('/admin/api/ai-gateway/disconnect', { method: 'POST' })
-      .then(function (d) { toast(d.message || '已断开', 'ok'); loadStatus(); })
-      .catch(function (err) { toast(err.message, 'err'); });
-  }
-
-  function clearCloudflare() {
-    if (!confirm('清除 Cloudflare 配置（含 API Token）？')) return;
-    api('/admin/api/cloudflare', { method: 'DELETE' })
-      .then(function () {
-        ['cf-token', 'cf-account', 'cf-gateway', 'cf-slug', 'cf-ttl'].forEach(function (id) { $(id).value = ''; });
-        $('cf-enabled').checked = false;
-        $('cf-enabled-label').textContent = '直连';
-        toast('配置已清除', 'ok');
-        loadStatus();
-      })
-      .catch(function (err) { toast(err.message, 'err'); });
-  }
-
-  $('cf-enabled').addEventListener('change', function () {
-    $('cf-enabled-label').textContent = this.checked ? '经 AI Gateway' : '直连';
-  });
 
   // ---------- api keys ----------
   function createKey() {
