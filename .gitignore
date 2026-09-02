@@ -1,0 +1,17 @@
+# Node / Worker
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+
+# Local login tool
+__pycache__/
+*.pyc
+local/session.json
+
+# Credentials — never commit
+session.json
+
+# OS
+.DS_Store
+Thumbs.db

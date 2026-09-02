@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "open-webui-to-openai-api-worker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "kv_namespaces": [
+    {
+      "binding": "O2W_KV"
+      // 不填 id = 自动资源供应（Beta）：wrangler deploy 或 Workers Builds 部署时会
+      // 自动创建 KV Namespace（以 Worker 名为前缀），实现 fork 后一键部署。
+      // 如需复用已有 KV，可在此补上 "id": "<你的 KV namespace id>"。
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.1
+    }
+  }
+}
