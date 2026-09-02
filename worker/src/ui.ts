@@ -530,6 +530,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     $('view-login').style.display = 'none';
     $('view-panel').style.display = 'block';
     loadStatus();
+    loadKeys();
   }
 
   // ---------- login / setup ----------
