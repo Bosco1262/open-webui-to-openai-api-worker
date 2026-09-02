@@ -572,7 +572,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
             </div>
             <div class="grid2" style="max-width:420px;">
               <div class="form-row" style="margin-bottom:0;">
-                <label class="lbl" data-i18n="keys.name_label">Key 名称（可选）</label>
+                <label class="lbl" data-i18n="keys.name_label">Key 名称（必填）</label>
                 <input id="key-name" data-i18n-ph="keys.name_ph" placeholder="如：Cherry Studio" />
               </div>
               <div class="form-row" style="margin-bottom:0; display:flex; align-items:flex-end;">
@@ -753,13 +753,15 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'err.session_missing_credentials': '缺少 Authorization 与 Cookie（至少需要其一）。',
       'err.session_bad_base_url': 'base_url 缺失或不是合法地址（需 http/https 开头）。',
       'err.key_missing': '缺少要删除的 API Key。',
+      'err.key_name_required': '请填写 Key 名称。',
+      'err.key_name_duplicate': '已存在同名 Key，请更换名称。',
       'up.del_confirm': '确认删除已导入的 Session？客户端将无法使用代理。',
       'up.deleted': 'Session 已删除',
       'keys.subtitle': '生成与管理客户端使用的 API Key。',
       'keys.title': '管理 API Key',
       'keys.desc1': '客户端使用以下 API Key 访问 ',
       'keys.desc2': '。完整 Key 仅在创建时显示一次。',
-      'keys.name_label': 'Key 名称（可选）',
+      'keys.name_label': 'Key 名称（必填）',
       'keys.name_ph': '如：Cherry Studio',
       'keys.create': '生成 Key',
       'keys.th_name': '名称',
@@ -884,13 +886,15 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'err.session_missing_credentials': 'Missing Authorization and Cookie (at least one is required).',
       'err.session_bad_base_url': 'base_url is missing or not a valid URL (must start with http/https).',
       'err.key_missing': 'Missing the API key to delete.',
+      'err.key_name_required': 'Please enter a key name.',
+      'err.key_name_duplicate': 'A key with the same name already exists. Choose another.',
       'up.del_confirm': 'Delete the imported session? Clients will no longer be able to use the proxy.',
       'up.deleted': 'Session deleted',
       'keys.subtitle': 'Generate and manage client API keys.',
       'keys.title': 'Manage API Keys',
       'keys.desc1': 'Clients use these API keys to access ',
       'keys.desc2': '. The full key is shown only once at creation.',
-      'keys.name_label': 'Key Name (Optional)',
+      'keys.name_label': 'Key Name (Required)',
       'keys.name_ph': 'e.g. Cherry Studio',
       'keys.create': 'Generate Key',
       'keys.th_name': 'Name',
@@ -1367,7 +1371,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
     var btn = event.target;
     setLoading(btn, true);
     clearBanner('keys-banner');
-    api('/admin/api/keys', { method: 'POST', body: { name: $('key-name').value } })
+    var name = $('key-name').value.trim();
+    if (!name) {
+      setLoading(btn, false);
+      setBanner('keys-banner', 'err', function () { return etext('err.key_name_required'); });
+      return;
+    }
+    api('/admin/api/keys', { method: 'POST', body: { name: name } })
       .then(function (d) {
         $('key-name').value = '';
         $('key-modal-value').textContent = d.key;

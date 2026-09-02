@@ -333,7 +333,14 @@ async function handleListKeys(env: Env): Promise<Response> {
 // POST /admin/api/keys —— 生成新的客户端 API Key。
 async function handleCreateKey(env: Env, request: Request): Promise<Response> {
   const body = await readBody(request);
-  const name = typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 64) : "";
+  const name = typeof body.name === "string" ? body.name.trim().slice(0, 64) : "";
+  if (!name) return fail("err.key_name_required");
+  // Reject names already used by an existing key (case-insensitive).
+  // 拒绝与已有 Key 重名的名称（不区分大小写）。
+  const existing = await listApiKeys(env);
+  if (existing.some(({ meta }) => meta.name.toLowerCase() === name.toLowerCase())) {
+    return fail("err.key_name_duplicate");
+  }
   const key = generateApiKey();
   const meta: ApiKeyMeta = {
     name,
