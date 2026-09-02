@@ -790,7 +790,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
           '<td class="mono">' + esc(k.masked) + '</td>' +
           '<td>' + created + '</td>' +
           '<td>' + used + '</td>' +
-          '<td style="text-align:right"><button class="btn btn-danger btn-sm" onclick="deleteKey(\'' + k.key + '\',\'' + esc(k.masked) + '\')">删除</button></td>' +
+          '<td style="text-align:right"><button class="btn btn-danger btn-sm" onclick="deleteKey(\\'' + k.key + '\\',\\'' + esc(k.masked) + '\\')">删除</button></td>' +
           '</tr>';
       }).join('');
     }).catch(function (err) { toast(err.message, 'err'); });

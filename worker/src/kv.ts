@@ -1,7 +1,7 @@
 /**
  * KV data layer.
  *
- * Everything the Worker persists lives in the single O2W_KV namespace. Reads on
+ * Everything the Worker persists lives in the single KV namespace. Reads on
  * the hot proxy path are minimized (one API-key lookup per request) and the
  * session / Cloudflare config are cached in the instance for 60s so management
  * writes don't force repeated KV reads.
@@ -86,19 +86,19 @@ export function randomBase64Url(n: number): string {
 export async function getSession(env: Env): Promise<StoredSession | null> {
   const cached = cacheGet<StoredSession>(K_SESSION);
   if (cached) return cached;
-  const raw = await env.O2W_KV.get<StoredSession>(K_SESSION, "json");
+  const raw = await env.KV.get<StoredSession>(K_SESSION, "json");
   if (!raw) return null;
   cacheSet(K_SESSION, raw);
   return raw;
 }
 
 export async function setSession(env: Env, session: StoredSession): Promise<void> {
-  await env.O2W_KV.put(K_SESSION, JSON.stringify(session));
+  await env.KV.put(K_SESSION, JSON.stringify(session));
   cacheSet(K_SESSION, session);
 }
 
 export async function deleteSession(env: Env): Promise<void> {
-  await env.O2W_KV.delete(K_SESSION);
+  await env.KV.delete(K_SESSION);
   cacheDelete(K_SESSION);
 }
 
@@ -109,19 +109,19 @@ export async function deleteSession(env: Env): Promise<void> {
 export async function getCloudflareConfig(env: Env): Promise<CloudflareConfig | null> {
   const cached = cacheGet<CloudflareConfig>(K_CLOUDFLARE);
   if (cached) return cached;
-  const raw = await env.O2W_KV.get<CloudflareConfig>(K_CLOUDFLARE, "json");
+  const raw = await env.KV.get<CloudflareConfig>(K_CLOUDFLARE, "json");
   if (!raw) return null;
   cacheSet(K_CLOUDFLARE, raw);
   return raw;
 }
 
 export async function setCloudflareConfig(env: Env, config: CloudflareConfig): Promise<void> {
-  await env.O2W_KV.put(K_CLOUDFLARE, JSON.stringify(config));
+  await env.KV.put(K_CLOUDFLARE, JSON.stringify(config));
   cacheSet(K_CLOUDFLARE, config);
 }
 
 export async function deleteCloudflareConfig(env: Env): Promise<void> {
-  await env.O2W_KV.delete(K_CLOUDFLARE);
+  await env.KV.delete(K_CLOUDFLARE);
   cacheDelete(K_CLOUDFLARE);
 }
 
@@ -130,15 +130,15 @@ export async function deleteCloudflareConfig(env: Env): Promise<void> {
 // --------------------------------------------------------------------------- //
 
 export async function getApiKeyMeta(env: Env, key: string): Promise<ApiKeyMeta | null> {
-  return env.O2W_KV.get<ApiKeyMeta>(K_API_KEY_PREFIX + key, "json");
+  return env.KV.get<ApiKeyMeta>(K_API_KEY_PREFIX + key, "json");
 }
 
 export async function putApiKey(env: Env, key: string, meta: ApiKeyMeta): Promise<void> {
-  await env.O2W_KV.put(K_API_KEY_PREFIX + key, JSON.stringify(meta));
+  await env.KV.put(K_API_KEY_PREFIX + key, JSON.stringify(meta));
 }
 
 export async function deleteApiKey(env: Env, key: string): Promise<void> {
-  await env.O2W_KV.delete(K_API_KEY_PREFIX + key);
+  await env.KV.delete(K_API_KEY_PREFIX + key);
 }
 
 export async function listApiKeys(
@@ -147,9 +147,9 @@ export async function listApiKeys(
   const out: Array<{ key: string; meta: ApiKeyMeta }> = [];
   let cursor: string | undefined;
   do {
-    const page = await env.O2W_KV.list({ prefix: K_API_KEY_PREFIX, cursor });
+    const page = await env.KV.list({ prefix: K_API_KEY_PREFIX, cursor });
     for (const item of page.keys) {
-      const meta = await env.O2W_KV.get<ApiKeyMeta>(item.name, "json");
+      const meta = await env.KV.get<ApiKeyMeta>(item.name, "json");
       if (meta) out.push({ key: item.name.slice(K_API_KEY_PREFIX.length), meta });
     }
     cursor = page.list_complete ? undefined : page.cursor;
@@ -171,7 +171,7 @@ export function touchApiKey(
   if (now - (lastTouched.get(key) ?? 0) < TOUCH_INTERVAL_MS) return;
   lastTouched.set(key, now);
   const updated: ApiKeyMeta = { ...meta, last_used: Math.floor(now / 1000) };
-  ctx.waitUntil(env.O2W_KV.put(K_API_KEY_PREFIX + key, JSON.stringify(updated)));
+  ctx.waitUntil(env.KV.put(K_API_KEY_PREFIX + key, JSON.stringify(updated)));
 }
 
 // --------------------------------------------------------------------------- //
@@ -179,11 +179,11 @@ export function touchApiKey(
 // --------------------------------------------------------------------------- //
 
 export async function getPasswordHash(env: Env): Promise<PasswordHash | null> {
-  return env.O2W_KV.get<PasswordHash>(K_PASSWORD_HASH, "json");
+  return env.KV.get<PasswordHash>(K_PASSWORD_HASH, "json");
 }
 
 export async function setPasswordHash(env: Env, ph: PasswordHash): Promise<void> {
-  await env.O2W_KV.put(K_PASSWORD_HASH, JSON.stringify(ph));
+  await env.KV.put(K_PASSWORD_HASH, JSON.stringify(ph));
 }
 
 /** Auto-derived HMAC secret for admin cookies, cached per instance. */
@@ -192,10 +192,10 @@ let sessionSecretCache: string | null = null;
 export async function getOrCreateSessionSecret(env: Env): Promise<string> {
   if (env.SESSION_SECRET) return env.SESSION_SECRET;
   if (sessionSecretCache) return sessionSecretCache;
-  let secret = await env.O2W_KV.get(K_SESSION_SECRET);
+  let secret = await env.KV.get(K_SESSION_SECRET);
   if (!secret) {
     secret = randomBase64Url(32);
-    await env.O2W_KV.put(K_SESSION_SECRET, secret);
+    await env.KV.put(K_SESSION_SECRET, secret);
   }
   sessionSecretCache = secret;
   return secret;

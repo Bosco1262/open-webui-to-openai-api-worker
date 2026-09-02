@@ -5,7 +5,7 @@
 - **本地认证获取端**（`local/`，Python + Playwright）：浏览器登录捕获凭证 → 终端输出 `session.json`。
 - **Worker 端**（`worker/`，TypeScript）：对外提供 `/v1/*` OpenAI 兼容接口 + 中文网页管理后台；已配置 Cloudflare API Key 时经 **AI Gateway** 转发（获得响应缓存、限流、日志统计），未配置时直连上游。
 
-> 本项目为 [open-webui-to-openai-api](https://github.com/your-original-project) 的 Cloudflare Worker 迁移版，代理行为与原项目对齐（前缀探测回退、模型列表规范化、SSE 流式、OpenAI 风格错误体）。
+> 本项目为 [open-webui-to-openai-api](https://github.com/Bosco1262/open-webui-to-openai-api) 的 Cloudflare Worker 迁移版，代理行为与原项目对齐（前缀探测回退、模型列表规范化、SSE 流式、OpenAI 风格错误体）。
 
 ## 架构
 
@@ -64,12 +64,13 @@ OpenAI 客户端 ──▶ Bearer sk-xxx ──▶  /v1/*        │
 4. 选择本仓库与部署分支（如 `main`）。
 5. 配置构建设置：
 
-   | 字段 | 值 |
-   | --- | --- |
-   | **Root directory**（根目录） | `worker` |
-   | **Build command** | `npm ci && npm run deploy` |
+   | 字段         | 值                         |
+   | ------------ | -------------------------- |
+   | **根目录**   | `worker`                   |
+   | **构建命令** | `npm ci && npm run deploy` |
 
    > 因为 Worker 代码位于仓库的 `worker/` 子目录，Root directory 必须填 `worker`；`npm ci` 按 `package-lock.json` 安装依赖，`npm run deploy` 执行 `wrangler deploy`。
+
 6. 保存后 Cloudflare 会立即构建并部署：**KV Namespace 首次部署时自动创建**，之后 **push 到该分支即自动部署**。
 
 **设置管理密码（可选）**：Cloudflare Dashboard → 该 Worker → **Settings → Variables** → 添加 **Secret** `ADMIN_PASSWORD`。若未设置，首次访问 `/admin` 时会在网页引导设置。
@@ -100,7 +101,7 @@ npm run dev
 npm run deploy
 ```
 
-> 若想手动指定 KV：`npx wrangler kv namespace create O2W_KV` 后把 id 填入 `wrangler.jsonc` 的 `kv_namespaces[0].id` 再部署。
+> 若想手动指定 KV：`npx wrangler kv namespace create KV` 后把 id 填入 `wrangler.jsonc` 的 `kv_namespaces[0].id` 再部署。
 
 **3.（可选）预设管理密码**
 
@@ -158,32 +159,32 @@ for chunk in resp:
 
 ## API 端点
 
-| 方法 | 路径 | 鉴权 | 说明 |
-| --- | --- | --- | --- |
-| GET | `/` | 无 | 服务信息 |
-| GET | `/healthz` | 无 | 健康检查 |
-| GET | `/admin` | 管理会话 | 管理界面 |
-| GET | `/admin/api/status` | 管理会话 | 状态总览 |
-| POST | `/admin/api/login` / `setup` / `logout` | — | 管理登录 |
-| POST | `/admin/api/session` | 管理会话 | 导入 Session（支持 `test`/`save`） |
-| POST | `/admin/api/cloudflare` | 管理会话 | 保存 Cloudflare 配置 |
-| POST | `/admin/api/ai-gateway/setup` | 管理会话 | 一键接入 AI Gateway |
-| GET/POST/DELETE | `/admin/api/keys` | 管理会话 | API Key 管理 |
-| GET | `/v1/models` | API Key | 模型列表（规范化） |
-| POST | `/v1/chat/completions` | API Key | 对话补全（含 SSE 流式） |
-| POST | `/v1/embeddings` | API Key | 向量嵌入 |
-| ANY | `/v1/{path}` | API Key | 兜底透传 |
+| 方法            | 路径                                    | 鉴权     | 说明                               |
+| --------------- | --------------------------------------- | -------- | ---------------------------------- |
+| GET             | `/`                                     | 无       | 服务信息                           |
+| GET             | `/healthz`                              | 无       | 健康检查                           |
+| GET             | `/admin`                                | 管理会话 | 管理界面                           |
+| GET             | `/admin/api/status`                     | 管理会话 | 状态总览                           |
+| POST            | `/admin/api/login` / `setup` / `logout` | —        | 管理登录                           |
+| POST            | `/admin/api/session`                    | 管理会话 | 导入 Session（支持 `test`/`save`） |
+| POST            | `/admin/api/cloudflare`                 | 管理会话 | 保存 Cloudflare 配置               |
+| POST            | `/admin/api/ai-gateway/setup`           | 管理会话 | 一键接入 AI Gateway                |
+| GET/POST/DELETE | `/admin/api/keys`                       | 管理会话 | API Key 管理                       |
+| GET             | `/v1/models`                            | API Key  | 模型列表（规范化）                 |
+| POST            | `/v1/chat/completions`                  | API Key  | 对话补全（含 SSE 流式）            |
+| POST            | `/v1/embeddings`                        | API Key  | 向量嵌入                           |
+| ANY             | `/v1/{path}`                            | API Key  | 兜底透传                           |
 
 客户端鉴权支持 `Authorization: Bearer <key>` 与 `X-API-Key: <key>` 两种方式。
 
 ## 配置说明
 
-| 配置 | 方式 | 说明 |
-| --- | --- | --- |
-| `ADMIN_PASSWORD` | `wrangler secret put` / Dashboard Variables | 管理密码（可选，未设则网页首次访问设置） |
-| `SESSION_SECRET` | `wrangler secret put` | 会话签名密钥（可选，未设则自动派生存 KV） |
-| KV Namespace | `wrangler.jsonc`（自动创建） | 存储 session / 配置 / API Key / 管理密码；绑定省略 `id` 即自动资源供应，首次部署自动创建 |
-| Cloudflare API Token | 管理界面 | AI Gateway 注册与转发（需 `AI Gateway - Edit`） |
+| 配置                 | 方式                                        | 说明                                                                                     |
+| -------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `ADMIN_PASSWORD`     | `wrangler secret put` / Dashboard Variables | 管理密码（可选，未设则网页首次访问设置）                                                 |
+| `SESSION_SECRET`     | `wrangler secret put`                       | 会话签名密钥（可选，未设则自动派生存 KV）                                                |
+| KV Namespace         | `wrangler.jsonc`（自动创建）                | 存储 session / 配置 / API Key / 管理密码；绑定省略 `id` 即自动资源供应，首次部署自动创建 |
+| Cloudflare API Token | 管理界面                                    | AI Gateway 注册与转发（需 `AI Gateway - Edit`）                                          |
 
 ## 免费层资源适配
 

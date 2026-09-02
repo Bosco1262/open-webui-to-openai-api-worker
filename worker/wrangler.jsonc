@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "kv_namespaces": [
     {
-      "binding": "O2W_KV"
+      "binding": "KV"
       // 不填 id = 自动资源供应（Beta）：wrangler deploy 或 Workers Builds 部署时会
       // 自动创建 KV Namespace（以 Worker 名为前缀），实现 fork 后一键部署。
       // 如需复用已有 KV，可在此补上 "id": "<你的 KV namespace id>"。

@@ -1,7 +1,7 @@
 /**
  * Shared types for the Worker.
  *
- * Storage layout in the O2W_KV namespace:
+ * Storage layout in the KV namespace:
  *   - "session"                    -> StoredSession (imported from the local login tool)
  *   - "config:cloudflare"          -> CloudflareConfig (AI Gateway / CF API settings)
  *   - "apikey:{key}"               -> ApiKeyMeta (key itself is the KV key, O(1) lookup)
@@ -11,7 +11,7 @@
 
 export interface Env {
   /** KV binding: session / config / api keys / admin credentials. */
-  O2W_KV: KVNamespace;
+  KV: KVNamespace;
   /** Optional: preset admin password via `wrangler secret put ADMIN_PASSWORD`. */
   ADMIN_PASSWORD?: string;
   /** Optional: HMAC signing secret for admin session cookies. */
