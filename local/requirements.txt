@@ -1,1 +1,3 @@
+# Browser automation for the local login capture tool
+# 本地登录捕获工具所用的浏览器自动化库
 playwright>=1.40.0

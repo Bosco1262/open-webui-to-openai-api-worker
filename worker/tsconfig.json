@@ -1,4 +1,6 @@
 {
+  // TypeScript config for the Worker (type-check only, no emit).
+  // Worker 的 TypeScript 配置（仅做类型检查，不产出编译文件）。
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",

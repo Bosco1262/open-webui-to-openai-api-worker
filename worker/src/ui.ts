@@ -1,18 +1,22 @@
 /**
  * Self-contained admin console (single HTML page, zero external dependencies).
+ * 自包含的管理控制台（单 HTML 页面，零外部依赖）。
  * Layout: top title bar + fixed left sidebar navigation + right content area.
+ * 布局：顶部标题栏 + 固定左侧边栏导航 + 右侧内容区。
  * Built-in i18n (zh-CN / en): manual choice > browser language > English fallback.
+ * 内置 i18n（zh-CN / en）：手动选择 > 浏览器语言 > 英文回退。
  * Dark console aesthetic with glassmorphism cards and orange accents.
+ * 深色控制台风格，玻璃拟态卡片与橙色点缀。
  */
 
 const VERSION = "1.0.0";
 
 export const ADMIN_UI = `<!DOCTYPE html>
-<html lang="zh-CN">
+<html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Open WebUI 代理控制台</title>
+<title></title>
 <style>
   :root {
     --bg-0: #0f1420;
@@ -51,6 +55,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   ::selection { background: rgba(246, 130, 31, 0.35); }
 
   /* ---------- Login view ---------- */
+  /* ---------- 登录视图 ---------- */
   #view-login {
     min-height: 100vh; display: flex; align-items: center; justify-content: center;
     padding: 24px;
@@ -122,10 +127,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
   .hint.ok { color: #86efac; }
 
   /* ---------- Panel layout ---------- */
+  /* ---------- 面板布局 ---------- */
   #view-panel { display: none; }
   #view-panel.show { display: block; }
 
   /* Title bar */
+  /* 标题栏 */
   .topbar {
     position: sticky; top: 0; z-index: 20;
     height: var(--topbar-h);
@@ -149,6 +156,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   .topbar-actions { display: flex; align-items: center; gap: 10px; }
 
   /* Body: fixed sidebar + content */
+  /* 主体：固定侧边栏 + 内容区 */
   .layout-body { display: flex; min-height: calc(100vh - var(--topbar-h)); }
 
   .sidebar {
@@ -209,6 +217,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   .page-head p { font-size: 12.5px; color: var(--text-1); margin-top: 5px; line-height: 1.6; }
 
   /* ---------- Widgets ---------- */
+  /* ---------- 通用组件 ---------- */
   .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
   .stat {
     background: rgba(26, 34, 51, 0.6); border: 1px solid var(--border); border-radius: var(--radius);
@@ -361,6 +370,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
 <div class="toast-wrap" id="toasts"></div>
 
 <!-- ===================== Login view ===================== -->
+<!-- ===================== 登录视图 ===================== -->
 <div id="view-login">
   <div class="login-card">
     <div class="login-logo">
@@ -376,18 +386,18 @@ export const ADMIN_UI = `<!DOCTYPE html>
       <form id="form-login" autocomplete="current-password">
         <div class="field">
           <input id="pw" type="password" data-i18n-ph="login.pw_ph" placeholder="管理密码" autocomplete="current-password" required />
-          <button type="button" class="eye" data-target="pw" aria-label="show/hide password">👁</button>
+          <button type="button" class="eye" data-target="pw" aria-label="show/hide password" data-i18n-aria="common.show_pw">👁</button>
         </div>
         <button class="btn btn-primary" id="btn-login" type="submit" data-i18n="login.btn">登 录</button>
       </form>
       <form id="form-setup" style="display:none" autocomplete="new-password">
         <div class="field">
           <input id="pw1" type="password" data-i18n-ph="login.pw1_ph" placeholder="设置管理密码（至少 8 位）" autocomplete="new-password" required />
-          <button type="button" class="eye" data-target="pw1" aria-label="show/hide password">👁</button>
+          <button type="button" class="eye" data-target="pw1" aria-label="show/hide password" data-i18n-aria="common.show_pw">👁</button>
         </div>
         <div class="field">
           <input id="pw2" type="password" data-i18n-ph="login.pw2_ph" placeholder="确认管理密码" autocomplete="new-password" required />
-          <button type="button" class="eye" data-target="pw2" aria-label="show/hide password">👁</button>
+          <button type="button" class="eye" data-target="pw2" aria-label="show/hide password" data-i18n-aria="common.show_pw">👁</button>
         </div>
         <button class="btn btn-primary" id="btn-setup" type="submit" data-i18n="login.setup_btn">设置密码并进入</button>
       </form>
@@ -397,9 +407,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
 </div>
 
 <!-- ===================== Panel view ===================== -->
+<!-- ===================== 面板视图 ===================== -->
 <div id="view-panel">
 
   <!-- Title bar -->
+  <!-- 标题栏 -->
   <header class="topbar">
     <div class="topbar-brand">
       <div class="topbar-logo">
@@ -419,6 +431,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   <div class="layout-body">
 
     <!-- Sidebar -->
+    <!-- 侧边栏 -->
     <aside class="sidebar">
       <div class="side-label" data-i18n="nav.label">导航</div>
       <nav class="side-nav">
@@ -458,10 +471,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
     </aside>
 
     <!-- Content -->
+    <!-- 内容区 -->
     <main class="content">
       <div class="content-inner">
 
         <!-- ============ Page: Dashboard ============ -->
+        <!-- ============ 页面：仪表盘 ============ -->
         <section class="page active" id="page-dashboard">
           <div class="page-head">
             <h2 data-i18n="nav.dashboard">仪表盘</h2>
@@ -501,6 +516,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
         </section>
 
         <!-- ============ Page: Upstream ============ -->
+        <!-- ============ 页面：上游服务端 ============ -->
         <section class="page" id="page-upstream">
           <div class="page-head">
             <h2 data-i18n="nav.upstream">上游服务端</h2>
@@ -541,6 +557,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
         </section>
 
         <!-- ============ Page: API Keys ============ -->
+        <!-- ============ 页面：API 管理 ============ -->
         <section class="page" id="page-keys">
           <div class="page-head">
             <h2 data-i18n="nav.keys">API 管理</h2>
@@ -578,6 +595,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
         </section>
 
         <!-- ============ Page: Settings ============ -->
+        <!-- ============ 页面：网页设置 ============ -->
         <section class="page" id="page-settings">
           <div class="page-head">
             <h2 data-i18n="nav.settings">网页设置</h2>
@@ -604,8 +622,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
                 <div class="setting-hint" data-i18n="set.lang_hint">手动选择优先于浏览器语言；未选择时自动检测，默认英文。</div>
               </div>
               <select id="lang-select" style="width:180px;" onchange="switchLang(this.value)">
-                <option value="zh-CN" data-i18n="set.lang_zh">简体中文</option>
                 <option value="en" data-i18n="set.lang_en">English</option>
+                <option value="zh-CN" data-i18n="set.lang_zh">简体中文</option>
               </select>
             </div>
           </div>
@@ -617,6 +635,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
 </div>
 
 <!-- Modal: show generated key -->
+<!-- 弹窗：展示新生成的 Key -->
 <div class="modal-mask" id="key-modal">
   <div class="modal">
     <h4 data-i18n="km.title">API Key 已生成</h4>
@@ -630,21 +649,22 @@ export const ADMIN_UI = `<!DOCTYPE html>
 </div>
 
 <!-- Modal: change password -->
+<!-- 弹窗：修改密码 -->
 <div class="modal-mask" id="pw-modal">
   <div class="modal">
     <h4 data-i18n="pm.title">修改管理密码</h4>
     <div class="note" data-i18n="pm.note">修改后密码将保存于 KV 并立即生效，所有已登录的管理会话将失效，需使用新密码重新登录。</div>
     <div class="form-row">
       <label class="lbl" data-i18n="pm.cur">当前密码</label>
-      <input id="pw-cur" type="password" autocomplete="current-password" />
+      <input id="pw-cur" type="password" data-i18n-ph="pm.cur_ph" placeholder="当前密码" autocomplete="current-password" />
     </div>
     <div class="form-row">
       <label class="lbl" data-i18n="pm.new">新密码（至少 8 位）</label>
-      <input id="pw-new" type="password" autocomplete="new-password" />
+      <input id="pw-new" type="password" data-i18n-ph="pm.new_ph" placeholder="新密码（至少 8 位）" autocomplete="new-password" />
     </div>
     <div class="form-row">
       <label class="lbl" data-i18n="pm.new2">确认新密码</label>
-      <input id="pw-new2" type="password" autocomplete="new-password" />
+      <input id="pw-new2" type="password" data-i18n-ph="pm.new2_ph" placeholder="确认新密码" autocomplete="new-password" />
     </div>
     <div class="banner" id="pw-modal-banner"></div>
     <div class="btn-row">
@@ -660,6 +680,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   function $(id) { return document.getElementById(id); }
 
   // ---------- i18n ----------
+  // ---------- 国际化 ----------
   var I18N = {
     'zh-CN': {
       'app.title': 'Open WebUI 代理控制台',
@@ -770,6 +791,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'pm.cur': '当前密码',
       'pm.new': '新密码（至少 8 位）',
       'pm.new2': '确认新密码',
+      'pm.cur_ph': '请输入当前密码',
+      'pm.new_ph': '请输入新密码（至少 8 位）',
+      'pm.new2_ph': '请再次输入新密码',
       'pm.submit': '确认修改',
       'pm.confirm_secret': '当前管理员密码来自 Cloudflare Secret（ADMIN_PASSWORD）。\\n\\n在此修改会把生效密码覆盖为 KV 中保存的新密码，之后该 Secret 将不再被使用（除非把 Secret 改成与新密码一致）。\\n如不想覆盖，请前往 Cloudflare Dashboard 更新 Secret。\\n\\n确定要继续吗？',
       'msg.copied': '已复制',
@@ -786,7 +810,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'common.close': '关闭',
       'common.cancel': '取消',
       'common.loading': '加载中…',
-      'common.actions': '操作'
+      'common.actions': '操作',
+      'common.show_pw': '显示/隐藏密码'
     },
     'en': {
       'app.title': 'Open WebUI Proxy Console',
@@ -796,11 +821,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'login.pw_ph': 'Admin password',
       'login.pw1_ph': 'Set admin password (min 8 chars)',
       'login.pw2_ph': 'Confirm admin password',
-      'login.btn': 'Sign in',
-      'login.setup_btn': 'Set password and continue',
+      'login.btn': 'Sign In',
+      'login.setup_btn': 'Set Password and Continue',
       'login.err_short': 'Password must be at least 8 characters',
       'login.err_mismatch': 'Passwords do not match',
-      'nav.logout': 'Sign out',
+      'nav.logout': 'Sign Out',
       'nav.label': 'Navigation',
       'nav.dashboard': 'Dashboard',
       'nav.upstream': 'Upstream Server',
@@ -809,21 +834,21 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'nav.foot1': 'Manage upstream credentials,',
       'nav.foot2': 'API keys and console settings after signing in.',
       'dash.subtitle': 'Overview of the proxy service status.',
-      'stat.session': 'Session credential',
+      'stat.session': 'Session Credential',
       'stat.upstream': 'Upstream URL',
-      'stat.keys': 'API keys',
+      'stat.keys': 'API Keys',
       'stat.keys_sub': 'Client keys generated',
-      'dash.access_title': 'Client access',
+      'dash.access_title': 'Client Access',
       'dash.access_desc': 'Use the address and key below in any OpenAI-compatible client.',
       'dash.chip_title': 'Client base URL, click to copy',
       'dash.copy': 'Copy',
       'up.subtitle': 'Import and manage Open WebUI session credentials.',
       'up.import_title': 'Import Session',
       'up.import_desc': 'Run <code>python login.py --base-url https://your-open-webui-url</code> locally and finish the browser login, then paste the <b>full JSON content of session.json</b> below and import.',
-      'up.json_label': 'session.json content',
-      'up.test': 'Validate and test',
+      'up.json_label': 'session.json Content',
+      'up.test': 'Validate and Test',
       'up.import': 'Import Session',
-      'up.status_title': 'Current credential status',
+      'up.status_title': 'Current Credential Status',
       'up.status_desc': 'Summary of the last imported credential. If it expires, sign in upstream again and re-import.',
       'up.state': 'Status',
       'st.imported': 'Imported',
@@ -864,40 +889,43 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'keys.title': 'Manage API Keys',
       'keys.desc1': 'Clients use these API keys to access ',
       'keys.desc2': '. The full key is shown only once at creation.',
-      'keys.name_label': 'Key name (optional)',
+      'keys.name_label': 'Key Name (Optional)',
       'keys.name_ph': 'e.g. Cherry Studio',
-      'keys.create': 'Generate key',
+      'keys.create': 'Generate Key',
       'keys.th_name': 'Name',
       'keys.th_key': 'Key',
       'keys.th_created': 'Created',
-      'keys.th_used': 'Last used',
-      'keys.never_used': 'Never used',
-      'keys.empty': 'No API keys yet',
+      'keys.th_used': 'Last Used',
+      'keys.never_used': 'Never Used',
+      'keys.empty': 'No API Keys Yet',
       'keys.del_confirm': 'Delete key ',
       'keys.del_confirm_end': '?',
       'keys.deleted': 'Key deleted',
       'set.subtitle': 'Console account and security configuration.',
       'set.pw_title': 'Password',
       'set.pw_desc': 'Manage the console login password. Changing it signs out all admin sessions.',
-      'set.pw_src_label': 'Current password storage',
+      'set.pw_src_label': 'Current Password Storage',
       'set.src_secret': 'Secret (ADMIN_PASSWORD)',
       'set.src_kv': 'KV (changed in console)',
       'set.src_none': 'Not set',
-      'set.pw_change': 'Change password',
+      'set.pw_change': 'Change Password',
       'set.lang_title': 'Language',
-      'set.lang_label': 'Interface language',
+      'set.lang_label': 'Interface Language',
       'set.lang_hint': 'Manual choice overrides browser language; otherwise auto-detected, English fallback.',
       'set.lang_zh': '简体中文',
       'set.lang_en': 'English',
       'set.lang_saved': 'Language preference saved',
-      'km.title': 'API key generated',
+      'km.title': 'API Key Generated',
       'km.note': 'Copy and store it now — the full key cannot be viewed again after closing.',
-      'pm.title': 'Change admin password',
+      'pm.title': 'Change Admin Password',
       'pm.note': 'The new password is stored in KV and takes effect immediately; all admin sessions will be signed out.',
-      'pm.cur': 'Current password',
-      'pm.new': 'New password (min 8 chars)',
-      'pm.new2': 'Confirm new password',
-      'pm.submit': 'Confirm change',
+      'pm.cur': 'Current Password',
+      'pm.new': 'New Password (min 8 chars)',
+      'pm.new2': 'Confirm New Password',
+      'pm.cur_ph': 'Enter current password',
+      'pm.new_ph': 'Enter new password (min 8 chars)',
+      'pm.new2_ph': 'Re-enter new password',
+      'pm.submit': 'Confirm Change',
       'pm.confirm_secret': 'The admin password currently comes from the Cloudflare Secret (ADMIN_PASSWORD).\\n\\nChanging it here overrides the effective password with the new one stored in KV; the Secret will no longer be used (unless you set the Secret to the same new value).\\nTo keep using the Secret, update it in the Cloudflare Dashboard instead.\\n\\nContinue?',
       'msg.copied': 'Copied',
       'msg.copy_failed': 'Copy failed',
@@ -913,7 +941,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'common.close': 'Close',
       'common.cancel': 'Cancel',
       'common.loading': 'Loading…',
-      'common.actions': 'Actions'
+      'common.actions': 'Actions',
+      'common.show_pw': 'Show/Hide Password'
     }
   };
 
@@ -927,6 +956,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // Translate an API error code; falls back to the raw text when unknown
+  // 翻译 API 错误码；未知时回退为原始文本
   function etext(m) {
     if (m && Object.prototype.hasOwnProperty.call(I18N[_lang] || I18N['en'], m)) return t(m);
     if (m && Object.prototype.hasOwnProperty.call(I18N['en'], m)) return I18N['en'][m];
@@ -934,6 +964,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // Simple {placeholder} interpolation on a translation key
+  // 对翻译键做简单的 {占位符} 插值
   function tfmt(key, params) {
     var s = t(key);
     if (params) {
@@ -945,6 +976,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // Compose a localized message from the structured connectivity test result
+  // 根据结构化的连通性测试结果拼出本地化消息
   function testDetail(tst) {
     if (!tst) return '';
     if (tst.code === 'up.test_network') return tfmt('up.test_network', { error: tst.error || '' });
@@ -955,6 +987,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // Manual setting > browser language > English fallback
+  // 手动选择 > 浏览器语言 > 英文回退
   function detectLang() {
     try {
       var saved = localStorage.getItem('admin_lang');
@@ -982,6 +1015,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
     for (var k = 0; k < phNodes.length; k++) phNodes[k].setAttribute('placeholder', t(phNodes[k].getAttribute('data-i18n-ph')));
     var titleNodes = document.querySelectorAll('[data-i18n-title]');
     for (var m = 0; m < titleNodes.length; m++) titleNodes[m].setAttribute('title', t(titleNodes[m].getAttribute('data-i18n-title')));
+    var ariaNodes = document.querySelectorAll('[data-i18n-aria]');
+    for (var n = 0; n < ariaNodes.length; n++) ariaNodes[n].setAttribute('aria-label', t(ariaNodes[n].getAttribute('data-i18n-aria')));
   }
 
   function switchLang(v) {
@@ -989,6 +1024,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
     _lang = v;
     try { localStorage.setItem('admin_lang', v); } catch (e) {}
     applyI18n();
+    for (var id in _bannerRenderers) {
+      if (Object.prototype.hasOwnProperty.call(_bannerRenderers, id)) {
+        var r = _bannerRenderers[id]();
+        showBanner(id, r.msg, r.type);
+      }
+    }
+    if (_loginMsgRender) setLoginMsg(_loginMsgRender);
     loadStatus();
     loadKeys();
     toast(t('set.lang_saved'), 'ok');
@@ -1006,13 +1048,26 @@ export const ADMIN_UI = `<!DOCTYPE html>
     }, 3200);
   }
 
+  // Banner render registry: lets switchLang() re-render visible banners in the new language
+  // 横幅渲染注册表：让 switchLang() 在切换语言后以新语言重渲染可见横幅
+  var _bannerRenderers = {};
+
   function showBanner(id, msg, type) {
     var el = $(id);
     el.className = 'banner ' + (type || 'info');
     el.textContent = msg || '';
     el.style.display = msg ? 'block' : 'none';
   }
-  function clearBanner(id) { var el = $(id); el.className = 'banner'; el.textContent = ''; el.style.display = 'none'; }
+  // render() is invoked lazily so the message re-translates when the language changes
+  // render() 延迟调用，语言切换时消息可重新翻译
+  function setBanner(id, type, render) {
+    _bannerRenderers[id] = function () { return { msg: render(), type: type }; };
+    showBanner(id, render(), type);
+  }
+  function clearBanner(id) {
+    delete _bannerRenderers[id];
+    var el = $(id); el.className = 'banner'; el.textContent = ''; el.style.display = 'none';
+  }
 
   function setLoading(btn, loading) {
     if (!btn) return;
@@ -1045,6 +1100,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // ---------- copy ----------
+  // ---------- 复制 ----------
   function copyText(text, msg) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(function () {
@@ -1061,6 +1117,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // ---------- views ----------
+  // ---------- 视图切换 ----------
   function showLogin() {
     $('view-login').style.display = 'flex';
     $('view-panel').classList.remove('show');
@@ -1074,6 +1131,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // ---------- page switching ----------
+  // ---------- 页面切换 ----------
   function switchPage(name) {
     var pages = document.querySelectorAll('.page');
     for (var i = 0; i < pages.length; i++) pages[i].classList.remove('active');
@@ -1086,8 +1144,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // ---------- login / setup ----------
+  // ---------- 登录 / 首次设密 ----------
   document.addEventListener('DOMContentLoaded', function () {
     // password visibility toggles
+    // 密码可见性切换按钮
     document.querySelectorAll('.eye').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var input = $(btn.dataset.target);
@@ -1105,39 +1165,49 @@ export const ADMIN_UI = `<!DOCTYPE html>
     });
 
     // decide login vs setup mode
+    // 判断显示登录还是首次设密模式
     api('/admin/api/status').then(function (data) {
       var needsSetup = data.adminPasswordMode === 'none';
       if (needsSetup) {
         $('form-login').style.display = 'none';
         $('form-setup').style.display = 'block';
+        $('login-sub').setAttribute('data-i18n', 'login.subtitle_setup');
         $('login-sub').textContent = t('login.subtitle_setup');
       } else {
         showPanel();
       }
     }).catch(function (err) {
-      $('login-msg').textContent = etext(err.message);
-      $('login-msg').className = 'hint err';
+      setLoginMsg(function () { return etext(err.message); });
     });
   });
+
+  var _loginMsgRender = null;
+
+  function setLoginMsg(render) {
+    _loginMsgRender = render;
+    var el = $('login-msg');
+    el.textContent = render();
+    el.className = 'hint err';
+  }
 
   function login() {
     var btn = $('btn-login');
     setLoading(btn, true);
     api('/admin/api/login', { method: 'POST', body: { password: $('pw').value } })
       .then(function () { showPanel(); })
-      .catch(function (err) { $('login-msg').textContent = etext(err.message); $('login-msg').className = 'hint err'; })
+      .catch(function (err) { setLoginMsg(function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
   }
 
   function setup() {
     var btn = $('btn-setup');
     var p1 = $('pw1').value, p2 = $('pw2').value;
-    if (p1.length < 8) { $('login-msg').textContent = t('login.err_short'); $('login-msg').className = 'hint err'; return; }
-    if (p1 !== p2) { $('login-msg').textContent = t('login.err_mismatch'); $('login-msg').className = 'hint err'; return; }
+    if (p1.length < 8) { setLoginMsg(function () { return t('login.err_short'); }); return; }
+    if (p1 !== p2) { setLoginMsg(function () { return t('login.err_mismatch'); }); return; }
     setLoading(btn, true);
     api('/admin/api/setup', { method: 'POST', body: { password: p1, confirm: p2 } })
       .then(function () { showPanel(); })
-      .catch(function (err) { $('login-msg').textContent = etext(err.message); $('login-msg').className = 'hint err'; })
+      .catch(function (err) { setLoginMsg(function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
   }
 
@@ -1148,6 +1218,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // ---------- change password ----------
+  // ---------- 修改密码 ----------
   var _pwSource = 'none';
 
   function updatePwSourceUI(s) {
@@ -1170,6 +1241,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   function openPwModal() {
     clearBanner('pw-modal-banner');
     // Secret override warning: shown only after clicking the button, before the modal opens
+    // Secret 覆盖警告：仅在点击按钮后、弹窗打开前显示
     if (_pwSource === 'secret' && !confirm(t('pm.confirm_secret'))) return;
     $('pw-modal').classList.add('show');
     setTimeout(function () { $('pw-cur').focus(); }, 60);
@@ -1189,10 +1261,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
     var n1 = $('pw-new').value;
     var n2 = $('pw-new2').value;
     clearBanner('pw-modal-banner');
-    if (!cur) { showBanner('pw-modal-banner', t('msg.fill_cur'), 'err'); return; }
-    if (n1.length < 8) { showBanner('pw-modal-banner', t('msg.pw_short'), 'err'); return; }
-    if (n1 === cur) { showBanner('pw-modal-banner', t('msg.pw_same'), 'err'); return; }
-    if (n1 !== n2) { showBanner('pw-modal-banner', t('msg.pw_mismatch'), 'err'); return; }
+    if (!cur) { setBanner('pw-modal-banner', 'err', function () { return t('msg.fill_cur'); }); return; }
+    if (n1.length < 8) { setBanner('pw-modal-banner', 'err', function () { return t('msg.pw_short'); }); return; }
+    if (n1 === cur) { setBanner('pw-modal-banner', 'err', function () { return t('msg.pw_same'); }); return; }
+    if (n1 !== n2) { setBanner('pw-modal-banner', 'err', function () { return t('msg.pw_mismatch'); }); return; }
     setLoading(btn, true);
     api('/admin/api/password', { method: 'POST', body: { current_password: cur, new_password: n1 } })
       .then(function () {
@@ -1200,11 +1272,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
         closePwModal();
         showLogin();
       })
-      .catch(function (err) { showBanner('pw-modal-banner', etext(err.message), 'err'); })
+      .catch(function (err) { setBanner('pw-modal-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
   }
 
   // ---------- status ----------
+  // ---------- 状态 ----------
   function badge(type, text) {
     return '<span class="badge ' + type + '">' + text + '</span>';
   }
@@ -1226,20 +1299,25 @@ export const ADMIN_UI = `<!DOCTYPE html>
   function loadStatus() {
     api('/admin/api/status').then(function (s) {
       // chip
+      // 接入地址胶囊
       $('chip-url').textContent = s.baseUrl + '  ';
       $('api-base-desc').textContent = s.baseUrl;
       $('api-base-code').textContent = s.baseUrl;
 
       // dashboard session stat
+      // 仪表盘 Session 状态
       fillSessionStatus('st', s);
       // upstream page status
+      // 上游页面状态
       fillSessionStatus('up', s);
 
       // keys
+      // Key 计数
       $('st-keys').textContent = String(s.apiKeys.count);
       $('nav-key-count').textContent = String(s.apiKeys.count);
 
       // admin password source badge
+      // 管理密码来源徽标
       updatePwSourceUI(s);
     }).catch(function (err) {
       toast(etext(err.message), 'err');
@@ -1247,15 +1325,16 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // ---------- session ----------
+  // ---------- 会话凭证 ----------
   function testSession() {
     var btn = event.target;
     setLoading(btn, true);
     clearBanner('session-banner');
     api('/admin/api/session', { method: 'POST', body: { json: $('session-json').value, test: true, save: false } })
       .then(function (d) {
-        showBanner('session-banner', testDetail(d.test), d.test.ok ? 'ok' : 'warn');
+        setBanner('session-banner', d.test.ok ? 'ok' : 'warn', function () { return testDetail(d.test); });
       })
-      .catch(function (err) { showBanner('session-banner', etext(err.message), 'err'); })
+      .catch(function (err) { setBanner('session-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
   }
 
@@ -1265,11 +1344,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
     clearBanner('session-banner');
     api('/admin/api/session', { method: 'POST', body: { json: $('session-json').value, test: true, save: true } })
       .then(function (d) {
-        var msg = t('up.import_ok') + (d.test ? ' ' + testDetail(d.test) : '') + t('up.import_summary') + d.summary;
-        showBanner('session-banner', msg, 'ok');
+        setBanner('session-banner', 'ok', function () {
+          return t('up.import_ok') + (d.test ? ' ' + testDetail(d.test) : '') + t('up.import_summary') + d.summary;
+        });
         loadStatus();
       })
-      .catch(function (err) { showBanner('session-banner', etext(err.message), 'err'); })
+      .catch(function (err) { setBanner('session-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
   }
 
@@ -1281,6 +1361,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // ---------- api keys ----------
+  // ---------- API Key ----------
   function createKey() {
     var btn = event.target;
     setLoading(btn, true);
@@ -1293,7 +1374,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
         loadStatus();
         loadKeys();
       })
-      .catch(function (err) { showBanner('keys-banner', etext(err.message), 'err'); })
+      .catch(function (err) { setBanner('keys-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
   }
 
@@ -1334,11 +1415,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // init language before first paint of dynamic content
+  // 在动态内容首次渲染前初始化语言
   _lang = detectLang();
   applyI18n();
   (function () { var sel = $('lang-select'); if (sel) sel.value = _lang; })();
 
   // close modals on mask click / Escape
+  // 点击遮罩或按 Escape 关闭弹窗
   $('key-modal').addEventListener('click', function (e) { if (e.target === this) closeModal(); });
   $('pw-modal').addEventListener('click', function (e) { if (e.target === this) closePwModal(); });
   document.addEventListener('keydown', function (e) {

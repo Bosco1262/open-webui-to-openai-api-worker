@@ -7,8 +7,12 @@
   "kv_namespaces": [
     {
       "binding": "KV"
+      // Omitting id = Automatic Resource Provisioning (Beta): on `wrangler deploy`
+      // or Workers Builds deploys, a KV Namespace is created automatically
+      // (prefixed with the Worker name), enabling one-click deploy after fork.
       // 不填 id = 自动资源供应（Beta）：wrangler deploy 或 Workers Builds 部署时会
       // 自动创建 KV Namespace（以 Worker 名为前缀），实现 fork 后一键部署。
+      // To reuse an existing KV, fill in "id": "<your KV namespace id>" here.
       // 如需复用已有 KV，可在此补上 "id": "<你的 KV namespace id>"。
     }
   ],

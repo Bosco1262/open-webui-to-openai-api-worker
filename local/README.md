@@ -1,10 +1,12 @@
-# 本地认证获取端
+# Local Credential Capture
 
-用于在本地获取 Open WebUI 的登录凭证（`session.json`），随后将其粘贴到 Worker 管理界面导入。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## 安装
+Used to obtain the Open WebUI login credentials (`session.json`) locally, which are then pasted into the Worker admin console for import.
 
-需要 Python 3.9+：
+## Installation
+
+Requires Python 3.9+:
 
 ```bash
 cd local
@@ -12,22 +14,23 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
-## 使用
+## Usage
 
 ```bash
 python login.py --base-url https://your-open-webui.example.com
 ```
 
-运行后：
+After running:
 
-1. 会自动打开一个 Chromium 浏览器窗口；
-2. 在窗口中手动完成 Open WebUI 登录（若跳转到校园网/公司网认证页，请先完成网络认证）；
-3. 脚本后台捕获登录凭证，并**向真实上游做一次鉴权验证**（防止误抓过期 Token 或门户重定向产生的无效凭证）；
-4. 验证通过后自动关闭浏览器，将 `session.json` 保存到当前目录，并在终端**完整输出 JSON 内容**：
+1. A Chromium browser window opens automatically;
+2. Complete the Open WebUI login manually in the window (if it redirects to a campus/corporate network portal, finish the network authentication first);
+3. The script captures the login credentials in the background and **performs a real authentication check against the upstream** (to avoid capturing expired tokens or invalid credentials produced by portal redirects);
+4. After verification passes, the browser closes automatically, `session.json` is saved to the current directory, and the **full JSON content is printed in the terminal**:
 
 ```
 ==============================================================
-  请复制下方全部 JSON 内容，粘贴到 Worker 管理界面的『导入 Session』中。
+  Copy ALL of the JSON below and paste it into "Import Session"
+  in the Worker admin console.
 ==============================================================
 {
   "authorization": "Bearer eyJhbGciOiJIUzI1NiIs...",
@@ -39,26 +42,42 @@ python login.py --base-url https://your-open-webui.example.com
 ==============================================================
 ```
 
-5. 复制以上 JSON 内容 → 打开 Worker 管理界面 `/admin` → **导入 Session** 卡片 → 粘贴并导入。
+5. Copy the JSON above → open the Worker admin console `/admin` → **Import Session** card → paste and import.
 
-## 常用参数
+## Common Options
 
-| 参数 | 默认值 | 说明 |
-| --- | --- | --- |
-| `--base-url` | 环境变量 `OPEN_WEBUI_BASE_URL` | Open WebUI 地址，需含 `http(s)://` 前缀 |
-| `--timeout` | `600` | 最长等待登录的秒数 |
-| `--quiet-period` | `6` | 捕获凭证后的静默观察期（秒） |
-| `--headless` | `false` | 以无头模式启动浏览器 |
-| `--output` | `session.json` | 输出文件路径 |
-| `--insecure` | `false` | 跳过上游 HTTPS 证书校验（慎用） |
+| Option           | Default                        | Description                                                       |
+| ---------------- | ------------------------------ | ----------------------------------------------------------------- |
+| `--base-url`     | env var `OPEN_WEBUI_BASE_URL`  | Open WebUI URL; must include the `http(s)://` prefix              |
+| `--timeout`      | `600`                          | Max seconds to wait for login                                     |
+| `--quiet-period` | `6`                            | Quiet observation period after capture (seconds)                  |
+| `--headless`     | `false`                        | Launch the browser in headless mode                               |
+| `--output`       | `session.json`                 | Output file path                                                  |
+| `--insecure`     | `false`                        | Skip upstream HTTPS certificate verification (use with caution)   |
+| `--lang`         | `auto`                         | Output language: `zh` / `en` / `auto` (auto = system language)    |
 
 ```bash
 python login.py --base-url https://chat.example.com --timeout 900
 python login.py --base-url https://chat.example.com --output my-session.json
+python login.py --base-url https://chat.example.com --lang en
 ```
 
-## 说明
+### Output Language
 
-- 凭证通过真实上游鉴权后才算登录成功，避免把"过期 Token 探测请求"或"校园网未认证跳转"误存为有效凭证。
-- `session.json` 已加入 `.gitignore`，请勿提交到版本库。
-- 当 Open WebUI 的 JWT 过期（通常数天，取决于服务端 `JWT_EXPIRES_IN`），重新运行本工具刷新即可。
+All terminal output (banner, logs, errors, `--help` text) is localized in Chinese / English. Language selection priority:
+
+1. `--lang zh` / `--lang en` — explicit CLI flag (highest priority);
+2. System language detection — env vars (`LANG` / `LC_ALL` etc.) or the Windows UI language;
+3. English — the default when detection fails.
+
+The `--help` output follows `--lang` as well, e.g. `python login.py --lang en --help` always shows English help.
+
+## Notes
+
+- Credentials are only considered valid after passing a real upstream authentication check, avoiding saving "expired-token probing requests" or "unauthenticated campus portal redirects" as valid credentials.
+- `session.json` is in `.gitignore`; do not commit it to version control.
+- When the Open WebUI JWT expires (typically a few days, depending on the server's `JWT_EXPIRES_IN`), simply rerun this tool to refresh it.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
