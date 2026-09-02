@@ -1,11 +1,13 @@
 /**
  * KV data layer.
- * KV 数据层。
- *
+ * 
  * Everything the Worker persists lives in the single KV namespace. Reads on
  * the hot proxy path are minimized (one API-key lookup per request) and the
  * session is cached in the instance for 60s so management writes don't force
  * repeated KV reads.
+ * 
+ * KV 数据层。
+ *
  * Worker 持久化的所有数据都存放在单一 KV 命名空间中。热代理路径上的读取被
  * 压到最低（每次请求仅 1 次 API Key 查询），session 在实例内缓存 60 秒，
  * 管理端写入不会强制触发重复的 KV 读取。
@@ -218,6 +220,7 @@ export async function getOrCreateSessionSecret(env: Env): Promise<string> {
 // Read/written directly on every admin-authenticated path (no instance cache):
 // bumping the epoch on a password change must invalidate every previously
 // issued stateless token immediately, so a stale cached value is unacceptable.
+//
 // 每条管理鉴权路径都直接读写（不做实例缓存）：修改密码时自增纪元必须立即使
 // 所有已签发的无状态令牌失效，因此不能容忍过期的缓存值。
 

@@ -237,6 +237,7 @@ def current() -> str:
 
 # Built-in argparse strings, localized so that the whole --help / error output
 # follows the same language as the rest of the tool.
+#
 # argparse 内置字符串，让 --help / 错误输出与工具整体保持同一语言。
 _ARGPARSE_STRINGS: Dict[str, Tuple[str, str]] = {
     "usage: ": ("usage: ", "用法："),
@@ -299,10 +300,11 @@ def install_argparse_translation() -> None:
     """
     Make argparse's built-in help/error strings follow the current language.
 
-    让 argparse 内置的帮助/错误字符串跟随当前语言。
-
     Must be called before creating the ArgumentParser: the "-h" help text and
     the "options" group title are captured at construction time.
+
+    让 argparse 内置的帮助/错误字符串跟随当前语言。
+
     必须在创建 ArgumentParser 之前调用："-h" 帮助文本与 "options" 分组标题
     在构造时即被捕获。
     """
@@ -315,10 +317,11 @@ def t(key: str, **fmt: object) -> str:
     """
     Translate a message key into the current language, then format it.
 
-    把消息 key 翻译成当前语言，再按参数格式化。
-
     Unknown keys fall back to the key itself, so a typo degrades gracefully instead
     of crashing at runtime.
+    
+    把消息 key 翻译成当前语言，再按参数格式化。
+
     未知 key 回退为 key 本身，拼写错误只会退化为原文而不会在运行时崩溃。
     """
     pair = _MESSAGES.get(key)

@@ -1,29 +1,35 @@
 """
 open-webui-to-openai-api — Local credential capture tool
-open-webui-to-openai-api —— 本地认证获取端
 
 Open a browser for the user to complete the Open WebUI login manually, capture
 the post-login identity credentials (Authorization / Cookie / User-Agent), and
 perform a real authentication check against the upstream (to avoid capturing
 expired tokens or invalid credentials produced by campus portal redirects).
 After verification passes:
+
+1. Save to the local session.json;
+2. Print the full session.json content in the terminal for copy-paste into the
+   Worker admin console.
+
+Usage:
+    python login.py --base-url https://chat.example.com
+    python login.py --base-url https://chat.example.com --timeout 900 --headless
+    python login.py --base-url https://chat.example.com --lang en
+Language priority: --lang flag > system language > English.
+
+open-webui-to-openai-api —— 本地认证获取端
+
 打开浏览器让用户手动完成 Open WebUI 登录，捕获登录后的身份凭证（Authorization /
 Cookie / User-Agent），向真实上游做一次鉴权验证（防止误抓过期 Token 或被校园网等
 门户重定向产生的无效凭证），验证通过后：
 
-1. Save to the local session.json;
 1. 保存到本地 session.json；
-2. Print the full session.json content in the terminal for copy-paste into the
-   Worker admin console.
 2. 在终端完整输出 session.json 内容，供复制粘贴到 Worker 管理界面导入。
 
-Usage:
 用法：
     python login.py --base-url https://chat.example.com
     python login.py --base-url https://chat.example.com --timeout 900 --headless
     python login.py --base-url https://chat.example.com --lang en
-
-Language priority: --lang flag > system language > English.
 语言优先级：--lang 参数 > 系统语言 > 默认英语。
 """
 
@@ -59,6 +65,7 @@ DEFAULT_USER_AGENT = (
 
 # Upstream endpoints only called by the frontend after a successful login,
 # used to judge "the user is really logged in"
+#
 # 只有登录成功后前端才会去调用的上游接口，用于判定"确实登录了"
 AUTHED_PATH_HINTS = (
     "/api/models",
@@ -177,13 +184,13 @@ def _build_cookie_header(cookies: Any) -> str:
 def is_login_signal(url: str, headers: Dict[str, str], api_prefix: str) -> bool:
     """
     Decide whether a request indicates "the user is already logged in".
-    判断一个请求是否说明"用户已经登录了"。
-
     - Strong signal: a request to the upstream /api/ carries a non-empty Bearer token;
-    - 强信号：发往上游 /api/ 的请求带了非空 Bearer Token；
     - Weak signal: Cookie only — anonymous visits also carry cookies (theme,
       CSRF, etc.), so additionally require the request to hit an endpoint that
       the frontend only calls when logged in.
+
+    判断一个请求是否说明"用户已经登录了"。
+    - 强信号：发往上游 /api/ 的请求带了非空 Bearer Token；
     - 弱信号：只有 Cookie —— 匿名访问同样会带 Cookie（主题、CSRF 等），
       因此额外要求命中的是必须登录后前端才会调用的接口。
     """
@@ -205,7 +212,6 @@ async def credentials_are_valid(base_url: str, session: Session) -> bool:
     """
     Make one real request to the upstream to check whether the captured
     credentials are currently valid.
-    对上游做一次真实请求，校验抓到的凭证当前是否有效。
 
     The capture logic can only see "the request carried credentials", but what
     it carries is not necessarily valid: early in page load the frontend sends
@@ -213,6 +219,9 @@ async def credentials_are_valid(base_url: str, session: Session) -> bool:
     portal (e.g. campus network) is unauthenticated, every request gets
     redirected by the gateway. Therefore credentials must pass one real
     upstream authentication to be considered valid.
+
+    对上游做一次真实请求，校验抓到的凭证当前是否有效。
+    
     抓取逻辑只能看到"请求带了凭证"，但带的不一定是有效凭证：页面加载早期前端会
     用 localStorage 里的旧 Token 发探测请求；校园网等强制门户未完成认证时任何请求
     都会被网关重定向。因此凭证必须通过上游一次真实鉴权才算有效。
@@ -222,7 +231,9 @@ async def credentials_are_valid(base_url: str, session: Session) -> bool:
     headers = session.to_headers()
     async with httpx.AsyncClient(
         verify=True,
-        follow_redirects=False,  # A portal redirect yields a 3xx, exactly what we treat as invalid / 被门户重定向时拿到 3xx，正好判无效
+        follow_redirects=False,
+        # A portal redirect yields a 3xx, exactly what we treat as invalid
+        # 被门户重定向时拿到 3xx，正好判无效
         timeout=15.0,
     ) as client:
         for prefix in PREFIX_CANDIDATES:
@@ -248,6 +259,7 @@ async def perform_browser_login(
     """
     Open a browser for manual login, capture the post-login request headers,
     and run a real upstream authentication check.
+
     打开浏览器让用户手动登录，捕获登录后的请求头，并做真实上游鉴权验证。
     """
     api_prefix = f"{base_url}/api"
@@ -305,6 +317,7 @@ async def perform_browser_login(
                 event.clear()
                 # Quiet period: login is considered finished only when no newer
                 # credentials are captured during this window
+                #
                 # 静默观察期：期间没有更新的凭证才认为登录流程结束
                 try:
                     await asyncio.wait_for(event.wait(), timeout=quiet_period)
@@ -312,6 +325,7 @@ async def perform_browser_login(
                     pass
                 # The critical step: captured credentials must pass a real
                 # upstream authentication to count as logged in
+                #
                 # 关键一步：抓到的凭证必须能通过上游真实鉴权才算登录成功
                 if await credentials_are_valid(base_url, captured):
                     break
@@ -326,6 +340,7 @@ async def perform_browser_login(
         except Exception as exc:
             # E.g. the user closes the browser directly: keep going if we
             # already captured usable credentials
+            #
             # 用户直接关掉浏览器等情况：只要抓到了凭证就继续
             if not captured.is_usable():
                 await browser.close()
@@ -347,11 +362,13 @@ async def perform_browser_login(
 async def _enrich_from_browser(page, context, session: Session) -> None:
     """
     Supplement the capture with the localStorage token and the full cookie jar.
-    补充抓取 localStorage 里的 token 与完整 Cookie Jar。
-
+    、
     The Cookie in request headers may be incomplete; Open WebUI also stores
     the JWT in the localStorage `token` key, so reading it directly yields the
     most complete identity information.
+
+    补充抓取 localStorage 里的 token 与完整 Cookie Jar。
+    
     请求头里的 Cookie 可能不完整；Open WebUI 也把 JWT 存在 localStorage 的 `token`
     键里，直接读取能得到最完整的身份信息。
     """
@@ -368,6 +385,7 @@ async def _enrich_from_browser(page, context, session: Session) -> None:
     try:
         # Only take cookies of the Open WebUI domain, avoiding cookies from
         # other sites such as the campus portal
+        #
         # 只取 Open WebUI 域的 Cookie，避免混入校园网门户等其他站点的 Cookie
         jar = await context.cookies(session.base_url)
         cookie_header = _build_cookie_header(jar)
@@ -403,8 +421,9 @@ def save_session(path: Path, session: Session) -> None:
 
 def main(argv: Optional[list[str]] = None) -> int:
     # CLI entry: parse args, run the login flow, save and print session.json
-    # 命令行入口：解析参数，执行登录流程，保存并输出 session.json
     # Scan argv for --lang first to honor --lang for the help text as well.
+    #
+    # 命令行入口：解析参数，执行登录流程，保存并输出 session.json
     # 先扫描 argv 中的 --lang，让 --help 的输出也能跟随 --lang。
     cli_args = list(sys.argv[1:]) if argv is None else list(argv)
     for i, token in enumerate(cli_args):
@@ -413,6 +432,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Localize argparse's built-in strings ("show this help message and exit",
     # "usage:", ...) before the parser is constructed.
+    #
     # 在创建 parser 前本地化 argparse 内置字符串（"show this help message and
     # exit"、"usage:" 等）。
     lang.install_argparse_translation()

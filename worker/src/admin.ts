@@ -220,6 +220,7 @@ async function handleChangePassword(env: Env, request: Request): Promise<Respons
   }
   // The epoch bump invalidated every session, ours included: clear the cookie
   // and let the UI route back to the login view.
+  //
   // 纪元自增使所有会话（含当前会话）失效：清除 Cookie，让 UI 回到登录视图。
   const isHttps = new URL(request.url).protocol === "https:";
   return new Response(JSON.stringify({ ok: true, reauthenticate: true }), {
@@ -378,6 +379,7 @@ export async function handleAdminApiRequest(
 
   // Everything else requires admin auth, and is blocked outright while no
   // admin password exists yet (mirrors M365: the console must be set up first).
+  //
   // 其余路由均要求管理员鉴权；尚无管理密码时直接拒绝
   // （与 M365 对齐：控制台必须先完成设密）。
   const source = await adminPasswordSource(env);

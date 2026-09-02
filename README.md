@@ -12,14 +12,14 @@ A Cloudflare Worker that reverse-proxies a "browser-login-only" Open WebUI into 
 ## Architecture
 
 ```
-┌─────────────────┐   copy-paste JSON   ┌───────────────────────────────┐
+┌──────────────────┐   copy-paste JSON    ┌────────────────────────────────┐
 │   Local side     │ ──────────────────▶ │  Worker (Free plan + KV)       │
-│   login.py       │                     │  /admin        admin console   │
-│   browser login  │                     │  /admin/api/*  admin REST API  │
-│   → session      │                     │  /v1/*         OpenAI proxy    │
-└─────────────────┘                     └──────────────┬────────────────┘
+│   login.py       │                      │  /admin        admin console   │
+│   browser login  │                      │  /admin/api/*  admin REST API  │
+│   → session      │                      │  /v1/*         OpenAI proxy    │
+└──────────────────┘                      └──────────────┬─────────────────┘
 OpenAI clients ──▶ Bearer sk-xxx ──▶  /v1/*            │
-                                                       ▼
+                                                         ▼
                                                  Open WebUI upstream
 ```
 
@@ -64,12 +64,12 @@ Two deployment methods are supported:
 4. Select this repository and the deployment branch (e.g. `main`).
 5. Configure the build settings:
 
-   | Field           | Value                      |
-   | --------------- | -------------------------- |
-   | **Root directory** | `worker`                |
-   | **Build command**  | `npm ci && npm run deploy` |
+   | Field              | Value            |
+   | ------------------ | ---------------- |
+   | **Root directory** | `/worker`        |
+   | **Build command**  | `npm install`    |
 
-   > The Worker code lives in the `worker/` subdirectory, so the root directory must be `worker`; `npm ci` installs dependencies from `package-lock.json` and `npm run deploy` runs `wrangler deploy`.
+   > The Worker code lives in the `worker/` subdirectory, so the root directory must be `/worker`; `npm install` installs dependencies from `package-lock.json` and `npx wrangler deploy` runs `wrangler deploy`.
 
 6. After saving, Cloudflare builds and deploys immediately: the **KV Namespace is created automatically on first deploy**, and every subsequent **push to the branch auto-deploys**.
 

@@ -1,11 +1,12 @@
 /**
  * Self-contained admin console (single HTML page, zero external dependencies).
- * 自包含的管理控制台（单 HTML 页面，零外部依赖）。
  * Layout: top title bar + fixed left sidebar navigation + right content area.
- * 布局：顶部标题栏 + 固定左侧边栏导航 + 右侧内容区。
  * Built-in i18n (zh-CN / en): manual choice > browser language > English fallback.
- * 内置 i18n（zh-CN / en）：手动选择 > 浏览器语言 > 英文回退。
  * Dark console aesthetic with glassmorphism cards and orange accents.
+ * 
+ * 自包含的管理控制台（单 HTML 页面，零外部依赖）。
+ * 布局：顶部标题栏 + 固定左侧边栏导航 + 右侧内容区。
+ * 内置 i18n（zh-CN / en）：手动选择 > 浏览器语言 > 英文回退。
  * 深色控制台风格，玻璃拟态卡片与橙色点缀。
  */
 

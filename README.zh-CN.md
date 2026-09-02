@@ -12,14 +12,14 @@
 ## 架构
 
 ```
-┌─────────────┐   复制粘贴 JSON    ┌───────────────────────────────┐
-│  本地端      │ ──────────────────▶ │  Worker（Free + KV）            │
-│ login.py    │                    │  /admin        管理界面          │
-│ 浏览器登录   │                    │  /admin/api/*  管理 API          │
-│ → session   │                    │  /v1/*         OpenAI 兼容代理    │
-└─────────────┘                    └──────────────┬────────────────┘
+┌─────────────┐   复制粘贴 JSON      ┌───────────────────────────────┐
+│  本地端     │ ──────────────────▶ │  Worker（Free + KV）          │
+│ login.py    │                     │  /admin        管理界面        │
+│ 浏览器登录  │                      │  /admin/api/*  管理 API       │
+│ → session   │                     │  /v1/*         OpenAI 兼容代理 │
+└─────────────┘                     └──────────────┬────────────────┘
 OpenAI 客户端 ──▶ Bearer sk-xxx ──▶  /v1/*        │
-                                                  ▼
+                                                   ▼
                                             Open WebUI 上游
 ```
 
@@ -64,12 +64,12 @@ OpenAI 客户端 ──▶ Bearer sk-xxx ──▶  /v1/*        │
 4. 选择本仓库与部署分支（如 `main`）。
 5. 配置构建设置：
 
-   | 字段         | 值                         |
-   | ------------ | -------------------------- |
-   | **根目录**   | `worker`                   |
-   | **构建命令** | `npm ci && npm run deploy` |
+   | 字段                |  值              |
+   | ------------------- | ---------------- |
+   | **高级设置 - 路径**  |   `worker`       |
+   | **构建命令**         |   `npm install`  |
 
-   > 因为 Worker 代码位于仓库的 `worker/` 子目录，根目录必须填 `worker`；`npm ci` 按 `package-lock.json` 安装依赖，`npm run deploy` 执行 `wrangler deploy`。
+   > 因为 Worker 代码位于仓库的 `worker/` 子目录，根目录必须填 `/worker`；`npm install` 按 `package-lock.json` 安装依赖，`npx wrangler deploy` 执行 `wrangler deploy`。
 
 6. 保存后 Cloudflare 会立即构建并部署：**KV Namespace 首次部署时自动创建**，之后 **push 到该分支即自动部署**。
 

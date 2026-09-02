@@ -1,18 +1,18 @@
 /**
  * Worker entry: fetch handler + route dispatch.
- * Worker 入口：fetch 处理器与路由分发。
- *
  * Routes:
- * 路由：
  *   GET  /                    service metadata
- *   GET  /                    服务元信息
  *   GET  /healthz             health check (unauthenticated, always 200)
- *   GET  /healthz             健康检查（无需鉴权，始终 200）
  *   GET  /admin               admin console (HTML)
- *   GET  /admin               管理界面（HTML）
  *   /admin/api/*              admin REST API
- *   /admin/api/*              管理 REST API
  *   /v1/*                     OpenAI-compatible proxy
+ * 
+ * Worker 入口：fetch 处理器与路由分发。
+ * 路由：
+ *   GET  /                    服务元信息
+ *   GET  /healthz             健康检查（无需鉴权，始终 200）
+ *   GET  /admin               管理界面（HTML）
+ *   /admin/api/*              管理 REST API
  *   /v1/*                     OpenAI 兼容代理
  */
 

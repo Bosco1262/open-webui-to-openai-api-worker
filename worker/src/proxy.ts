@@ -1,21 +1,24 @@
 /**
  * OpenAI-compatible proxy for /v1/*.
+ * 
+ * Ported behavior from the original FastAPI project:
+ *   - upstream prefix probing (/api/v1 vs /api) with automatic 404 fallback
+ *   - model list normalization to {id, object, created, owned_by}
+ *   - SSE streaming passthrough with hop-by-hop header stripping
+ *   - OpenAI-style error bodies
+ *   - upstream 401/403 -> clear "re-import session" error
+ * 
+ * Upstream: direct connection to {session.base_url}/{path}.
+ * 
  * /v1/* 的 OpenAI 兼容代理。
  *
- * Ported behavior from the original FastAPI project:
  * 从原 FastAPI 项目移植的行为：
- *   - upstream prefix probing (/api/v1 vs /api) with automatic 404 fallback
  *   - 上游前缀探测（/api/v1 与 /api）并自动按 404 回退
- *   - model list normalization to {id, object, created, owned_by}
  *   - 模型列表规范化为 {id, object, created, owned_by}
- *   - SSE streaming passthrough with hop-by-hop header stripping
  *   - SSE 流式直通并剔除逐跳（hop-by-hop）请求头
- *   - OpenAI-style error bodies
  *   - OpenAI 风格的错误体
- *   - upstream 401/403 -> clear "re-import session" error
  *   - 上游 401/403 → 明确提示重新导入 session 的错误
  *
- * Upstream: direct connection to {session.base_url}/{path}.
  * 上游：直连 {session.base_url}/{path}。
  */
 

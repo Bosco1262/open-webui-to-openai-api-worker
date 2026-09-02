@@ -1,30 +1,34 @@
 /**
  * Shared types for the Worker.
+ * 
+ * Storage layout in the KV namespace:
+ *   - "session"                    -> StoredSession (imported from the local login tool)
+ *   - "apikey:{key}"               -> ApiKeyMeta (key itself is the KV key, O(1) lookup)
+ *   - "admin:password_hash"        -> { salt, hash } (PBKDF2 via WebCrypto)
+ *   - "admin:session_secret"       -> auto-derived HMAC secret for admin cookies
+ *   - "admin:session_epoch"        -> number; bumped on every password change so all
+ *                                     previously issued admin session tokens die at once
+ * 
+ * Admin password sources (mirror of M365-Copilot2API-on-Cloudflare-Worker):
+ *   - ADMIN_PASSWORD secret is verified directly and is NEVER written to KV.
+ *   - The KV hash is written only by the web console: first-visit setup ("none"
+ *     mode) or the "change password" flow.
+ *   - When a KV hash exists it always wins over the secret binding.
+ * 
  * Worker 共享类型。
  *
- * Storage layout in the KV namespace:
  * KV 命名空间中的存储布局：
- *   - "session"                    -> StoredSession (imported from the local login tool)
  *   - "session"                    -> StoredSession（由本地登录工具导入）
- *   - "apikey:{key}"               -> ApiKeyMeta (key itself is the KV key, O(1) lookup)
  *   - "apikey:{key}"               -> ApiKeyMeta（Key 明文即 KV 键名，O(1) 查询）
- *   - "admin:password_hash"        -> { salt, hash } (PBKDF2 via WebCrypto)
  *   - "admin:password_hash"        -> { salt, hash }（WebCrypto 的 PBKDF2）
- *   - "admin:session_secret"       -> auto-derived HMAC secret for admin cookies
  *   - "admin:session_secret"       -> 自动派生的管理 Cookie HMAC 签名密钥
- *   - "admin:session_epoch"        -> number; bumped on every password change so all
  *   - "admin:session_epoch"        -> 数字；每次修改密码时自增，使所有
  *                                     previously issued admin session tokens die at once
  *                                     已签发的管理会话令牌立即全部失效
  *
- * Admin password sources (mirror of M365-Copilot2API-on-Cloudflare-Worker):
  * 管理密码来源（与 M365-Copilot2API-on-Cloudflare-Worker 对齐）：
- *   - ADMIN_PASSWORD secret is verified directly and is NEVER written to KV.
  *   - ADMIN_PASSWORD Secret 直接参与验证，绝不写入 KV。
- *   - The KV hash is written only by the web console: first-visit setup ("none"
- *     mode) or the "change password" flow.
  *   - KV 哈希仅由网页控制台写入：首次访问设密（"none" 模式）或「修改密码」流程。
- *   - When a KV hash exists it always wins over the secret binding.
  *   - KV 哈希一旦存在，始终优先于 Secret 绑定。
  */
 
@@ -34,9 +38,12 @@ export interface Env {
   KV: KVNamespace;
   /**
    * Optional: preset admin password via `wrangler secret put ADMIN_PASSWORD`.
-   * 可选：通过 `wrangler secret put ADMIN_PASSWORD` 预设管理密码。
+   * 
    * Verified directly (never stored in KV); a KV password, once set via the
    * console, takes priority over this binding.
+   * 
+   * 可选：通过 `wrangler secret put ADMIN_PASSWORD` 预设管理密码。
+   * 
    * 直接验证（绝不写入 KV）；一旦通过控制台设置了 KV 密码，则优先于该绑定。
    */
   ADMIN_PASSWORD?: string;

@@ -1,9 +1,11 @@
 /**
  * Shared upstream-request helpers.
- * 上游请求公共辅助函数。
  *
  * sessionHeaders builds the headers used to authenticate against the
  * Open WebUI upstream from the captured session credentials.
+ * 
+ * 上游请求公共辅助函数。
+ * 
  * sessionHeaders 根据捕获的会话凭证，构造用于向 Open WebUI 上游鉴权的请求头。
  */
 

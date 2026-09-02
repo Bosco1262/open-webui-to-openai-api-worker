@@ -1,31 +1,34 @@
 /**
  * Authentication: admin console access + client API-key verification.
- * 鉴权：管理后台访问 + 客户端 API Key 校验。
  *
  * Admin password sources (mirror of M365-Copilot2API-on-Cloudflare-Worker):
- * 管理密码来源（与 M365-Copilot2API-on-Cloudflare-Worker 对齐）：
- *   1. `ADMIN_PASSWORD` secret (set via `wrangler secret put`) — verified
+ * 1. `ADMIN_PASSWORD` secret (set via `wrangler secret put`) — verified
  *      directly and NEVER written to KV.
- *   1. `ADMIN_PASSWORD` Secret（通过 `wrangler secret put` 设置）—— 直接验证，
- *      绝不写入 KV。
- *   2. PBKDF2 password hash in KV, written only by the web console (first-visit
+ * 2. PBKDF2 password hash in KV, written only by the web console (first-visit
  *      setup, or the "change password" flow).
- *   2. 存于 KV 的 PBKDF2 密码哈希，仅由网页控制台写入（首次访问设密或
- *      「修改密码」流程）。
  * A KV hash, once it exists, always wins over the secret binding.
- * KV 哈希一旦存在，始终优先于 Secret 绑定。
- *
+ * 
  * A successful login issues an HMAC-SHA256 signed cookie (`ow2_admin`) with an
  * expiry timestamp; the signing secret is `SESSION_SECRET` or an auto-derived
  * random secret persisted in KV. The token also carries the current admin
  * session epoch (`admin:session_epoch`), which is bumped on every password
  * change so all previously issued sessions die at once.
+ * 
+ * Client API keys are checked in O(1) by using the key itself as the KV key.
+ * 
+ * 鉴权：管理后台访问 + 客户端 API Key 校验。
+ * 管理密码来源（与 M365-Copilot2API-on-Cloudflare-Worker 对齐）：
+ *   1. `ADMIN_PASSWORD` Secret（通过 `wrangler secret put` 设置）—— 直接验证，
+ *      绝不写入 KV。
+ *   2. 存于 KV 的 PBKDF2 密码哈希，仅由网页控制台写入（首次访问设密或
+ *      「修改密码」流程）。
+ * KV 哈希一旦存在，始终优先于 Secret 绑定。
+ *
  * 登录成功后签发带过期时间戳的 HMAC-SHA256 签名 Cookie（`ow2_admin`）；
  * 签名密钥为 `SESSION_SECRET` 或自动派生并持久化到 KV 的随机密钥。令牌还
  * 携带当前管理会话纪元（`admin:session_epoch`），每次修改密码时纪元自增，
  * 所有此前签发的会话随之立即失效。
  *
- * Client API keys are checked in O(1) by using the key itself as the KV key.
  * 客户端 API Key 以 Key 明文作为 KV 键名，实现 O(1) 校验。
  */
 
@@ -128,14 +131,15 @@ export async function verifyPassword(password: string, stored: PasswordHash): Pr
 
 /**
  * Where the effective admin password currently comes from:
- * 当前生效的管理密码来源：
  *   "kv"     – a KV hash exists (set via web setup or a console password
  *              change) and always takes priority over the secret.
- *   "kv"     – 存在 KV 哈希（网页设密或控制台改密写入），始终优先于 Secret。
  *   "secret" – no KV hash yet and ADMIN_PASSWORD is bound; verified directly,
  *              never written to KV.
- *   "secret" – 尚无 KV 哈希且已绑定 ADMIN_PASSWORD；直接验证，不写入 KV。
  *   "none"   – nothing configured: the console must run first-visit setup.
+ * 
+ * 当前生效的管理密码来源：
+ *   "kv"     – 存在 KV 哈希（网页设密或控制台改密写入），始终优先于 Secret。
+ *   "secret" – 尚无 KV 哈希且已绑定 ADMIN_PASSWORD；直接验证，不写入 KV。
  *   "none"   – 完全未配置：控制台必须先完成首次设密。
  */
 export async function adminPasswordSource(env: Env): Promise<AdminPasswordSource> {
@@ -164,11 +168,13 @@ export async function adminSetupPassword(env: Env, password: string): Promise<vo
 
 /**
  * Verify a candidate password.
- * 校验候选密码。
  *
  * Priority mirrors M365: a KV hash (web setup / console change) always wins
  * over the ADMIN_PASSWORD secret; the secret is only a fallback while no KV
  * hash exists. Verification never writes to KV.
+ * 
+ * 校验候选密码。
+ * 
  * 优先级与 M365 对齐：KV 哈希（网页设密 / 控制台改密）始终优先于
  * ADMIN_PASSWORD Secret；Secret 仅在尚无 KV 哈希时作为回退。校验绝不写 KV。
  */
@@ -185,6 +191,7 @@ export async function adminVerifyPassword(env: Env, password: string): Promise<b
  * previously issued admin session is invalidated. Works regardless of whether
  * the current source is the secret or a KV hash; once written, the new KV hash
  * overrides the ADMIN_PASSWORD secret.
+ * 
  * 从控制台修改管理密码。需要提供当前密码，将新的 PBKDF2 哈希写入 KV，并
  * 自增会话纪元使所有此前签发的管理会话失效。无论当前来源是 Secret 还是
  * KV 哈希均可执行；写入后新的 KV 哈希将覆盖 ADMIN_PASSWORD Secret。
@@ -338,6 +345,7 @@ export function lockoutRecord(ip: string): void {
   const now = Date.now();
   // Bound the map like upstream: prune expired entries first, then evict the
   // oldest-timestamp entry as a last resort.
+  //
   // 像上游一样限制容量：先清理过期条目，仍超限再逐出最早时间戳的条目。
   if (localLoginFailures.size >= LOCAL_LOCKOUT_MAX_ENTRIES && !localLoginFailures.has(ip)) {
     for (const [k] of localLoginFailures) localLockoutPrune(k);
