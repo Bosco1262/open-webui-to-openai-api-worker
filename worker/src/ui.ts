@@ -629,6 +629,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
                   <span class="setting-label" data-i18n="set.pw_src_label">当前密码储存位置</span>
                   <span id="pw-src-badge" class="badge gray">—</span>
                 </div>
+                <div class="setting-hint" data-i18n="set.pw_src_hint">部署时通过 Secret（ADMIN_PASSWORD）提供的密码优先；若曾在控制台修改过密码，则以 KV 中保存的新密码为准，原 Secret 将不再生效。</div>
               </div>
               <button class="btn btn-primary" style="width:auto;" onclick="openPwModal()" data-i18n="set.pw_change">修改密码</button>
             </div>
@@ -796,6 +797,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.pw_title': '密码设置',
       'set.pw_desc': '管理控制台的登录密码。修改后所有已登录的管理会话将失效，需重新登录。',
       'set.pw_src_label': '当前密码储存位置',
+      'set.pw_src_hint': '部署时通过 Secret（ADMIN_PASSWORD）提供的密码优先；若曾在控制台修改过密码，则以 KV 中保存的新密码为准，原 Secret 将不再生效。',
       'set.src_secret': 'Secret（ADMIN_PASSWORD）',
       'set.src_kv': 'KV（控制台修改）',
       'set.src_none': '未设置',
@@ -929,6 +931,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.pw_title': 'Password',
       'set.pw_desc': 'Manage the console login password. Changing it signs out all admin sessions.',
       'set.pw_src_label': 'Current Password Storage',
+      'set.pw_src_hint': 'A password provided via the Secret (ADMIN_PASSWORD) at deployment takes priority; if it was ever changed in the console, the value stored in KV is used instead and the original Secret no longer applies.',
       'set.src_secret': 'Secret (ADMIN_PASSWORD)',
       'set.src_kv': 'KV (changed in console)',
       'set.src_none': 'Not set',
