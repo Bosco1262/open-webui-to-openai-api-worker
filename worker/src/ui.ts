@@ -1391,14 +1391,18 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   function closeModal() { $('key-modal').classList.remove('show'); }
 
+  var _keys = [];
+
   function loadKeys() {
     api('/admin/api/keys').then(function (d) {
       var tbody = $('key-tbody');
       if (!d.keys || !d.keys.length) {
+        _keys = [];
         tbody.innerHTML = '<tr><td colspan="5" class="empty">' + t('keys.empty') + '</td></tr>';
         return;
       }
-      tbody.innerHTML = d.keys.map(function (k) {
+      _keys = d.keys;
+      tbody.innerHTML = d.keys.map(function (k, i) {
         var created = new Date(k.created_at * 1000).toLocaleString();
         var used = k.last_used ? new Date(k.last_used * 1000).toLocaleString() : t('keys.never_used');
         return '<tr>' +
@@ -1406,15 +1410,17 @@ export const ADMIN_UI = `<!DOCTYPE html>
           '<td class="mono">' + esc(k.masked) + '</td>' +
           '<td>' + created + '</td>' +
           '<td>' + used + '</td>' +
-          '<td style="text-align:right"><button class="btn btn-danger btn-sm" onclick="deleteKey(\\'' + k.key + '\\',\\'' + esc(k.masked) + '\\')">' + t('common.delete') + '</button></td>' +
+          '<td style="text-align:right"><button class="btn btn-danger btn-sm" onclick="deleteKey(' + i + ')">' + t('common.delete') + '</button></td>' +
           '</tr>';
       }).join('');
     }).catch(function (err) { toast(etext(err.message), 'err'); });
   }
 
-  function deleteKey(fullKey, masked) {
-    if (!confirm(t('keys.del_confirm') + masked + t('keys.del_confirm_end'))) return;
-    api('/admin/api/keys', { method: 'DELETE', body: { key: fullKey } })
+  function deleteKey(i) {
+    var k = _keys[i];
+    if (!k) return;
+    if (!confirm(t('keys.del_confirm') + '[' + k.name + ']' + t('keys.del_confirm_end'))) return;
+    api('/admin/api/keys', { method: 'DELETE', body: { key: k.key } })
       .then(function () { toast(t('keys.deleted'), 'ok'); loadKeys(); loadStatus(); })
       .catch(function (err) { toast(etext(err.message), 'err'); });
   }
