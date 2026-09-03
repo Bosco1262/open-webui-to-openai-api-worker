@@ -266,6 +266,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
   .setting-info { min-width: 0; }
   .setting-label { font-size: 13px; color: var(--text-0); margin-bottom: 5px; }
   .setting-value { display: flex; align-items: center; gap: 8px; }
+  .pw-src-row { gap: 4px; flex-wrap: wrap; }
+  .pw-src-row .setting-label { margin-bottom: 0; }
+  .pw-src-row .setting-label::after { content: ':'; margin-left: 2px; }
   .setting-hint { font-size: 12px; color: var(--text-1); margin-top: 4px; }
 
   label.lbl { display: block; font-size: 12.5px; color: var(--text-1); margin-bottom: 6px; }
@@ -622,8 +625,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
             <div class="desc" data-i18n="set.pw_desc">管理控制台的登录密码。修改后所有已登录的管理会话将失效，需重新登录。</div>
             <div class="setting-row">
               <div class="setting-info">
-                <div class="setting-label" data-i18n="set.pw_src_label">当前密码储存位置</div>
-                <div class="setting-value"><span id="pw-src-badge" class="badge gray">—</span></div>
+                <div class="setting-value pw-src-row">
+                  <span class="setting-label" data-i18n="set.pw_src_label">当前密码储存位置</span>
+                  <span id="pw-src-badge" class="badge gray">—</span>
+                </div>
               </div>
               <button class="btn btn-primary" style="width:auto;" onclick="openPwModal()" data-i18n="set.pw_change">修改密码</button>
             </div>
