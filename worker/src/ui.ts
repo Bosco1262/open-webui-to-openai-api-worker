@@ -18,6 +18,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title></title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23ff6b35'/%3E%3Cstop offset='0.55' stop-color='%23f6821f'/%3E%3Cstop offset='1' stop-color='%23fbad41'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='24' height='24' rx='6' fill='url(%23g)'/%3E%3Cg fill='none' stroke='%23ffffff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 7h11M4 12h8M4 17h13'/%3E%3Cpath d='M17 4l4 4-4 4'/%3E%3Cpath d='M13 10l4 4 4-4'/%3E%3C/g%3E%3C/svg%3E" />
 <style>
   :root {
     --bg-0: #0f1420;
@@ -95,9 +96,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
   .field .eye {
     position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
     background: none; border: none; color: var(--text-1); cursor: pointer;
-    font-size: 16px; padding: 6px; border-radius: 8px;
+    padding: 6px; border-radius: 8px; line-height: 0;
   }
   .field .eye:hover { color: var(--text-0); }
+  .field .eye svg { width: 18px; height: 18px; display: block; }
+  .field .eye .icon-eye-off { display: none; }
+  .field .eye.showing .icon-eye { display: none; }
+  .field .eye.showing .icon-eye-off { display: block; }
 
   .btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
@@ -387,18 +392,27 @@ export const ADMIN_UI = `<!DOCTYPE html>
       <form id="form-login" autocomplete="current-password">
         <div class="field">
           <input id="pw" type="password" data-i18n-ph="login.pw_ph" placeholder="管理密码" autocomplete="current-password" required />
-          <button type="button" class="eye" data-target="pw" aria-label="show/hide password" data-i18n-aria="common.show_pw">👁</button>
+          <button type="button" class="eye" data-target="pw" aria-label="show/hide password" data-i18n-aria="common.show_pw">
+            <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
         </div>
         <button class="btn btn-primary" id="btn-login" type="submit" data-i18n="login.btn">登 录</button>
       </form>
       <form id="form-setup" style="display:none" autocomplete="new-password">
         <div class="field">
           <input id="pw1" type="password" data-i18n-ph="login.pw1_ph" placeholder="设置管理密码（至少 8 位）" autocomplete="new-password" required />
-          <button type="button" class="eye" data-target="pw1" aria-label="show/hide password" data-i18n-aria="common.show_pw">👁</button>
+          <button type="button" class="eye" data-target="pw1" aria-label="show/hide password" data-i18n-aria="common.show_pw">
+            <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
         </div>
         <div class="field">
           <input id="pw2" type="password" data-i18n-ph="login.pw2_ph" placeholder="确认管理密码" autocomplete="new-password" required />
-          <button type="button" class="eye" data-target="pw2" aria-label="show/hide password" data-i18n-aria="common.show_pw">👁</button>
+          <button type="button" class="eye" data-target="pw2" aria-label="show/hide password" data-i18n-aria="common.show_pw">
+            <svg class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            <svg class="icon-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+          </button>
         </div>
         <button class="btn btn-primary" id="btn-setup" type="submit" data-i18n="login.setup_btn">设置密码并进入</button>
       </form>
@@ -1156,7 +1170,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
     document.querySelectorAll('.eye').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var input = $(btn.dataset.target);
-        input.type = input.type === 'password' ? 'text' : 'password';
+        var showing = input.type === 'password';
+        input.type = showing ? 'text' : 'password';
+        btn.classList.toggle('showing', showing);
       });
     });
 
