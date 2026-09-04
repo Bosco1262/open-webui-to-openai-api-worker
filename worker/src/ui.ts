@@ -542,21 +542,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
           </div>
 
           <div class="card">
-            <h3><span class="ic">▸</span> <span data-i18n="up.import_title">导入 Session</span></h3>
-            <div class="desc" data-i18n-html="up.import_desc">在本地运行 <code>python login.py --base-url https://你的-open-webui 地址</code>，完成浏览器登录后，将终端输出的 <b>session.json 全部 JSON 内容</b> 粘贴到下方并导入。</div>
-            <div class="form-row">
-              <label class="lbl" data-i18n="up.json_label">session.json 内容</label>
-              <textarea id="session-json" placeholder='{\n  "authorization": "Bearer eyJ...",\n  "cookie": "...",\n  "base_url": "https://..."\n}'></textarea>
-            </div>
-            <div class="btn-row">
-              <button class="btn btn-ghost" onclick="testSession()" data-i18n="up.test">校验并测试连通</button>
-              <button class="btn btn-primary" style="width:auto;" onclick="importSession()" data-i18n="up.import">导入 Session</button>
-              <button class="btn btn-danger btn-sm" onclick="deleteSession()" data-i18n="common.delete">删除</button>
-            </div>
-            <div class="banner" id="session-banner"></div>
-          </div>
-
-          <div class="card">
             <h3><span class="ic">▸</span> <span data-i18n="up.status_title">当前凭证状态</span></h3>
             <div class="desc" data-i18n="up.status_desc">最近一次导入的凭证摘要，凭证过期后请重新登录上游并再次导入。</div>
             <div class="stats" style="grid-template-columns:1fr 1fr;">
@@ -572,6 +557,21 @@ export const ADMIN_UI = `<!DOCTYPE html>
               </div>
             </div>
           </div>
+
+          <div class="card">
+            <h3><span class="ic">▸</span> <span data-i18n="up.import_title">导入 Session</span></h3>
+            <div class="desc" data-i18n-html="up.import_desc">在本地运行 <code>python login.py --base-url https://你的-open-webui 地址</code>，完成浏览器登录后，将终端输出的 <b>session.json 全部 JSON 内容</b> 粘贴到下方并导入。</div>
+            <div class="form-row">
+              <label class="lbl" data-i18n="up.json_label">session.json 内容</label>
+              <textarea id="session-json" placeholder='{\n  "authorization": "Bearer eyJ...",\n  "cookie": "...",\n  "base_url": "https://..."\n}'></textarea>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-ghost" onclick="testSession()" data-i18n="up.test">校验并测试连通</button>
+              <button class="btn btn-primary" style="width:auto;" onclick="importSession()" data-i18n="up.import">导入 Session</button>
+              <button class="btn btn-danger btn-sm" onclick="deleteSession()" data-i18n="common.delete">删除</button>
+            </div>
+            <div class="banner" id="session-banner"></div>
+          </div>
         </section>
 
         <!-- ============ Page: API Keys ============ -->
@@ -585,8 +585,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
           <div class="card">
             <h3>
               <span class="ic">▸</span> <span data-i18n="keys.title">管理 API Key</span>
-              <button class="btn btn-primary btn-sm" style="margin-left:auto; width:auto;" onclick="openKeyModal()" data-i18n="keys.create">生成 Key</button>
             </h3>
+            <div style="display:flex; justify-content:center; margin-bottom:14px;">
+              <button class="btn btn-primary btn-sm" style="width:auto;" onclick="openKeyModal()" data-i18n="keys.create">生成 Key</button>
+            </div>
             <div class="desc">
               <span data-i18n="keys.desc1">客户端使用以下 API Key 访问 </span><span class="mono" id="api-base-desc"></span><span data-i18n="keys.desc2">。完整 Key 仅在创建时显示一次。</span>
             </div>
