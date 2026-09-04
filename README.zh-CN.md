@@ -64,18 +64,19 @@ OpenAI 客户端 ──▶ Bearer sk-xxx ──▶  /v1/*        │
 4. 选择本仓库与部署分支（如 `main`）。
 5. 配置构建设置：
 
-   | 字段                |  值              |
-   | ------------------- | ---------------- |
-   | **高级设置 - 路径**  |   `/worker`      |
-   | **构建命令**         |   `npm install`  |
+   | 字段                |  值                    |
+   | ------------------- | ---------------------- |
+   | **构建命令**         | *（留空）*             |
+   | **部署命令**         | `npx wrangler deploy`  |
+   | **高级设置 - 路径**  | `/worker`              |
 
-   > 因为 Worker 代码位于仓库的 `worker/` 子目录，根目录必须填 `/worker`；`npm install` 按 `package-lock.json` 安装依赖，`npx wrangler deploy` 执行 `wrangler deploy`。
+   > 因为 Worker 代码位于仓库的 `worker/` 子目录，根目录必须填 `/worker`。构建命令可以留空：Workers Builds 在构建前会自动安装依赖（按 `package-lock.json` 执行 `npm clean-install`），部署命令默认就是 `npx wrangler deploy`——手动填 `npm install` 只会重复自动安装依赖这一步。
 
 6. 保存后 Cloudflare 会立即构建并部署：**KV Namespace 首次部署时自动创建**，之后 **push 到该分支即自动部署**。
 
 **设置管理密码（可选）**：Cloudflare Dashboard → 该 Worker → **Settings → Variables** → 添加 **Secret** `ADMIN_PASSWORD`。若未设置，首次访问 `/admin` 时会在网页引导设置。
 
-> 密码来源与优先级（与 M365-Copilot2API-on-Cloudflare-Worker 对齐）：
+> 密码来源与优先级：
 > - 配置了 `ADMIN_PASSWORD` 时登录直接与 Secret 比对，**不写入 KV**；
 > - 首次网页自助设密或后台「修改密码」后，密码以 PBKDF2 哈希存入 **KV**；
 > - KV 与 Secret 并存时 **KV 优先**；在管理页修改密码会**覆盖 Secret 生效**，并使所有已登录管理会话立即失效。
@@ -187,7 +188,7 @@ for chunk in resp:
 
 - 存储仅使用 **Workers KV**（100k 读/天、1k 写/天）：session 在 Worker 实例内缓存 60 秒；代理路径每次请求仅 1 次 KV 读（API Key 校验）。
 - API Key 校验为 O(1)：Key 明文即 KV 键名，无需遍历。
-- `last_used` 更新节流（10 分钟/Key）并通过 `ctx.waitUntil` 异步写入。
+- `last_used` 更新通过 `ctx.waitUntil` 异步写入并节流：从未使用的 Key 首次调用立即记录一次，之后至多按配置粒度写一次（默认每天，可在管理控制台「网页设置 → 使用记录粒度」调整）。
 - SSE 流式通过 `response.body` 直通，CPU 消耗极低。
 
 ## 安全提示

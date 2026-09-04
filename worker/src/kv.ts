@@ -22,6 +22,7 @@ const K_API_KEY_PREFIX = "apikey:";
 const K_PASSWORD_HASH = "admin:password_hash";
 const K_SESSION_SECRET = "admin:session_secret";
 const K_SESSION_EPOCH = "admin:session_epoch";
+const K_TOUCH_INTERVAL = "settings:touch_interval";
 
 /** Instance-level read cache TTL (ms). */
 /** 实例级读缓存 TTL（毫秒）。 */
@@ -157,26 +158,66 @@ export async function listApiKeys(
   return out;
 }
 
-/** Throttled async `last_used` update (once per 10 min per key, via waitUntil). */
-/** 节流的 `last_used` 异步更新（每 Key 10 分钟一次，通过 waitUntil）。 */
-const lastTouched = new Map<string, number>();
-const TOUCH_INTERVAL_MS = 10 * 60_000;
+/** Throttled async `last_used` update, run inside `ctx.waitUntil`. */
+/**
+ * 节流的 `last_used` 异步更新，在 `ctx.waitUntil` 内执行。
+ *
+ * - 从未使用的 Key（last_used === 0）首次调用立即写入一次；
+ * - 之后每个 Key 至多按配置粒度写一次（默认每天，可在管理控制台调整）。
+ * 写入时间取「实例内记录」与「KV 中 last_used」的较大者，isolate 重启后依然节流。
+ */
 
-export function touchApiKey(
-  env: Env,
-  key: string,
-  meta: ApiKeyMeta,
-  ctx: ExecutionContext,
-): void {
+/** Allowed `last_used` refresh intervals in seconds (daily default). */
+/** 允许的 `last_used` 刷新间隔（秒），默认每天。 */
+export const TOUCH_INTERVAL_OPTIONS: readonly number[] = [86_400, 21_600, 10_800, 3_600, 1_800, 600];
+
+/** Default `last_used` refresh interval (once per day). */
+/** 默认 `last_used` 刷新间隔（每天一次）。 */
+export const DEFAULT_TOUCH_INTERVAL = 86_400;
+
+/** Read the configured interval, served from the 60s instance cache. */
+/** 读取配置的间隔，优先命中 60 秒实例缓存。 */
+export async function getTouchInterval(env: Env): Promise<number> {
+  const cached = cacheGet<number>(K_TOUCH_INTERVAL);
+  if (cached !== null) return cached;
+  const raw = await env.KV.get(K_TOUCH_INTERVAL);
+  const n = raw === null ? NaN : Number(raw);
+  const value = TOUCH_INTERVAL_OPTIONS.includes(n) ? n : DEFAULT_TOUCH_INTERVAL;
+  cacheSet(K_TOUCH_INTERVAL, value);
+  return value;
+}
+
+/** Persist a new interval; returns false for values outside the allowed set. */
+/** 持久化新间隔；不在允许集合内的值返回 false。 */
+export async function setTouchInterval(env: Env, seconds: number): Promise<boolean> {
+  if (!TOUCH_INTERVAL_OPTIONS.includes(seconds)) return false;
+  await env.KV.put(K_TOUCH_INTERVAL, String(seconds));
+  cacheSet(K_TOUCH_INTERVAL, seconds);
+  return true;
+}
+
+const lastTouched = new Map<string, number>();
+
+export async function touchApiKey(env: Env, key: string, meta: ApiKeyMeta): Promise<void> {
   const now = Date.now();
-  // Skip if the key was touched within the throttle window.
-  // 若 Key 在节流窗口内已被更新过则跳过。
-  if (now - (lastTouched.get(key) ?? 0) < TOUCH_INTERVAL_MS) return;
+  // A never-used key is recorded immediately on its first call.
+  // 从未使用的 Key 在首次调用时立即记录。
+  if (!meta.last_used) {
+    lastTouched.set(key, now);
+    await env.KV.put(K_API_KEY_PREFIX + key, JSON.stringify({ ...meta, last_used: Math.floor(now / 1000) }));
+    return;
+  }
+  const intervalMs = (await getTouchInterval(env)) * 1000;
+  // Skip if the key was written within the throttle window; the persisted
+  // last_used also counts so a fresh isolate does not rewrite early.
+  // 若 Key 在节流窗口内已写入则跳过；持久化的 last_used 同样计入，
+  // 避免新 isolate 提前重写。
+  const lastWrite = Math.max(lastTouched.get(key) ?? 0, meta.last_used * 1000);
+  if (now - lastWrite < intervalMs) return;
   lastTouched.set(key, now);
-  const updated: ApiKeyMeta = { ...meta, last_used: Math.floor(now / 1000) };
   // Write off the critical path so the response is not delayed.
   // 写入不阻塞关键路径，避免拖慢响应。
-  ctx.waitUntil(env.KV.put(K_API_KEY_PREFIX + key, JSON.stringify(updated)));
+  await env.KV.put(K_API_KEY_PREFIX + key, JSON.stringify({ ...meta, last_used: Math.floor(now / 1000) }));
 }
 
 // --------------------------------------------------------------------------- //

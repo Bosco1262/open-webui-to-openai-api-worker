@@ -8,6 +8,8 @@
  *   - "admin:session_secret"       -> auto-derived HMAC secret for admin cookies
  *   - "admin:session_epoch"        -> number; bumped on every password change so all
  *                                     previously issued admin session tokens die at once
+ *   - "settings:touch_interval"    -> number (seconds); how often a key's last_used is
+ *                                     refreshed (default daily, adjustable in console)
  * 
  * Admin password sources (mirror of M365-Copilot2API-on-Cloudflare-Worker):
  *   - ADMIN_PASSWORD secret is verified directly and is NEVER written to KV.
@@ -23,8 +25,9 @@
  *   - "admin:password_hash"        -> { salt, hash }（WebCrypto 的 PBKDF2）
  *   - "admin:session_secret"       -> 自动派生的管理 Cookie HMAC 签名密钥
  *   - "admin:session_epoch"        -> 数字；每次修改密码时自增，使所有
- *                                     previously issued admin session tokens die at once
  *                                     已签发的管理会话令牌立即全部失效
+ *   - "settings:touch_interval"    -> 数字（秒）；Key last_used 的刷新粒度
+ *                                     （默认每天，可在控制台调整）
  *
  * 管理密码来源（与 M365-Copilot2API-on-Cloudflare-Worker 对齐）：
  *   - ADMIN_PASSWORD Secret 直接参与验证，绝不写入 KV。

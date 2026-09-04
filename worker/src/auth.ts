@@ -410,6 +410,8 @@ export async function verifyClientApiKey(
   if (!key) return false;
   const meta = await getApiKeyMeta(env, key);
   if (!meta) return false;
-  touchApiKey(env, key, meta, ctx);
+  // Entire throttled write runs off the critical path.
+  // 整个节流写入都在关键路径之外执行。
+  ctx.waitUntil(touchApiKey(env, key, meta));
   return true;
 }

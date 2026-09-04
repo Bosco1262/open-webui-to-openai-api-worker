@@ -19,6 +19,13 @@
       // 如需复用已有 KV，可在此补上 "id": "<你的 KV namespace id>"。
     }
   ],
+  // Explicitly disabled: no *.workers.dev route and no per-version preview URLs.
+  // Access must go through a custom domain / route bound to this Worker.
+  //
+  // 显式关闭：不启用 *.workers.dev 子域，也不生成按版本的预览地址。
+  // 需要通过绑定到该 Worker 的自定义域名 / 路由访问。
+  "workers_dev": false,
+  "preview_urls": false,
   "observability": {
     "enabled": true,
     "logs": {

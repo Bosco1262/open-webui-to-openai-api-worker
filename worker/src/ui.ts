@@ -648,6 +648,25 @@ export const ADMIN_UI = `<!DOCTYPE html>
               </select>
             </div>
           </div>
+
+          <div class="card">
+            <h3><span class="ic">▸</span> <span data-i18n="set.touch_title">使用记录粒度</span></h3>
+            <div class="desc" data-i18n="set.touch_desc">控制 API Key「最近使用」时间的 KV 写入频率。从未使用的 Key 首次调用会立即记录一次，之后按所选粒度更新；粒度越粗，KV 写入次数越少（免费层每日写入上限 1000 次）。</div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="set.touch_label">记录间隔</div>
+                <div class="setting-hint" data-i18n="set.touch_hint">更改立即生效，无需重新部署。</div>
+              </div>
+              <select id="touch-interval-select" style="width:180px;" onchange="saveTouchInterval(this.value)">
+                <option value="86400" data-i18n="set.touch_daily">每天（默认）</option>
+                <option value="21600" data-i18n="set.touch_6h">每六小时</option>
+                <option value="10800" data-i18n="set.touch_3h">每三小时</option>
+                <option value="3600" data-i18n="set.touch_hourly">每小时</option>
+                <option value="1800" data-i18n="set.touch_30m">每三十分钟</option>
+                <option value="600" data-i18n="set.touch_10m">每十分钟</option>
+              </select>
+            </div>
+          </div>
         </section>
 
       </div>
@@ -808,6 +827,18 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.lang_zh': '简体中文',
       'set.lang_en': 'English',
       'set.lang_saved': '语言偏好已保存',
+      'set.touch_title': '使用记录粒度',
+      'set.touch_desc': '控制 API Key「最近使用」时间的 KV 写入频率。从未使用的 Key 首次调用会立即记录一次，之后按所选粒度更新；粒度越粗，KV 写入次数越少（免费层每日写入上限 1000 次）。',
+      'set.touch_label': '记录间隔',
+      'set.touch_hint': '更改立即生效，无需重新部署。',
+      'set.touch_daily': '每天（默认）',
+      'set.touch_6h': '每六小时',
+      'set.touch_3h': '每三小时',
+      'set.touch_hourly': '每小时',
+      'set.touch_30m': '每三十分钟',
+      'set.touch_10m': '每十分钟',
+      'msg.touch_saved': '使用记录粒度已保存',
+      'err.settings_invalid': '无效的设置值。',
       'km.title': 'API Key 已生成',
       'km.note': '请立即复制保存，关闭后将无法再次查看完整 Key。',
       'pm.title': '修改管理密码',
@@ -942,6 +973,18 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.lang_zh': '简体中文',
       'set.lang_en': 'English',
       'set.lang_saved': 'Language preference saved',
+      'set.touch_title': 'Usage Tracking Granularity',
+      'set.touch_desc': 'Controls how often the "Last Used" timestamp of API keys is written to KV. A never-used key is recorded immediately on its first call; afterwards it refreshes at the chosen granularity. Coarser granularity means fewer KV writes (free tier: 1,000 writes/day).',
+      'set.touch_label': 'Record Interval',
+      'set.touch_hint': 'Changes take effect immediately; no redeploy needed.',
+      'set.touch_daily': 'Daily (default)',
+      'set.touch_6h': 'Every 6 hours',
+      'set.touch_3h': 'Every 3 hours',
+      'set.touch_hourly': 'Hourly',
+      'set.touch_30m': 'Every 30 minutes',
+      'set.touch_10m': 'Every 10 minutes',
+      'msg.touch_saved': 'Tracking granularity saved',
+      'err.settings_invalid': 'Invalid setting value.',
       'km.title': 'API Key Generated',
       'km.note': 'Copy and store it now — the full key cannot be viewed again after closing.',
       'pm.title': 'Change Admin Password',
@@ -1305,6 +1348,17 @@ export const ADMIN_UI = `<!DOCTYPE html>
       .finally(function () { setLoading(btn, false); });
   }
 
+  // ---------- settings: usage tracking granularity ----------
+  // ---------- 设置：使用记录粒度 ----------
+  function saveTouchInterval(v) {
+    api('/admin/api/settings', { method: 'POST', body: { touch_interval: parseInt(v, 10) } })
+      .then(function () { toast(t('msg.touch_saved'), 'ok'); })
+      .catch(function (err) {
+        toast(etext(err.message), 'err');
+        loadStatus(); // revert the select to the persisted value / 恢复为已保存的值
+      });
+  }
+
   // ---------- status ----------
   // ---------- 状态 ----------
   function badge(type, text) {
@@ -1348,6 +1402,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
       // admin password source badge
       // 管理密码来源徽标
       updatePwSourceUI(s);
+
+      // usage tracking granularity select
+      // 使用记录粒度选择器
+      var ti = $('touch-interval-select');
+      if (ti && s.touchInterval) ti.value = String(s.touchInterval);
     }).catch(function (err) {
       toast(etext(err.message), 'err');
     });

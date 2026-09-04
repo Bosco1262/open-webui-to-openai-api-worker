@@ -64,18 +64,19 @@ Two deployment methods are supported:
 4. Select this repository and the deployment branch (e.g. `main`).
 5. Configure the build settings:
 
-   | Field              | Value            |
-   | ------------------ | ---------------- |
-   | **Root directory** | `/worker`        |
-   | **Build command**  | `npm install`    |
+   | Field              | Value                 |
+   | ------------------ | --------------------- |
+   | **Build command**  | *(leave empty)*       |
+   | **Deploy command** | `npx wrangler deploy` |
+   | **Root directory** | `/worker`             |
 
-   > The Worker code lives in the `worker/` subdirectory, so the root directory must be `/worker`; `npm install` installs dependencies from `package-lock.json` and `npx wrangler deploy` runs `wrangler deploy`.
+   > The Worker code lives in the `worker/` subdirectory, so the root directory must be `/worker`. The build command can be left empty: Workers Builds automatically installs dependencies (`npm clean-install` from `package-lock.json`) before the build step, and `npx wrangler deploy` runs as the default deploy command — a manually filled `npm install` would only duplicate the automatic dependency installation.
 
 6. After saving, Cloudflare builds and deploys immediately: the **KV Namespace is created automatically on first deploy**, and every subsequent **push to the branch auto-deploys**.
 
 **Set the admin password (optional)**: Cloudflare Dashboard → the Worker → **Settings → Variables** → add a **Secret** named `ADMIN_PASSWORD`. If not set, the first visit to `/admin` will guide you through setting one in the web UI.
 
-> Admin password sources and priority (aligned with M365-Copilot2API-on-Cloudflare-Worker):
+> Admin password sources and priority:
 > - When `ADMIN_PASSWORD` is configured, login compares against the Secret directly and **never writes to KV**;
 > - After first-time web setup or a console "change password", the password is stored in **KV** as a PBKDF2 hash;
 > - When both KV and Secret exist, **KV wins**; changing the password in the console **overrides the Secret** and immediately invalidates all logged-in admin sessions.
@@ -187,7 +188,7 @@ Client authentication accepts both `Authorization: Bearer <key>` and `X-API-Key:
 
 - Storage uses only **Workers KV** (100k reads/day, 1k writes/day): the session is cached in the Worker instance for 60 seconds; each proxy request performs only 1 KV read (API key verification).
 - API key verification is O(1): the key plaintext is the KV key name, no iteration needed.
-- `last_used` updates are throttled (10 minutes per key) and written asynchronously via `ctx.waitUntil`.
+- `last_used` updates are throttled and written asynchronously via `ctx.waitUntil`: a never-used key is recorded immediately on its first call, afterwards at most once per configured interval (default: daily, adjustable in the admin console under Settings → Usage Tracking Granularity).
 - SSE streaming passes through via `response.body`, keeping CPU usage extremely low.
 
 ## Security Notes

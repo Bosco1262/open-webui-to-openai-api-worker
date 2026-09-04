@@ -27,10 +27,12 @@ import {
   deleteApiKey,
   deleteSession,
   getSession,
+  getTouchInterval,
   listApiKeys,
   putApiKey,
   randomBytes,
   setSession,
+  setTouchInterval,
 } from "./kv";
 
 /** Upstream prefixes in probe priority order (Open WebUI >= 0.6 vs legacy). */
@@ -110,12 +112,14 @@ async function handleStatus(env: Env, request: Request): Promise<Response> {
   const session = await getSession(env);
   const keys = await listApiKeys(env);
   const source = await adminPasswordSource(env);
+  const touchInterval = await getTouchInterval(env);
 
   const origin = new URL(request.url).origin;
   return json({
     ok: true,
     adminPasswordMode: source,
     passwordSource: source,
+    touchInterval,
     session: session
       ? {
           imported: true,
@@ -305,6 +309,17 @@ async function handleImportSession(env: Env, request: Request): Promise<Response
   return json({ ok: true, saved: shouldSave, test, summary: describeSession(session) });
 }
 
+// POST /admin/api/settings — update console settings (currently: last_used interval).
+// POST /admin/api/settings —— 更新控制台设置（当前：last_used 记录粒度）。
+async function handleSettings(env: Env, request: Request): Promise<Response> {
+  const body = await readBody(request);
+  const seconds = Number(body.touch_interval);
+  if (!Number.isFinite(seconds) || !(await setTouchInterval(env, seconds))) {
+    return fail("err.settings_invalid");
+  }
+  return json({ ok: true, touchInterval: seconds });
+}
+
 // DELETE /admin/api/session — remove the stored session credentials.
 // DELETE /admin/api/session —— 删除已存储的 session 凭证。
 async function handleDeleteSession(env: Env): Promise<Response> {
@@ -414,6 +429,8 @@ export async function handleAdminApiRequest(
       return handleDeleteKey(env, request);
     case "POST /admin/api/password":
       return handleChangePassword(env, request);
+    case "POST /admin/api/settings":
+      return handleSettings(env, request);
     default:
       return json({ ok: false, error: "err.unknown_endpoint" }, 404);
   }
