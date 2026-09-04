@@ -583,18 +583,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
           </div>
 
           <div class="card">
-            <h3><span class="ic">▸</span> <span data-i18n="keys.title">管理 API Key</span></h3>
+            <h3>
+              <span class="ic">▸</span> <span data-i18n="keys.title">管理 API Key</span>
+              <button class="btn btn-primary btn-sm" style="margin-left:auto; width:auto;" onclick="openKeyModal()" data-i18n="keys.create">生成 Key</button>
+            </h3>
             <div class="desc">
               <span data-i18n="keys.desc1">客户端使用以下 API Key 访问 </span><span class="mono" id="api-base-desc"></span><span data-i18n="keys.desc2">。完整 Key 仅在创建时显示一次。</span>
-            </div>
-            <div class="grid2" style="max-width:420px;">
-              <div class="form-row" style="margin-bottom:0;">
-                <label class="lbl" data-i18n="keys.name_label">Key 名称（必填）</label>
-                <input id="key-name" data-i18n-ph="keys.name_ph" placeholder="如：Cherry Studio" />
-              </div>
-              <div class="form-row" style="margin-bottom:0; display:flex; align-items:flex-end;">
-                <button class="btn btn-primary" style="width:100%;" onclick="createKey()" data-i18n="keys.create">生成 Key</button>
-              </div>
             </div>
             <div style="margin-top:18px;">
               <table class="table">
@@ -657,14 +651,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
                 <div class="setting-label" data-i18n="set.touch_label">记录间隔</div>
                 <div class="setting-hint" data-i18n="set.touch_hint">更改立即生效，无需重新部署。</div>
               </div>
-              <select id="touch-interval-select" style="width:180px;" onchange="saveTouchInterval(this.value)">
-                <option value="86400" data-i18n="set.touch_daily">每天（默认）</option>
-                <option value="21600" data-i18n="set.touch_6h">每六小时</option>
-                <option value="10800" data-i18n="set.touch_3h">每三小时</option>
-                <option value="3600" data-i18n="set.touch_hourly">每小时</option>
-                <option value="1800" data-i18n="set.touch_30m">每三十分钟</option>
-                <option value="600" data-i18n="set.touch_10m">每十分钟</option>
-              </select>
+              <select id="touch-interval-select" style="width:180px;" onchange="saveTouchInterval(this.value)"></select>
             </div>
           </div>
         </section>
@@ -684,6 +671,24 @@ export const ADMIN_UI = `<!DOCTYPE html>
     <div class="btn-row">
       <button class="btn btn-primary" style="flex:1;" onclick="copyText(document.getElementById('key-modal-value').textContent, t('msg.copied'))" data-i18n="common.copy">复制</button>
       <button class="btn btn-ghost" onclick="closeModal()" data-i18n="common.close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: key name input before generation -->
+<!-- 弹窗：生成前输入 Key 名称 -->
+<div class="modal-mask" id="key-name-modal">
+  <div class="modal">
+    <h4 data-i18n="kn.title">生成 API Key</h4>
+    <div class="note" data-i18n="kn.note">请输入 Key 名称，用于标识使用该 Key 的客户端。</div>
+    <div class="form-row">
+      <label class="lbl" data-i18n="keys.name_label">Key 名称（必填）</label>
+      <input id="key-name-modal-input" data-i18n-ph="keys.name_ph" placeholder="如：Cherry Studio" onkeydown="if(event.key==='Enter'){event.preventDefault();submitCreateKey();}" />
+    </div>
+    <div class="banner" id="key-name-banner"></div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btn-submit-key" style="flex:1;" onclick="submitCreateKey()" data-i18n="kn.submit">确认生成</button>
+      <button class="btn btn-ghost" onclick="closeKeyModal()" data-i18n="common.cancel">取消</button>
     </div>
   </div>
 </div>
@@ -803,6 +808,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'keys.name_label': 'Key 名称（必填）',
       'keys.name_ph': '如：Cherry Studio',
       'keys.create': '生成 Key',
+      'kn.title': '生成 API Key',
+      'kn.note': '请输入 Key 名称，用于标识使用该 Key 的客户端。',
+      'kn.submit': '确认生成',
       'keys.th_name': '名称',
       'keys.th_key': 'Key',
       'keys.th_created': '创建时间',
@@ -949,6 +957,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'keys.name_label': 'Key Name (Required)',
       'keys.name_ph': 'e.g. Cherry Studio',
       'keys.create': 'Generate Key',
+      'kn.title': 'Generate API Key',
+      'kn.note': 'Enter a name to identify the client that uses this key.',
+      'kn.submit': 'Confirm',
       'keys.th_name': 'Name',
       'keys.th_key': 'Key',
       'keys.th_created': 'Created',
@@ -1350,6 +1361,34 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   // ---------- settings: usage tracking granularity ----------
   // ---------- 设置：使用记录粒度 ----------
+  // Interval values come from the server (touchIntervalOptions); only the
+  // display labels live here. 
+  //
+  // 档位值来自服务端（touchIntervalOptions），仅展示文案保留在本端。
+  var TOUCH_LABELS = {
+    '86400': 'set.touch_daily',
+    '21600': 'set.touch_6h',
+    '10800': 'set.touch_3h',
+    '3600': 'set.touch_hourly',
+    '1800': 'set.touch_30m',
+    '600': 'set.touch_10m'
+  };
+
+  function fillTouchSelect(current, options) {
+    var sel = $('touch-interval-select');
+    if (!sel) return;
+    sel.innerHTML = '';
+    var opts = options && options.length ? options : [86400, 21600, 10800, 3600, 1800, 600];
+    for (var i = 0; i < opts.length; i++) {
+      var v = String(opts[i]);
+      var o = document.createElement('option');
+      o.value = v;
+      o.textContent = t(TOUCH_LABELS[v] || v);
+      sel.appendChild(o);
+    }
+    if (current) sel.value = String(current);
+  }
+
   function saveTouchInterval(v) {
     api('/admin/api/settings', { method: 'POST', body: { touch_interval: parseInt(v, 10) } })
       .then(function () { toast(t('msg.touch_saved'), 'ok'); })
@@ -1405,8 +1444,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
       // usage tracking granularity select
       // 使用记录粒度选择器
-      var ti = $('touch-interval-select');
-      if (ti && s.touchInterval) ti.value = String(s.touchInterval);
+      fillTouchSelect(s.touchInterval, s.touchIntervalOptions);
     }).catch(function (err) {
       toast(etext(err.message), 'err');
     });
@@ -1450,25 +1488,37 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   // ---------- api keys ----------
   // ---------- API Key ----------
-  function createKey() {
-    var btn = event.target;
-    setLoading(btn, true);
-    clearBanner('keys-banner');
-    var name = $('key-name').value.trim();
+  function openKeyModal() {
+    clearBanner('key-name-banner');
+    $('key-name-modal-input').value = '';
+    $('key-name-modal').classList.add('show');
+    setTimeout(function () { $('key-name-modal-input').focus(); }, 60);
+  }
+
+  function closeKeyModal() {
+    $('key-name-modal').classList.remove('show');
+    $('key-name-modal-input').value = '';
+    clearBanner('key-name-banner');
+  }
+
+  function submitCreateKey() {
+    var btn = $('btn-submit-key');
+    var name = $('key-name-modal-input').value.trim();
+    clearBanner('key-name-banner');
     if (!name) {
-      setLoading(btn, false);
-      setBanner('keys-banner', 'err', function () { return etext('err.key_name_required'); });
+      setBanner('key-name-banner', 'err', function () { return etext('err.key_name_required'); });
       return;
     }
+    setLoading(btn, true);
     api('/admin/api/keys', { method: 'POST', body: { name: name } })
       .then(function (d) {
-        $('key-name').value = '';
+        closeKeyModal();
         $('key-modal-value').textContent = d.key;
         $('key-modal').classList.add('show');
         loadStatus();
         loadKeys();
       })
-      .catch(function (err) { setBanner('keys-banner', 'err', function () { return etext(err.message); }); })
+      .catch(function (err) { setBanner('key-name-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
   }
 
@@ -1523,9 +1573,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
   // close modals on mask click / Escape
   // 点击遮罩或按 Escape 关闭弹窗
   $('key-modal').addEventListener('click', function (e) { if (e.target === this) closeModal(); });
+  $('key-name-modal').addEventListener('click', function (e) { if (e.target === this) closeKeyModal(); });
   $('pw-modal').addEventListener('click', function (e) { if (e.target === this) closePwModal(); });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') { closeModal(); closePwModal(); }
+    if (e.key === 'Escape') { closeModal(); closeKeyModal(); closePwModal(); }
   });
 </script>
 </body>

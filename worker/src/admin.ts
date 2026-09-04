@@ -33,6 +33,7 @@ import {
   randomBytes,
   setSession,
   setTouchInterval,
+  TOUCH_INTERVAL_OPTIONS,
 } from "./kv";
 
 /** Upstream prefixes in probe priority order (Open WebUI >= 0.6 vs legacy). */
@@ -120,6 +121,7 @@ async function handleStatus(env: Env, request: Request): Promise<Response> {
     adminPasswordMode: source,
     passwordSource: source,
     touchInterval,
+    touchIntervalOptions: TOUCH_INTERVAL_OPTIONS,
     session: session
       ? {
           imported: true,
