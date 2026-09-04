@@ -1174,8 +1174,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
     var data = {};
     try { data = await res.json(); } catch (e) {}
     if (res.status === 401 && data.needLogin) {
-      toast(t('msg.session_expired'), 'warn');
+      // Only notify when a previously-authed session actually expired; stay silent for a fresh unauthenticated visit
+      // 只有此前已登录（会话真正过期）才提示；未登录首次访问保持安静
+      var wasAuthed = _authed;
       showLogin();
+      if (wasAuthed) toast(t('msg.session_expired'), 'warn');
       throw new Error('not authed');
     }
     if (!data.ok) throw new Error(data.error || ('HTTP ' + res.status));
@@ -1201,11 +1204,17 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   // ---------- views ----------
   // ---------- 视图切换 ----------
+  // Tracks whether the user is currently signed in; lets api() distinguish
+  // "session expired" from "never logged in" / 标记当前是否已登录，供 api() 区分"会话过期"与"从未登录"
+  var _authed = false;
+
   function showLogin() {
+    _authed = false;
     $('view-login').style.display = 'flex';
     $('view-panel').classList.remove('show');
   }
   function showPanel() {
+    _authed = true;
     $('view-login').style.display = 'none';
     $('view-panel').classList.add('show');
     switchPage('dashboard');
@@ -1262,6 +1271,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
         showPanel();
       }
     }).catch(function (err) {
+      // Being unauthenticated on first visit is normal: stay on the login view without an error
+      // 未登录（not authed）属正常状态：停留在登录页，不显示错误
+      if (err && err.message === 'not authed') return;
       setLoginMsg(function () { return etext(err.message); });
     });
   });
@@ -1448,6 +1460,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
       // 使用记录粒度选择器
       fillTouchSelect(s.touchInterval, s.touchIntervalOptions);
     }).catch(function (err) {
+    // 401 is already handled by api(); skip to avoid duplicate toasts
+    // 401 已由 api() 统一提示（仅会话过期时），此处跳过避免重复弹窗
+      if (err && err.message === 'not authed') return;
       toast(etext(err.message), 'err');
     });
   }
@@ -1548,7 +1563,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
           '<td style="text-align:right"><button class="btn btn-danger btn-sm" onclick="deleteKey(' + i + ')">' + t('common.delete') + '</button></td>' +
           '</tr>';
       }).join('');
-    }).catch(function (err) { toast(etext(err.message), 'err'); });
+    }).catch(function (err) {
+      // 401 is already handled by api(); skip to avoid duplicate toasts
+      // 401 已由 api() 统一提示（仅会话过期时），此处跳过避免重复弹窗
+      if (err && err.message === 'not authed') return;
+      toast(etext(err.message), 'err');
+    });
   }
 
   function deleteKey(i) {

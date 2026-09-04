@@ -158,7 +158,15 @@ export async function listApiKeys(
   return out;
 }
 
-/** Throttled async `last_used` update, run inside `ctx.waitUntil`. */
+/**
+ * Throttled asynchronous update of `last_used`, executed within `ctx.waitUntil`.
+ *
+ * - For a never-used Key (last_used === 0), an immediate write is performed on the first call;
+ * - Afterwards, each Key is written at most once per configured granularity (default: daily, adjustable in the management console).
+ *
+ * The write timestamp takes the greater value between the in-instance record and `last_used` in KV;
+ * throttling remains in effect after an isolate restart.
+ */
 /**
  * 节流的 `last_used` 异步更新，在 `ctx.waitUntil` 内执行。
  *
@@ -210,6 +218,7 @@ export async function touchApiKey(env: Env, key: string, meta: ApiKeyMeta): Prom
   const intervalMs = (await getTouchInterval(env)) * 1000;
   // Skip if the key was written within the throttle window; the persisted
   // last_used also counts so a fresh isolate does not rewrite early.
+  //
   // 若 Key 在节流窗口内已写入则跳过；持久化的 last_used 同样计入，
   // 避免新 isolate 提前重写。
   const lastWrite = Math.max(lastTouched.get(key) ?? 0, meta.last_used * 1000);

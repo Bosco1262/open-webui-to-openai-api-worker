@@ -1,8 +1,8 @@
 /**
  * Admin REST API under /admin/api/*.
- * /admin/api/* 下的管理 REST API。
- *
  * All routes (except login/setup) require a valid admin session cookie.
+ * 
+ * /admin/api/* 下的管理 REST API。
  * 除 login/setup 外，所有路由均要求有效的管理会话 Cookie。
  */
 
