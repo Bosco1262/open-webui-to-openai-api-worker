@@ -583,14 +583,14 @@ export const ADMIN_UI = `<!DOCTYPE html>
           </div>
 
           <div class="card">
-            <h3>
-              <span class="ic">▸</span> <span data-i18n="keys.title">管理 API Key</span>
-            </h3>
-            <div style="display:flex; justify-content:center; margin-bottom:14px;">
-              <button class="btn btn-primary btn-sm" style="width:auto;" onclick="openKeyModal()" data-i18n="keys.create">生成 Key</button>
-            </div>
-            <div class="desc">
-              <span data-i18n="keys.desc1">客户端使用以下 API Key 访问 </span><span class="mono" id="api-base-desc"></span><span data-i18n="keys.desc2">。完整 Key 仅在创建时显示一次。</span>
+            <div style="display:flex; align-items:center; gap:14px;">
+              <div style="flex:1; min-width:0;">
+                <h3><span class="ic">▸</span> <span data-i18n="keys.title">管理 API Key</span></h3>
+                <div class="desc" style="margin-bottom:0;">
+                  <span data-i18n="keys.desc1">客户端使用以下 API Key 访问 </span><span class="mono" id="api-base-desc"></span><span data-i18n="keys.desc2">。完整 Key 仅在创建时显示一次。</span>
+                </div>
+              </div>
+              <button class="btn btn-primary" style="width:auto; flex:none;" onclick="openKeyModal()" data-i18n="keys.create">生成 Key</button>
             </div>
             <div style="margin-top:18px;">
               <table class="table">
