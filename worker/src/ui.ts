@@ -590,7 +590,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
                   <span data-i18n="keys.desc1">客户端使用以下 API Key 访问 </span><span class="mono" id="api-base-desc"></span><span data-i18n="keys.desc2">。完整 Key 仅在创建时显示一次。</span>
                 </div>
               </div>
-              <button class="btn btn-primary" style="width:auto; flex:none;" onclick="openKeyModal()" data-i18n="keys.create">生成 Key</button>
+              <button class="btn btn-primary" style="width:auto; flex:none; margin:12px 0;" onclick="openKeyModal()" data-i18n="keys.create">生成 Key</button>
             </div>
             <div style="margin-top:18px;">
               <table class="table">
