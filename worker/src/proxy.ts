@@ -3,7 +3,8 @@
  * 
  * Ported behavior from the original FastAPI project:
  *   - upstream prefix probing (/api/v1 vs /api) with automatic 404 fallback
- *   - model list normalization to {id, object, created, owned_by}
+ *   - model list sanitized to the OpenAI shape, exposing only safe fields
+ *     (private upstream fields like user_id are never exposed)
  *   - SSE streaming passthrough with hop-by-hop header stripping
  *   - OpenAI-style error bodies
  *   - upstream 401/403 -> clear "re-import session" error
@@ -14,7 +15,8 @@
  *
  * 从原 FastAPI 项目移植的行为：
  *   - 上游前缀探测（/api/v1 与 /api）并自动按 404 回退
- *   - 模型列表规范化为 {id, object, created, owned_by}
+ *   - 模型列表收敛为 OpenAI 结构并只透出安全字段
+ *     （不透出 user_id 等上游私有字段）
  *   - SSE 流式直通并剔除逐跳（hop-by-hop）请求头
  *   - OpenAI 风格的错误体
  *   - 上游 401/403 → 明确提示重新导入 session 的错误
@@ -120,8 +122,19 @@ function sessionIsUsable(session: StoredSession): boolean {
   );
 }
 
-/** Normalize an upstream model object into the OpenAI model structure. */
-/** 将上游模型对象规范化为 OpenAI 模型结构。 */
+/** Collapse an upstream model object into the OpenAI model structure.
+ *
+ * Standard fields stay intact; a small allowlist of safe, useful extras
+ * (max_model_len, description, capabilities) is preserved when present.
+ * Private upstream fields (user_id, access_grants, permission, urlIdx, ...)
+ * are never exposed.
+ *
+ * 把上游的模型对象收敛成 OpenAI 的 model 结构。
+ *
+ * 标准字段原样保留，另有一份白名单透出安全且有用的扩展字段
+ * （max_model_len、description、capabilities）；上游私有字段
+ * （user_id、access_grants、permission、urlIdx 等）一律不透出。
+ */
 function normalizeModel(raw: unknown): Record<string, unknown> | null {
   if (typeof raw === "string") {
     return { id: raw, object: "model", created: 0, owned_by: "openai" };
@@ -133,16 +146,61 @@ function normalizeModel(raw: unknown): Record<string, unknown> | null {
   const modelId = obj.id ?? obj.name ?? obj.model;
   if (!modelId) return null;
 
-  let created = obj.created ?? obj.created_at;
+  const info = isPlainObject(obj.info) ? obj.info : {};
+  const meta = isPlainObject(info.meta) ? info.meta : {};
+  const openaiObj = isPlainObject(obj.openai) ? obj.openai : {};
+
+  // info.created_at is the model's real creation time; the "created" on the
+  // OpenAI layer is the serving engine's start time, not the model's.
+  //
+  // info.created_at 才是模型真实创建时间；OpenAI 层的 created 是推理引擎
+  // 的启动时间，并非模型本身的。
+  let created: unknown = info.created_at;
+  if (created === null || created === undefined) created = obj.created;
+  if (created === null || created === undefined) created = obj.created_at;
   if (typeof created === "string") created = Number(created);
   if (typeof created !== "number" || Number.isNaN(created)) created = 0;
 
-  return {
+  // Prefer the inner engine attribution (e.g. "vllm") over the OpenAI-layer default.
+  // 优先取内层引擎归属（如 "vllm"），而非 OpenAI 层的默认值。
+  const ownedBy = openaiObj.owned_by ?? obj.owned_by ?? "openai";
+
+  const model: Record<string, unknown> = {
     id: String(modelId),
     object: "model",
     created,
-    owned_by: String(obj.owned_by ?? obj.user_id ?? "openai"),
+    owned_by: String(ownedBy),
   };
+
+  // Allowlisted extras: only emitted when the upstream provides them, so
+  // minimal/legacy model objects keep the exact 4-field OpenAI shape.
+  //
+  // 白名单扩展字段：上游提供时才输出，极简/老版本模型对象仍保持
+  // 精确的 4 字段 OpenAI 结构。
+  const maxModelLen = obj.max_model_len ?? openaiObj.max_model_len;
+  if (typeof maxModelLen === "number" && Number.isFinite(maxModelLen)) {
+    model.max_model_len = Math.trunc(maxModelLen);
+  }
+
+  const description = meta.description;
+  if (typeof description === "string" && description) {
+    model.description = description;
+  }
+
+  const capabilities = meta.capabilities;
+  if (isPlainObject(capabilities)) {
+    const caps: Record<string, boolean> = {};
+    for (const [key, value] of Object.entries(capabilities)) {
+      if (typeof value === "boolean") caps[key] = value;
+    }
+    if (Object.keys(caps).length > 0) model.capabilities = caps;
+  }
+
+  return model;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** Extract the model array from inconsistent upstream payload shapes. */

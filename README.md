@@ -7,7 +7,7 @@ A Cloudflare Worker that reverse-proxies a "browser-login-only" Open WebUI into 
 - **Local credential capture** (`local/`, Python + Playwright): sign in via a real browser → prints `session.json` in the terminal.
 - **Worker side** (`worker/`, TypeScript): serves `/v1/*` OpenAI-compatible endpoints plus a bilingual web admin console, connecting directly to the upstream Open WebUI.
 
-> This project is a Cloudflare Worker port of [open-webui-to-openai-api](https://github.com/Bosco1262/open-webui-to-openai-api). Proxy behavior is aligned with the original project (prefix probing with fallback, model list normalization, SSE streaming, OpenAI-style error bodies).
+> This project is a Cloudflare Worker port of [open-webui-to-openai-api](https://github.com/Bosco1262/open-webui-to-openai-api). Proxy behavior is aligned with the original project (prefix probing with fallback, sanitized model list responses, SSE streaming, OpenAI-style error bodies).
 
 ## Architecture
 
@@ -139,6 +139,8 @@ curl https://<your-worker-domain>/v1/models \
   -H "Authorization: Bearer sk-xxxxxxxx"
 ```
 
+> `/v1/models` collapses upstream model objects into the standard OpenAI shape `{id, object, created, owned_by}`, plus a whitelist of safe extras (`max_model_len`, `description`, `capabilities`). Private upstream fields (`user_id`, `access_grants`, `permission`, `urlIdx`, ...) are never exposed.
+
 Python (OpenAI SDK):
 
 ```python
@@ -169,7 +171,7 @@ for chunk in resp:
 | POST            | `/admin/api/password`                   | admin session | Change admin password (all old sessions invalidated) |
 | POST            | `/admin/api/session`                    | admin session | Import session (supports `test`/`save`) |
 | GET/POST/DELETE | `/admin/api/keys`                       | admin session | API key management                  |
-| GET             | `/v1/models`                            | API key      | Model list (normalized)             |
+| GET             | `/v1/models`                            | API key      | Model list (sanitized, safe fields only) |
 | POST            | `/v1/chat/completions`                  | API key      | Chat completions (incl. SSE streaming) |
 | POST            | `/v1/embeddings`                        | API key      | Embeddings                           |
 | ANY             | `/v1/{path}`                            | API key      | Catch-all passthrough                |

@@ -7,7 +7,7 @@
 - **本地认证获取端**（`local/`，Python + Playwright）：浏览器登录捕获凭证 → 终端输出 `session.json`。
 - **Worker 端**（`worker/`，TypeScript）：对外提供 `/v1/*` OpenAI 兼容接口 + 中英文网页管理后台，直接连接上游 Open WebUI。
 
-> 本项目为 [open-webui-to-openai-api](https://github.com/Bosco1262/open-webui-to-openai-api) 的 Cloudflare Worker 迁移版，代理行为与原项目对齐（前缀探测回退、模型列表规范化、SSE 流式、OpenAI 风格错误体）。
+> 本项目为 [open-webui-to-openai-api](https://github.com/Bosco1262/open-webui-to-openai-api) 的 Cloudflare Worker 迁移版，代理行为与原项目对齐（前缀探测回退、模型列表安全收敛、SSE 流式、OpenAI 风格错误体）。
 
 ## 架构
 
@@ -139,6 +139,8 @@ curl https://<你的worker域名>/v1/models \
   -H "Authorization: Bearer sk-xxxxxxxx"
 ```
 
+> `/v1/models` 会把上游模型对象收敛成标准的 OpenAI 结构 `{id, object, created, owned_by}`，并按白名单透出安全且有用的扩展字段（`max_model_len`、`description`、`capabilities`）；上游私有字段（`user_id`、`access_grants`、`permission`、`urlIdx` 等）一律不透出。
+
 Python（OpenAI SDK）：
 
 ```python
@@ -169,7 +171,7 @@ for chunk in resp:
 | POST            | `/admin/api/password`                  | 管理会话 | 修改管理密码（旧会话全部失效）         |
 | POST            | `/admin/api/session`                    | 管理会话 | 导入 Session（支持 `test`/`save`） |
 | GET/POST/DELETE | `/admin/api/keys`                       | 管理会话 | API Key 管理                       |
-| GET             | `/v1/models`                            | API Key  | 模型列表（规范化）                 |
+| GET             | `/v1/models`                            | API Key  | 模型列表（安全收敛，仅透出安全字段） |
 | POST            | `/v1/chat/completions`                  | API Key  | 对话补全（含 SSE 流式）            |
 | POST            | `/v1/embeddings`                        | API Key  | 向量嵌入                           |
 | ANY             | `/v1/{path}`                            | API Key  | 兜底透传                           |
