@@ -139,7 +139,7 @@ curl https://<你的worker域名>/v1/models \
   -H "Authorization: Bearer sk-xxxxxxxx"
 ```
 
-> `/v1/models` 会把上游模型对象收敛成标准的 OpenAI 结构 `{id, object, created, owned_by}`，并按白名单透出安全且有用的扩展字段（`max_model_len`、`description`、`capabilities`）；上游私有字段（`user_id`、`access_grants`、`permission`、`urlIdx` 等）一律不透出。
+> `/v1/models` 会把上游模型对象收敛成标准的 OpenAI 结构 `{id, object, created, owned_by}`，并按白名单透出通用模板字段：`max_context_length` / `context_length`（`max_model_len` 作为兼容别名保留）、`quantization`（从模型名解析，如 `NVFP4`）、`capabilities`（含派生的 `function_calling` 标志）与 `description`；上游私有字段（`user_id`、`access_grants`、`permission`、`urlIdx` 等）一律不透出。
 
 Python（OpenAI SDK）：
 

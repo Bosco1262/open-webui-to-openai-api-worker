@@ -139,7 +139,7 @@ curl https://<your-worker-domain>/v1/models \
   -H "Authorization: Bearer sk-xxxxxxxx"
 ```
 
-> `/v1/models` collapses upstream model objects into the standard OpenAI shape `{id, object, created, owned_by}`, plus a whitelist of safe extras (`max_model_len`, `description`, `capabilities`). Private upstream fields (`user_id`, `access_grants`, `permission`, `urlIdx`, ...) are never exposed.
+> `/v1/models` collapses upstream model objects into the standard OpenAI shape `{id, object, created, owned_by}`, plus a whitelist of generic-template fields: `max_context_length` / `context_length` (with `max_model_len` kept as a compatibility alias), `quantization` (parsed from the model id, e.g. `NVFP4`), `capabilities` (with a derived `function_calling` flag) and `description`. Private upstream fields (`user_id`, `access_grants`, `permission`, `urlIdx`, ...) are never exposed.
 
 Python (OpenAI SDK):
 
