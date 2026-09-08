@@ -80,8 +80,8 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
 // 能解析且协议为 http/https 的 base URL 即为合法。
 function isValidBaseUrl(url: string): boolean {
   try {
-    const u = new URL(url);
-    return u.protocol === "http:" || u.protocol === "https:";
+    const parsedUrl = new URL(url);
+    return parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:";
   } catch {
     return false;
   }
@@ -89,17 +89,20 @@ function isValidBaseUrl(url: string): boolean {
 
 // A session is usable if it carries a non-empty Authorization or Cookie.
 // session 携带非空 Authorization 或 Cookie 即视为可用。
-function sessionIsUsable(s: StoredSession): boolean {
-  return Boolean((s.authorization && s.authorization.trim()) || (s.cookie && s.cookie.trim()));
+function sessionIsUsable(session: StoredSession): boolean {
+  return Boolean(
+    (session.authorization && session.authorization.trim()) ||
+      (session.cookie && session.cookie.trim()),
+  );
 }
 
 /** Redacted credential summary, safe for the UI. */
 /** 脱敏后的凭证摘要，可安全展示在 UI 中。 */
-function describeSession(s: StoredSession): string {
+function describeSession(session: StoredSession): string {
   const parts: string[] = [];
-  if (s.authorization) parts.push(`token=${s.authorization.slice(0, 16)}…(len=${s.authorization.length})`);
-  if (s.cookie) parts.push(`cookie(len=${s.cookie.length})`);
-  if (s.captured_at) parts.push(`age=${((Date.now() / 1000 - s.captured_at) / 86400).toFixed(1)}d`);
+  if (session.authorization) parts.push(`token=${session.authorization.slice(0, 16)}…(len=${session.authorization.length})`);
+  if (session.cookie) parts.push(`cookie(len=${session.cookie.length})`);
+  if (session.captured_at) parts.push(`age=${((Date.now() / 1000 - session.captured_at) / 86400).toFixed(1)}d`);
   return parts.join(", ") || "<empty>";
 }
 
@@ -485,8 +488,8 @@ async function handleReasoningSettings(env: Env, request: Request): Promise<Resp
   const body = await readBody(request);
   if (typeof body.enabled !== "boolean") return fail("err.settings_invalid");
   const intIn = (v: unknown, lo: number, hi: number): number | null => {
-    const n = Number(v);
-    return Number.isInteger(n) && n >= lo && n <= hi ? n : null;
+    const value = Number(v);
+    return Number.isInteger(value) && value >= lo && value <= hi ? value : null;
   };
   const concurrency = intIn(body.concurrency, 1, 8);
   const timeout = intIn(body.timeout, 1, 120);

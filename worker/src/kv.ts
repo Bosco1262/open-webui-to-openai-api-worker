@@ -227,8 +227,8 @@ export async function getOrCreateSessionSecret(env: Env): Promise<string> {
 /** 嵌入管理会话令牌的当前纪元（默认 0）。 */
 export async function getSessionEpoch(env: Env): Promise<number> {
   const raw = await env.KV.get(K_SESSION_EPOCH);
-  const n = raw === null ? NaN : Number(raw);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
+  const epoch = raw === null ? NaN : Number(raw);
+  return Number.isFinite(epoch) && epoch >= 0 ? Math.floor(epoch) : 0;
 }
 
 /** Increment the epoch, invalidating every previously issued admin session. */

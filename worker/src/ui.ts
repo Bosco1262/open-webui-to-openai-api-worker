@@ -1210,8 +1210,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
   var _lang = 'en';
 
   function t(key) {
-    var d = I18N[_lang] || I18N['en'];
-    if (Object.prototype.hasOwnProperty.call(d, key)) return d[key];
+    var dict = I18N[_lang] || I18N['en'];
+    if (Object.prototype.hasOwnProperty.call(dict, key)) return dict[key];
     if (Object.prototype.hasOwnProperty.call(I18N['en'], key)) return I18N['en'][key];
     return key;
   }
@@ -1227,13 +1227,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
   // Simple {placeholder} interpolation on a translation key
   // 对翻译键做简单的 {占位符} 插值
   function tfmt(key, params) {
-    var s = t(key);
+    var text = t(key);
     if (params) {
       for (var p in params) {
-        if (Object.prototype.hasOwnProperty.call(params, p)) s = s.split('{' + p + '}').join(String(params[p]));
+        if (Object.prototype.hasOwnProperty.call(params, p)) text = text.split('{' + p + '}').join(String(params[p]));
       }
     }
-    return s;
+    return text;
   }
 
   // Compose a localized message from the structured connectivity test result
@@ -1258,9 +1258,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
       ? navigator.languages
       : [navigator.language || 'en'];
     for (var i = 0; i < langs.length; i++) {
-      var l = String(langs[i] || '').toLowerCase();
-      if (l.indexOf('zh') === 0) return 'zh-CN';
-      if (l.indexOf('en') === 0) return 'en';
+      var lang = String(langs[i] || '').toLowerCase();
+      if (lang.indexOf('zh') === 0) return 'zh-CN';
+      if (lang.indexOf('en') === 0) return 'en';
     }
     return 'en';
   }
@@ -1287,8 +1287,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
     applyI18n();
     for (var id in _bannerRenderers) {
       if (Object.prototype.hasOwnProperty.call(_bannerRenderers, id)) {
-        var r = _bannerRenderers[id]();
-        showBanner(id, r.msg, r.type);
+        var rendered = _bannerRenderers[id]();
+        showBanner(id, rendered.msg, rendered.type);
       }
     }
     if (_loginMsgRender) setLoginMsg(_loginMsgRender);
@@ -1299,14 +1299,14 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   function toast(msg, type) {
-    var t2 = document.createElement('div');
-    t2.className = 'toast ' + (type || '');
-    t2.textContent = msg;
-    $('toasts').appendChild(t2);
-    requestAnimationFrame(function () { t2.classList.add('show'); });
+    var toastEl = document.createElement('div');
+    toastEl.className = 'toast ' + (type || '');
+    toastEl.textContent = msg;
+    $('toasts').appendChild(toastEl);
+    requestAnimationFrame(function () { toastEl.classList.add('show'); });
     setTimeout(function () {
-      t2.classList.remove('show');
-      setTimeout(function () { t2.remove(); }, 350);
+      toastEl.classList.remove('show');
+      setTimeout(function () { toastEl.remove(); }, 350);
     }, 3200);
   }
 
@@ -1374,11 +1374,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
     } else { fallbackCopy(text, msg); }
   }
   function fallbackCopy(text, msg) {
-    var ta = document.createElement('textarea');
-    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-    document.body.appendChild(ta); ta.select();
+    var helper = document.createElement('textarea');
+    helper.value = text; helper.style.position = 'fixed'; helper.style.opacity = '0';
+    document.body.appendChild(helper); helper.select();
     try { document.execCommand('copy'); toast(msg || t('msg.copied'), 'ok'); } catch (e) { toast(t('msg.copy_failed'), 'err'); }
-    document.body.removeChild(ta);
+    document.body.removeChild(helper);
   }
 
   // ---------- views ----------
@@ -1478,11 +1478,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   function setup() {
     var btn = $('btn-setup');
-    var p1 = $('pw1').value, p2 = $('pw2').value;
-    if (p1.length < 8) { setLoginMsg(function () { return t('login.err_short'); }); return; }
-    if (p1 !== p2) { setLoginMsg(function () { return t('login.err_mismatch'); }); return; }
+    var password = $('pw1').value, confirm = $('pw2').value;
+    if (password.length < 8) { setLoginMsg(function () { return t('login.err_short'); }); return; }
+    if (password !== confirm) { setLoginMsg(function () { return t('login.err_mismatch'); }); return; }
     setLoading(btn, true);
-    api('/admin/api/setup', { method: 'POST', body: { password: p1, confirm: p2 } })
+    api('/admin/api/setup', { method: 'POST', body: { password: password, confirm: confirm } })
       .then(function () { showPanel(); })
       .catch(function (err) { setLoginMsg(function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
@@ -1498,8 +1498,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
   // ---------- 修改密码 ----------
   var _pwSource = 'none';
 
-  function updatePwSourceUI(s) {
-    var src = (s && (s.passwordSource || s.adminPasswordMode)) || 'none';
+  function updatePwSourceUI(status) {
+    var src = (status && (status.passwordSource || status.adminPasswordMode)) || 'none';
     _pwSource = src;
     var badgeEl = $('pw-src-badge');
     if (!badgeEl) return;
@@ -1574,11 +1574,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
     sel.innerHTML = '';
     var opts = options && options.length ? options : [86400, 21600, 10800, 3600, 1800, 600];
     for (var i = 0; i < opts.length; i++) {
-      var v = String(opts[i]);
-      var o = document.createElement('option');
-      o.value = v;
-      o.textContent = t(TOUCH_LABELS[v] || v);
-      sel.appendChild(o);
+      var value = String(opts[i]);
+      var option = document.createElement('option');
+      option.value = value;
+      option.textContent = t(TOUCH_LABELS[value] || value);
+      sel.appendChild(option);
     }
     if (current) sel.value = String(current);
   }
@@ -1614,11 +1614,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
     sel.innerHTML = '';
     var opts = options && options.length ? options : [0, 86400, 21600, 10800, 3600, 1800, 600];
     for (var i = 0; i < opts.length; i++) {
-      var v = String(opts[i]);
-      var o = document.createElement('option');
-      o.value = v;
-      o.textContent = t(RS_REFRESH_LABELS[v] || v);
-      sel.appendChild(o);
+      var value = String(opts[i]);
+      var option = document.createElement('option');
+      option.value = value;
+      option.textContent = t(RS_REFRESH_LABELS[value] || value);
+      sel.appendChild(option);
     }
     sel.value = String(current);
   }
@@ -1661,8 +1661,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
   function buildReasoningBody(enabled, refreshInterval) {
     var base = _rs || { enabled: true, refreshInterval: 86400, concurrency: 4, timeout: 30, wait: 5 };
     var numOr = function (id, fallback) {
-      var v = parseInt($(id).value, 10);
-      return isNaN(v) ? fallback : v;
+      var parsed = parseInt($(id).value, 10);
+      return isNaN(parsed) ? fallback : parsed;
     };
     return {
       enabled: enabled !== undefined ? enabled : base.enabled,
@@ -1687,11 +1687,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
   // select); on failure the whole panel is reloaded from the server.
   //
   // 功能开关立即保存（与「使用记录粒度」一致）；失败时从服务端整体恢复。
-  function saveReasoningEnabled(v) {
-    var on = v === 'on';
+  function saveReasoningEnabled(value) {
+    var on = value === 'on';
     api('/admin/api/reasoning/settings', { method: 'POST', body: buildReasoningBody(on) })
-      .then(function (d) {
-        _rs = d.settings;
+      .then(function (data) {
+        _rs = data.settings;
         toggleRsDetail(on);
         toast(t('rs.saved'), 'ok');
       })
@@ -1703,10 +1703,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   // Auto-refresh granularity also saves immediately.
   // 自动刷新粒度同样立即保存。
-  function saveReasoningRefresh(v) {
-    var n = parseInt(v, 10);
-    api('/admin/api/reasoning/settings', { method: 'POST', body: buildReasoningBody(undefined, n) })
-      .then(function (d) { _rs = d.settings; toast(t('rs.saved'), 'ok'); })
+  function saveReasoningRefresh(value) {
+    var interval = parseInt(value, 10);
+    api('/admin/api/reasoning/settings', { method: 'POST', body: buildReasoningBody(undefined, interval) })
+      .then(function (data) { _rs = data.settings; toast(t('rs.saved'), 'ok'); })
       .catch(function (err) {
         toast(etext(err.message), 'err');
         loadReasoning(); // revert the select to the persisted value / 恢复为已保存的值
@@ -1714,16 +1714,16 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   function loadReasoning() {
-    api('/admin/api/reasoning').then(function (d) {
+    api('/admin/api/reasoning').then(function (data) {
       if (!$('rs-enabled-select')) return;
-      _rs = d.settings;
-      $('rs-enabled-select').value = d.settings.enabled ? 'on' : 'off';
-      toggleRsDetail(d.settings.enabled);
-      fillRsRefreshSelect(d.settings.refreshInterval, d.refreshIntervalOptions);
-      $('rs-concurrency').value = String(d.settings.concurrency);
-      $('rs-timeout').value = String(d.settings.timeout);
-      $('rs-wait').value = String(d.settings.wait);
-      renderReasoningTable(d.models);
+      _rs = data.settings;
+      $('rs-enabled-select').value = data.settings.enabled ? 'on' : 'off';
+      toggleRsDetail(data.settings.enabled);
+      fillRsRefreshSelect(data.settings.refreshInterval, data.refreshIntervalOptions);
+      $('rs-concurrency').value = String(data.settings.concurrency);
+      $('rs-timeout').value = String(data.settings.timeout);
+      $('rs-wait').value = String(data.settings.wait);
+      renderReasoningTable(data.models);
     }).catch(function (err) {
       // 401 is already handled by api(); skip to avoid duplicate toasts
       // 401 已由 api() 统一提示（仅会话过期时），此处跳过避免重复弹窗
@@ -1733,13 +1733,15 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   function saveReasoningSettings() {
-    var c = parseInt($('rs-concurrency').value, 10);
-    var t = parseInt($('rs-timeout').value, 10);
-    var w = parseInt($('rs-wait').value, 10);
+    var concurrency = parseInt($('rs-concurrency').value, 10);
+    // NB: do NOT name this "t" — it would shadow the global i18n function t().
+    // 注意：不要命名为 "t"，否则会遮蔽全局的 i18n 翻译函数 t()。
+    var timeoutSec = parseInt($('rs-timeout').value, 10);
+    var waitSec = parseInt($('rs-wait').value, 10);
     clearBanner('reasoning-banner');
     // Strict validation for the explicit Save: no silent fallbacks.
     // 显式「保存」走严格校验：不静默回退。
-    if (!_rs || isNaN(c) || isNaN(t) || isNaN(w)) {
+    if (!_rs || isNaN(concurrency) || isNaN(timeoutSec) || isNaN(waitSec)) {
       setBanner('reasoning-banner', 'err', function () { return etext('err.settings_invalid'); });
       return;
     }
@@ -1747,10 +1749,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
     setLoading(btn, true);
     api('/admin/api/reasoning/settings', {
       method: 'POST',
-      body: { enabled: _rs.enabled, refresh_interval: _rs.refreshInterval, concurrency: c, timeout: t, wait: w }
+      body: { enabled: _rs.enabled, refresh_interval: _rs.refreshInterval, concurrency: concurrency, timeout: timeoutSec, wait: waitSec }
     })
-      .then(function (d) {
-        _rs = d.settings;
+      .then(function (data) {
+        _rs = data.settings;
         toast(t('rs.saved'), 'ok');
         loadReasoning(); // refresh expiry markers / 刷新列表过期标记
       })
@@ -1763,11 +1765,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
     setLoading(btn, true);
     clearBanner('reasoning-banner');
     api('/admin/api/reasoning/refresh', { method: 'POST' })
-      .then(function (d) {
-        setBanner('reasoning-banner', d.authExpired ? 'warn' : 'ok', function () {
-          return d.authExpired
-            ? tfmt('rs.refresh_auth', { probed: d.probed, unknown: d.unknown, failed: d.failed })
-            : tfmt('rs.refresh_done', { probed: d.probed, unknown: d.unknown, failed: d.failed });
+      .then(function (data) {
+        setBanner('reasoning-banner', data.authExpired ? 'warn' : 'ok', function () {
+          return data.authExpired
+            ? tfmt('rs.refresh_auth', { probed: data.probed, unknown: data.unknown, failed: data.failed })
+            : tfmt('rs.refresh_done', { probed: data.probed, unknown: data.unknown, failed: data.failed });
         });
         loadReasoning();
       })
@@ -1781,12 +1783,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
     return '<span class="badge ' + type + '">' + text + '</span>';
   }
 
-  function fillSessionStatus(prefix, s) {
-    if (s.session && s.session.imported) {
-      $(prefix + '-session').innerHTML = s.session.usable ? badge('ok', t('st.imported')) : badge('err', t('st.unusable'));
-      $(prefix + '-session-sub').textContent = s.session.summary || '';
-      $(prefix + '-upstream').textContent = s.session.base_url || '—';
-      $(prefix + '-upstream-sub').textContent = s.session.captured_at ? new Date(s.session.captured_at * 1000).toLocaleString() : '';
+  function fillSessionStatus(prefix, status) {
+    if (status.session && status.session.imported) {
+      $(prefix + '-session').innerHTML = status.session.usable ? badge('ok', t('st.imported')) : badge('err', t('st.unusable'));
+      $(prefix + '-session-sub').textContent = status.session.summary || '';
+      $(prefix + '-upstream').textContent = status.session.base_url || '—';
+      $(prefix + '-upstream-sub').textContent = status.session.captured_at ? new Date(status.session.captured_at * 1000).toLocaleString() : '';
     } else {
       $(prefix + '-session').innerHTML = badge('err', t('st.not_imported'));
       $(prefix + '-session-sub').textContent = t('st.not_imported_hint');
@@ -1796,19 +1798,19 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   function loadStatus() {
-    api('/admin/api/status').then(function (s) {
+    api('/admin/api/status').then(function (status) {
       // chip
       // 接入地址胶囊
-      $('chip-url').textContent = s.baseUrl + '  ';
-      $('api-base-desc').textContent = s.baseUrl;
-      $('api-base-code').textContent = s.baseUrl;
+      $('chip-url').textContent = status.baseUrl + '  ';
+      $('api-base-desc').textContent = status.baseUrl;
+      $('api-base-code').textContent = status.baseUrl;
 
       // dashboard session stat
       // 仪表盘 Session 状态
-      fillSessionStatus('st', s);
+      fillSessionStatus('st', status);
       // upstream page status
       // 上游页面状态
-      fillSessionStatus('up', s);
+      fillSessionStatus('up', status);
 
       // The key count is intentionally NOT rendered here: it comes from the
       // eventually-consistent KV list and would briefly lag behind creates.
@@ -1819,11 +1821,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
       // admin password source badge
       // 管理密码来源徽标
-      updatePwSourceUI(s);
+      updatePwSourceUI(status);
 
       // usage tracking granularity select
       // 使用记录粒度选择器
-      fillTouchSelect(s.touchInterval, s.touchIntervalOptions);
+      fillTouchSelect(status.touchInterval, status.touchIntervalOptions);
     }).catch(function (err) {
     // 401 is already handled by api(); skip to avoid duplicate toasts
     // 401 已由 api() 统一提示（仅会话过期时），此处跳过避免重复弹窗
@@ -1839,8 +1841,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
     setLoading(btn, true);
     clearBanner('session-banner');
     api('/admin/api/session', { method: 'POST', body: { json: $('session-json').value, test: true, save: false } })
-      .then(function (d) {
-        setBanner('session-banner', d.test.ok ? 'ok' : 'warn', function () { return testDetail(d.test); });
+      .then(function (data) {
+        setBanner('session-banner', data.test.ok ? 'ok' : 'warn', function () { return testDetail(data.test); });
       })
       .catch(function (err) { setBanner('session-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
@@ -1856,8 +1858,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
     setLoading(btn, true);
     clearBanner('status-banner');
     api('/admin/api/session/check', { method: 'POST' })
-      .then(function (d) {
-        setBanner('status-banner', d.test.ok ? 'ok' : 'warn', function () { return testDetail(d.test); });
+      .then(function (data) {
+        setBanner('status-banner', data.test.ok ? 'ok' : 'warn', function () { return testDetail(data.test); });
       })
       .catch(function (err) { setBanner('status-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
@@ -1868,9 +1870,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
     setLoading(btn, true);
     clearBanner('session-banner');
     api('/admin/api/session', { method: 'POST', body: { json: $('session-json').value, test: true, save: true } })
-      .then(function (d) {
+      .then(function (data) {
         setBanner('session-banner', 'ok', function () {
-          return t('up.import_ok') + (d.test ? ' ' + testDetail(d.test) : '') + t('up.import_summary') + d.summary;
+          return t('up.import_ok') + (data.test ? ' ' + testDetail(data.test) : '') + t('up.import_summary') + data.summary;
         });
         loadStatus();
       })
@@ -1910,9 +1912,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
     }
     setLoading(btn, true);
     api('/admin/api/keys', { method: 'POST', body: { name: name } })
-      .then(function (d) {
+      .then(function (data) {
         closeKeyModal();
-        $('key-modal-value').textContent = d.key;
+        $('key-modal-value').textContent = data.key;
         $('key-modal').classList.add('show');
         // Insert the new key locally instead of re-listing: the KV list index
         // is eventually consistent, so an immediate re-fetch may not include
@@ -1921,12 +1923,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
         // 在本地插入新 Key 而非重新拉取列表：KV list 索引是最终一致的，
         // 立即重新拉取可能还看不到它；下次 loadKeys() 同步后自然覆盖。
         _keys.unshift({
-          key: d.key,
-          name: d.name,
-          prefix: d.prefix,
-          created_at: d.created_at,
-          last_used: d.last_used,
-          masked: d.masked || (d.key.slice(0, 12) + '…' + d.key.slice(-4))
+          key: data.key,
+          name: data.name,
+          prefix: data.prefix,
+          created_at: data.created_at,
+          last_used: data.last_used,
+          masked: data.masked || (data.key.slice(0, 12) + '…' + data.key.slice(-4))
         });
         renderKeys();
         loadStatus();
@@ -1972,8 +1974,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   function loadKeys() {
-    api('/admin/api/keys').then(function (d) {
-      _keys = d.keys || [];
+    api('/admin/api/keys').then(function (data) {
+      _keys = data.keys || [];
       renderKeys();
     }).catch(function (err) {
       // 401 is already handled by api(); skip to avoid duplicate toasts
@@ -1984,10 +1986,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   function deleteKey(i) {
-    var k = _keys[i];
-    if (!k) return;
-    if (!confirm(t('keys.del_confirm') + '[' + k.name + ']' + t('keys.del_confirm_end'))) return;
-    api('/admin/api/keys', { method: 'DELETE', body: { key: k.key } })
+    var keyRecord = _keys[i];
+    if (!keyRecord) return;
+    if (!confirm(t('keys.del_confirm') + '[' + keyRecord.name + ']' + t('keys.del_confirm_end'))) return;
+    api('/admin/api/keys', { method: 'DELETE', body: { key: keyRecord.key } })
       .then(function () {
         toast(t('keys.deleted'), 'ok');
         // Remove locally first: the KV list index is eventually consistent and
@@ -2004,26 +2006,26 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   function rotateKey(i) {
-    var k = _keys[i];
-    if (!k) return;
-    if (!confirm(t('keys.rotate_confirm') + '[' + k.name + ']' + t('keys.rotate_confirm_end'))) return;
-    api('/admin/api/keys/rotate', { method: 'POST', body: { key: k.key } })
-      .then(function (d) {
+    var keyRecord = _keys[i];
+    if (!keyRecord) return;
+    if (!confirm(t('keys.rotate_confirm') + '[' + keyRecord.name + ']' + t('keys.rotate_confirm_end'))) return;
+    api('/admin/api/keys/rotate', { method: 'POST', body: { key: keyRecord.key } })
+      .then(function (data) {
         // Replace the row locally (same write-after-read compensation as
         // create/delete), then force the one-time copy modal for the new key.
         //
         // 本地替换该行（与创建/删除相同的写后读补偿机制），随后弹出
         // 新 Key 的一次性复制弹窗。
         _keys[i] = {
-          key: d.key,
-          name: d.name,
-          prefix: d.prefix,
-          created_at: d.created_at,
-          last_used: d.last_used,
-          masked: d.masked || (d.key.slice(0, 12) + '…' + d.key.slice(-4))
+          key: data.key,
+          name: data.name,
+          prefix: data.prefix,
+          created_at: data.created_at,
+          last_used: data.last_used,
+          masked: data.masked || (data.key.slice(0, 12) + '…' + data.key.slice(-4))
         };
         renderKeys();
-        $('key-modal-value').textContent = d.key;
+        $('key-modal-value').textContent = data.key;
         $('key-modal').classList.add('show');
         toast(t('keys.rotated'), 'ok');
         loadStatus();

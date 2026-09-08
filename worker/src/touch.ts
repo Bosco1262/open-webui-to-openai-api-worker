@@ -27,8 +27,8 @@ export async function getTouchInterval(env: Env): Promise<number> {
   const cached = cacheGet<number>(K_TOUCH_INTERVAL);
   if (cached !== null) return cached;
   const raw = await env.KV.get(K_TOUCH_INTERVAL);
-  const n = raw === null ? NaN : Number(raw);
-  const value = isIntervalOption(n) ? n : DEFAULT_INTERVAL;
+  const interval = raw === null ? NaN : Number(raw);
+  const value = isIntervalOption(interval) ? interval : DEFAULT_INTERVAL;
   cacheSet(K_TOUCH_INTERVAL, value);
   return value;
 }

@@ -119,18 +119,18 @@ function normalizeReasoningSettings(raw: unknown): ReasoningSettings {
   const obj = raw as Record<string, unknown>;
   if (typeof obj.enabled === "boolean") out.enabled = obj.enabled;
   const clamp = (v: unknown, lo: number, hi: number, fallback: number): number => {
-    const n = Number(v);
-    return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.trunc(n))) : fallback;
+    const value = Number(v);
+    return Number.isFinite(value) ? Math.min(hi, Math.max(lo, Math.trunc(value))) : fallback;
   };
   out.concurrency = clamp(obj.concurrency, 1, 8, out.concurrency);
   out.timeout = clamp(obj.timeout, 1, 120, out.timeout);
   out.wait = clamp(obj.wait, 0, 30, out.wait);
   const interval = Number(obj.refreshInterval);
   if (Number.isFinite(interval)) {
-    const n = Math.trunc(interval);
+    const truncated = Math.trunc(interval);
     // 0 means "auto-refresh off"; anything else must be a known granularity.
     // 0 表示关闭自动刷新；其余必须命中已知档位。
-    out.refreshInterval = n === 0 || isIntervalOption(n) ? n : out.refreshInterval;
+    out.refreshInterval = truncated === 0 || isIntervalOption(truncated) ? truncated : out.refreshInterval;
   }
   return out;
 }
@@ -165,11 +165,11 @@ function normalizeReasoningCache(raw: unknown): ReasoningCacheFile {
   if (!models || typeof models !== "object" || Array.isArray(models)) return out;
   for (const [id, entry] of Object.entries(models)) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-    const e = entry as Record<string, unknown>;
-    if (!Array.isArray(e.supported_efforts)) continue;
+    const rawEntry = entry as Record<string, unknown>;
+    if (!Array.isArray(rawEntry.supported_efforts)) continue;
     out.models[id] = {
-      supported_efforts: e.supported_efforts.filter((x): x is string => typeof x === "string"),
-      probed_at: typeof e.probed_at === "number" && Number.isFinite(e.probed_at) ? e.probed_at : 0,
+      supported_efforts: rawEntry.supported_efforts.filter((x): x is string => typeof x === "string"),
+      probed_at: typeof rawEntry.probed_at === "number" && Number.isFinite(rawEntry.probed_at) ? rawEntry.probed_at : 0,
     };
   }
   return out;
@@ -593,15 +593,15 @@ async function doRefresh(
 
   if (toProbe.length > 0) {
     let next = 0;
-    let expired = false;
+    let authExpired = false;
     const workerCount = Math.min(Math.max(settings.concurrency, 1), toProbe.length);
     const workers = Array.from({ length: workerCount }, async () => {
-      // A 401/403 sets `expired` so the remaining workers stop after their
+      // A 401/403 sets `authExpired` so the remaining workers stop after their
       // in-flight probe instead of hammering the dead session per model.
       //
-      // 401/403 会置 `expired`，其余 worker 在完成手头探测后即停止，
+      // 401/403 会置 `authExpired`，其余 worker 在完成手头探测后即停止，
       // 而不是对每个模型都拿着死凭证再撞一遍。
-      while (!expired) {
+      while (!authExpired) {
         const index = next++;
         if (index >= toProbe.length) return;
         const modelId = toProbe[index];
@@ -629,7 +629,7 @@ async function doRefresh(
           }
         } catch (err) {
           if (err instanceof ProbeAuthExpired) {
-            expired = true;
+            authExpired = true;
             stats.authExpired = true;
             return;
           }

@@ -267,10 +267,10 @@ function filterResponseHeaders(src: Headers): Headers {
 function buildUpstreamHeaders(request: Request, session: StoredSession): Headers {
   const headers = new Headers();
   for (const [key, value] of request.headers.entries()) {
-    const lk = key.toLowerCase();
+    const lowerKey = key.toLowerCase();
     // Drop hop-by-hop, CF-internal and client auth headers.
     // 剔除逐跳头、CF 内部头与客户端鉴权头。
-    if (HOP_BY_HOP_REQUEST.has(lk) || lk.startsWith("cf-")) continue;
+    if (HOP_BY_HOP_REQUEST.has(lowerKey) || lowerKey.startsWith("cf-")) continue;
     headers.set(key, value);
   }
   // Session credentials override everything (the client can't set its own auth).

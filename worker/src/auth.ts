@@ -277,9 +277,9 @@ export async function verifyAdminToken(env: Env, token: string): Promise<boolean
 export function readAdminCookie(request: Request): string {
   const header = request.headers.get("Cookie") || "";
   for (const part of header.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq > 0 && part.slice(0, eq).trim() === ADMIN_COOKIE) {
-      return part.slice(eq + 1).trim();
+    const eqIndex = part.indexOf("=");
+    if (eqIndex > 0 && part.slice(0, eqIndex).trim() === ADMIN_COOKIE) {
+      return part.slice(eqIndex + 1).trim();
     }
   }
   return "";
@@ -348,15 +348,15 @@ export function lockoutRecord(ip: string): void {
   //
   // 像上游一样限制容量：先清理过期条目，仍超限再逐出最早时间戳的条目。
   if (localLoginFailures.size >= LOCAL_LOCKOUT_MAX_ENTRIES && !localLoginFailures.has(ip)) {
-    for (const [k] of localLoginFailures) localLockoutPrune(k);
+    for (const [entryIp] of localLoginFailures) localLockoutPrune(entryIp);
     if (localLoginFailures.size >= LOCAL_LOCKOUT_MAX_ENTRIES) {
       let oldestIp = "";
       let oldestTs = Infinity;
-      for (const [k, list] of localLoginFailures) {
-        const first = list[0] ?? 0;
+      for (const [entryIp, timestamps] of localLoginFailures) {
+        const first = timestamps[0] ?? 0;
         if (first < oldestTs) {
           oldestTs = first;
-          oldestIp = k;
+          oldestIp = entryIp;
         }
       }
       if (oldestIp !== "") localLoginFailures.delete(oldestIp);
