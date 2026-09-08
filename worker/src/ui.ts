@@ -301,6 +301,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
   .banner.warn { display: block; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.25); color: #fcd34d; }
   .banner.info { display: block; background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.25); color: #93c5fd; }
 
+  /* Smooth collapse/expand: 0fr->1fr grid rows transition, height-agnostic.
+     平滑折叠/展开：0fr->1fr 的 grid 行过渡，内容高度自适应。 */
+  .collapse { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.35s ease; }
+  .collapse.open { grid-template-rows: 1fr; }
+  .collapse > div { overflow: hidden; min-height: 0; }
+
   .url-chip {
     display: inline-flex; align-items: center; gap: 8px;
     background: rgba(35, 45, 66, 0.7); border: 1px solid var(--border);
@@ -562,6 +568,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
                 <div class="sub" id="up-upstream-sub"></div>
               </div>
             </div>
+            <div class="banner" id="status-banner"></div>
           </div>
 
           <div class="card">
@@ -593,7 +600,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
               </select>
             </div>
 
-            <div id="rs-detail">
+            <div id="rs-detail" class="collapse"><div>
               <div class="setting-row" style="margin-bottom:12px;">
                 <div class="setting-info">
                   <div class="setting-label" data-i18n="rs.refresh_label">自动刷新</div>
@@ -603,32 +610,47 @@ export const ADMIN_UI = `<!DOCTYPE html>
               </div>
 
               <div class="setting-row" style="margin-bottom:12px;">
-                <div style="flex:1; min-width:280px;">
-                  <div class="setting-label" style="margin-bottom:10px;" data-i18n="rs.params_title">思考挡位探测参数</div>
-                  <div style="display:flex; flex-direction:column; gap:10px;">
-                    <div style="display:flex; align-items:center; gap:12px;">
-                      <label class="lbl" style="margin:0; flex:none; width:230px;" data-i18n="rs.concurrency_label">探测并发数（1–8）</label>
-                      <input id="rs-concurrency" type="number" min="1" max="8" style="width:130px;" placeholder="4" />
+                <div style="flex:1; min-width:300px;">
+                  <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;">
+                    <div class="setting-info">
+                      <div class="setting-label" data-i18n="rs.params_title">思考挡位探测参数</div>
+                      <div class="setting-hint" data-i18n="rs.params_hint">此参数设置作用于所有探测。</div>
                     </div>
-                    <div style="display:flex; align-items:center; gap:12px;">
-                      <label class="lbl" style="margin:0; flex:none; width:230px;" data-i18n="rs.timeout_label">单模型超时（秒，1–120）</label>
-                      <input id="rs-timeout" type="number" min="1" max="120" style="width:130px;" placeholder="30" />
+                    <button class="btn btn-primary" style="width:auto; flex:none;" onclick="saveReasoningSettings()" data-i18n="rs.save">保存</button>
+                  </div>
+                  <div style="display:flex; flex-direction:column; gap:12px; margin-top:14px;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+                      <div class="setting-info" style="flex:1;">
+                        <div class="setting-label" data-i18n="rs.concurrency_label">探测并发数</div>
+                        <div class="setting-hint" data-i18n="rs.concurrency_hint">同时探测的模型数量（1–8）。值越大探测越快，但更容易触及子请求上限。</div>
+                      </div>
+                      <input id="rs-concurrency" type="number" min="1" max="8" style="width:130px; flex:none;" placeholder="4" />
                     </div>
-                    <div style="display:flex; align-items:center; gap:12px;">
-                      <label class="lbl" style="margin:0; flex:none; width:230px;" data-i18n="rs.wait_label">等待时长（秒，0–30，0 不等待）</label>
-                      <input id="rs-wait" type="number" min="0" max="30" style="width:130px;" placeholder="5" />
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+                      <div class="setting-info" style="flex:1;">
+                        <div class="setting-label" data-i18n="rs.timeout_label">单模型超时</div>
+                        <div class="setting-hint" data-i18n="rs.timeout_hint">每个模型探测请求的最长等待时间（1–120 秒）。</div>
+                      </div>
+                      <input id="rs-timeout" type="number" min="1" max="120" style="width:130px; flex:none;" placeholder="30" />
+                    </div>
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+                      <div class="setting-info" style="flex:1;">
+                        <div class="setting-label" data-i18n="rs.wait_label">等待时长</div>
+                        <div class="setting-hint" data-i18n="rs.wait_hint">/v1/models 最多等待缺失模型探测完成的时长（0–30 秒，0 为不等待）。</div>
+                      </div>
+                      <input id="rs-wait" type="number" min="0" max="30" style="width:130px; flex:none;" placeholder="5" />
                     </div>
                   </div>
                 </div>
-                <button class="btn btn-primary" style="width:auto; flex:none;" onclick="saveReasoningSettings()" data-i18n="rs.save">保存</button>
               </div>
 
               <div class="banner" id="reasoning-banner"></div>
 
-              <div class="setting-row" style="display:block; margin-top:12px;">
+              <div class="setting-row" style="display:block;">
                 <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; margin-bottom:12px;">
                   <div class="setting-info">
                     <div class="setting-label" data-i18n="rs.cache_title">已缓存的模型及其思考挡位</div>
+                    <div class="setting-hint" data-i18n="rs.cache_hint">列出已探测的模型及其接受的思考挡位。「不可探测」表示上游未校验探测值；「已过期」表示超过自动刷新时长，将在下次 /v1/models 调用时重探。</div>
                   </div>
                   <button class="btn btn-ghost" style="width:auto; flex:none;" onclick="refreshReasoning()" data-i18n="rs.refresh">立即探测</button>
                 </div>
@@ -642,7 +664,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
                   <tbody id="reasoning-tbody"><tr><td colspan="4" class="empty" data-i18n="common.loading">加载中…</td></tr></tbody>
                 </table>
               </div>
-            </div>
+            </div></div>
           </div>
         </section>
 
@@ -938,10 +960,15 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'rs.refresh_hint': '自动重探的间隔时长。关闭后仅可通过点击"立即探测"按钮或使用客户端调用 /v1/models 时触发刷新。',
       'rs.refresh_off': '关闭自动刷新',
       'rs.params_title': '思考挡位探测参数',
+      'rs.params_hint': '此参数设置作用于所有探测。',
       'rs.cache_title': '已缓存的模型及其思考挡位',
-      'rs.concurrency_label': '探测并发数（1–8）',
-      'rs.timeout_label': '单模型超时（秒，1–120）',
-      'rs.wait_label': '等待时长（秒，0–30，0 不等待）',
+      'rs.cache_hint': '列出已探测的模型及其接受的思考挡位。「不可探测」表示上游未校验探测值；「已过期」表示超过自动刷新时长，将在下次 /v1/models 调用时重探。',
+      'rs.concurrency_label': '探测并发数',
+      'rs.concurrency_hint': '同时探测的模型数量（1–8）。值越大探测越快，但更容易触及子请求上限。',
+      'rs.timeout_label': '单模型超时',
+      'rs.timeout_hint': '每个模型探测请求的最长等待时间（1–120 秒）。',
+      'rs.wait_label': '等待时长',
+      'rs.wait_hint': '/v1/models 最多等待缺失模型探测完成的时长（0–30 秒，0 为不等待）。',
       'rs.save': '保存',
       'rs.saved': '思考挡位设置已保存',
       'rs.refresh': '立即探测',
@@ -1124,10 +1151,15 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'rs.refresh_hint': 'Interval between automatic re-probes. When off, refresh only happens via the "Probe Now" button or when clients call /v1/models.',
       'rs.refresh_off': 'Auto refresh off',
       'rs.params_title': 'Probe Parameters',
+      'rs.params_hint': 'These parameters apply to all probes.',
       'rs.cache_title': 'Cached Models & Reasoning Levels',
-      'rs.concurrency_label': 'Probe Concurrency (1–8)',
-      'rs.timeout_label': 'Per-model Timeout (seconds, 1–120)',
-      'rs.wait_label': 'Wait Time (seconds, 0–30; 0 = no wait)',
+      'rs.cache_hint': 'Lists probed models and their accepted reasoning levels. "Unprobeable" means the upstream accepted the probe without validating; "Expired" means the auto-refresh interval has passed, re-probing happens on the next /v1/models call.',
+      'rs.concurrency_label': 'Probe Concurrency',
+      'rs.concurrency_hint': 'Models probed in parallel (1–8). Higher values probe faster but hit sub-request limits sooner.',
+      'rs.timeout_label': 'Per-model Timeout',
+      'rs.timeout_hint': 'Maximum wait per probe request (1–120 seconds).',
+      'rs.wait_label': 'Wait Time',
+      'rs.wait_hint': 'How long /v1/models may wait for a missing-models probe (0–30 seconds; 0 = never wait).',
       'rs.save': 'Save',
       'rs.saved': 'Reasoning settings saved',
       'rs.refresh': 'Probe Now',
@@ -1642,12 +1674,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // Show/hide the detail rows (auto-refresh, probe parameters, cache table)
-  // when the feature switch changes.
+  // when the feature switch changes; the .collapse class animates it.
   //
-  // 功能开关变化时显示/隐藏下方详细配置（自动刷新、探测参数、缓存列表）。
+  // 功能开关变化时显示/隐藏下方详细配置（自动刷新、探测参数、缓存列表），
+  // .collapse 类提供过渡动画。
   function toggleRsDetail(on) {
     var el = $('rs-detail');
-    if (el) el.style.display = on ? '' : 'none';
+    if (el) el.classList.toggle('open', on);
   }
 
   // The feature switch saves immediately (mirrors the tracking-granularity
@@ -1814,16 +1847,19 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   // Connectivity check for the session already stored in KV (no paste needed).
+  // The result shows inside the "Current Credential Status" card.
+  //
   // 针对已导入 KV 的 session 的连通性检测（无需粘贴内容）。
+  // 结果显示在「当前凭证状态」卡片内部。
   function checkSession() {
     var btn = event.target;
     setLoading(btn, true);
-    clearBanner('session-banner');
+    clearBanner('status-banner');
     api('/admin/api/session/check', { method: 'POST' })
       .then(function (d) {
-        setBanner('session-banner', d.test.ok ? 'ok' : 'warn', function () { return testDetail(d.test); });
+        setBanner('status-banner', d.test.ok ? 'ok' : 'warn', function () { return testDetail(d.test); });
       })
-      .catch(function (err) { setBanner('session-banner', 'err', function () { return etext(err.message); }); })
+      .catch(function (err) { setBanner('status-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
   }
 
