@@ -144,7 +144,7 @@ curl https://<your-worker-domain>/v1/models \
 
 > `/v1/models` collapses upstream model objects into the standard OpenAI shape `{id, object, created, owned_by}`, plus a whitelist of generic-template fields: `max_context_length` / `context_length` (with `max_model_len` kept as a compatibility alias), `quantization` (parsed from the model id, e.g. `NVFP4`), `capabilities` (with a derived `function_calling` flag) and `description`. Private upstream fields (`user_id`, `access_grants`, `permission`, `urlIdx`, ...) are never exposed.
 
-### Reasoning-effort probing
+### Reasoning Settings
 
 Aligned with the upstream project, each model on `/v1/models` can carry a `reasoning` object so OpenAI-compatible clients can display and pick thinking levels:
 
@@ -161,9 +161,9 @@ Aligned with the upstream project, each model on `/v1/models` can carry a `reaso
 
 How it works: a minimal completion request carrying the sentinel value `reasoning_effort: "__probe__"` (`max_tokens=1`) is sent per model. Upstreams that validate the field as a Literal enum (vLLM and friends) reject it with a 400 whose error text enumerates every accepted value — validation happens before generation, so probing costs no tokens. Results are persisted per model in KV and served from cache; models the upstream accepts without validating are remembered as "unprobeable" to avoid re-probing.
 
-- **Toggle & tuning**: admin console → **Upstream Server → Reasoning Efforts** card — turn the `/v1/models` reasoning field on/off (on by default) and adjust probe concurrency (default 4), per-model timeout (default 30s) and the bounded `/v1/models` wait (default 5s, 0 = never wait).
+- **Toggle & tuning**: admin console → **Upstream Server → Reasoning Settings** card — turn the `/v1/models` reasoning field on/off (on by default) and adjust probe concurrency (default 4), per-model timeout (default 30s) and the bounded `/v1/models` wait (default 5s, 0 = never wait).
 - **Auto refresh**: cache entries older than the configured granularity are re-probed automatically on `/v1/models` requests; the granularity reuses the tracking-interval options (default: daily) and can be turned off.
-- **Manual refresh**: the "Probe & Refresh Now" button forces a full synchronous re-probe and shows per-model results (model, supported efforts, probed time, freshness).
+- **Manual refresh**: the "Probe Now" button forces a full synchronous re-probe and shows per-model results (model, supported efforts, probed time, freshness).
 - Models without cache coverage are served without the `reasoning` field until a background refresh fills them in, so probing never blocks the model list.
 
 Python (OpenAI SDK):

@@ -548,7 +548,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
                 <div class="desc" style="margin-bottom:0;" data-i18n="up.status_desc">最近一次导入的凭证摘要，凭证过期后请重新登录上游并再次导入。</div>
               </div>
               <button class="btn btn-ghost" style="width:auto; flex:none; margin:12px 0;" onclick="checkSession()" data-i18n="up.check_session">检测 Session 连通性</button>
-              <button class="btn btn-danger btn-sm" style="flex:none; margin:12px 0;" onclick="deleteSession()" data-i18n="up.delete_session">删除 Session</button>
+              <button class="btn btn-danger" style="width:auto; flex:none; margin:12px 0;" onclick="deleteSession()" data-i18n="up.delete_session">删除 Session</button>
             </div>
             <div class="stats" style="grid-template-columns:1fr 1fr; margin-top:16px;">
               <div class="stat">
@@ -579,59 +579,69 @@ export const ADMIN_UI = `<!DOCTYPE html>
           </div>
 
           <div class="card">
-            <h3><span class="ic">▸</span> <span data-i18n="rs.title">思考挡位获取</span></h3>
-            <div class="desc" data-i18n="rs.desc">逐模型探测上游接受的 reasoning_effort 思考挡位，并在 /v1/models 透出 reasoning 字段。探测发送携带哨兵值的最小请求（max_tokens=1），由上游校验错误解析挡位，零 token 成本。</div>
+            <h3><span class="ic">▸</span> <span data-i18n="rs.title">思考挡位设置</span></h3>
+            <div class="desc" data-i18n="rs.desc">通过向上游服务端提交特殊字段获取模型支持的思考挡位，并在 /v1/models 中以 reasoning 字段透出。</div>
 
             <div class="setting-row" style="margin-bottom:12px;">
               <div class="setting-info">
                 <div class="setting-label" data-i18n="rs.enabled_label">返回思考挡位</div>
-                <div class="setting-hint" data-i18n="rs.enabled_hint">关闭后 /v1/models 不再返回 reasoning 字段，也不发起探测。</div>
+                <div class="setting-hint" data-i18n="rs.enabled_hint">关闭后不发起探测，也不会在 /v1/models 中返回 reasoning 字段。</div>
               </div>
-              <select id="rs-enabled-select" style="width:180px;">
+              <select id="rs-enabled-select" style="width:180px;" onchange="saveReasoningEnabled(this.value)">
                 <option value="on" data-i18n="rs.on">开启</option>
                 <option value="off" data-i18n="rs.off">关闭</option>
               </select>
             </div>
 
-            <div class="setting-row" style="margin-bottom:12px;">
-              <div class="setting-info">
-                <div class="setting-label" data-i18n="rs.refresh_label">自动刷新</div>
-                <div class="setting-hint" data-i18n="rs.refresh_hint">挡位缓存超过所选时长即自动重探；关闭后仅可通过下方按钮手动刷新。</div>
+            <div id="rs-detail">
+              <div class="setting-row" style="margin-bottom:12px;">
+                <div class="setting-info">
+                  <div class="setting-label" data-i18n="rs.refresh_label">自动刷新</div>
+                  <div class="setting-hint" data-i18n="rs.refresh_hint">自动重探的间隔时长。关闭后仅可通过点击"立即探测"按钮或使用客户端调用 /v1/models 时触发刷新。</div>
+                </div>
+                <select id="rs-refresh-select" style="width:180px;" onchange="saveReasoningRefresh(this.value)"></select>
               </div>
-              <select id="rs-refresh-select" style="width:180px;"></select>
-            </div>
 
-            <div class="grid2">
-              <div class="form-row" style="margin-bottom:0;">
-                <label class="lbl" data-i18n="rs.concurrency_label">探测并发数（1–8）</label>
-                <input id="rs-concurrency" type="number" min="1" max="8" placeholder="4" />
+              <div class="setting-row" style="margin-bottom:12px;">
+                <div style="flex:1; min-width:280px;">
+                  <div class="setting-label" style="margin-bottom:10px;" data-i18n="rs.params_title">思考挡位探测参数</div>
+                  <div style="display:flex; flex-direction:column; gap:10px;">
+                    <div style="display:flex; align-items:center; gap:12px;">
+                      <label class="lbl" style="margin:0; flex:none; width:230px;" data-i18n="rs.concurrency_label">探测并发数（1–8）</label>
+                      <input id="rs-concurrency" type="number" min="1" max="8" style="width:130px;" placeholder="4" />
+                    </div>
+                    <div style="display:flex; align-items:center; gap:12px;">
+                      <label class="lbl" style="margin:0; flex:none; width:230px;" data-i18n="rs.timeout_label">单模型超时（秒，1–120）</label>
+                      <input id="rs-timeout" type="number" min="1" max="120" style="width:130px;" placeholder="30" />
+                    </div>
+                    <div style="display:flex; align-items:center; gap:12px;">
+                      <label class="lbl" style="margin:0; flex:none; width:230px;" data-i18n="rs.wait_label">等待时长（秒，0–30，0 不等待）</label>
+                      <input id="rs-wait" type="number" min="0" max="30" style="width:130px;" placeholder="5" />
+                    </div>
+                  </div>
+                </div>
+                <button class="btn btn-primary" style="width:auto; flex:none;" onclick="saveReasoningSettings()" data-i18n="rs.save">保存</button>
               </div>
-              <div class="form-row" style="margin-bottom:0;">
-                <label class="lbl" data-i18n="rs.timeout_label">单模型超时（秒，1–120）</label>
-                <input id="rs-timeout" type="number" min="1" max="120" placeholder="30" />
-              </div>
-              <div class="form-row full" style="margin-bottom:0;">
-                <label class="lbl" data-i18n="rs.wait_label">/v1/models 等待时长（秒，0–30，0 为不等待）</label>
-                <input id="rs-wait" type="number" min="0" max="30" placeholder="5" />
-              </div>
-            </div>
 
-            <div class="btn-row">
-              <button class="btn btn-primary" style="width:auto;" onclick="saveReasoningSettings()" data-i18n="rs.save">保存设置</button>
-              <button class="btn btn-ghost" style="width:auto;" onclick="refreshReasoning()" data-i18n="rs.refresh">立即探测并刷新</button>
-            </div>
-            <div class="banner" id="reasoning-banner"></div>
+              <div class="banner" id="reasoning-banner"></div>
 
-            <div style="margin-top:18px;">
-              <table class="table">
-                <thead><tr>
-                  <th data-i18n="rs.th_model">模型</th>
-                  <th data-i18n="rs.th_efforts">支持挡位</th>
-                  <th data-i18n="rs.th_probed">探测时间</th>
-                  <th data-i18n="rs.th_status">状态</th>
-                </tr></thead>
-                <tbody id="reasoning-tbody"><tr><td colspan="4" class="empty" data-i18n="common.loading">加载中…</td></tr></tbody>
-              </table>
+              <div class="setting-row" style="display:block; margin-top:12px;">
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; margin-bottom:12px;">
+                  <div class="setting-info">
+                    <div class="setting-label" data-i18n="rs.cache_title">已缓存的模型及其思考挡位</div>
+                  </div>
+                  <button class="btn btn-ghost" style="width:auto; flex:none;" onclick="refreshReasoning()" data-i18n="rs.refresh">立即探测</button>
+                </div>
+                <table class="table">
+                  <thead><tr>
+                    <th data-i18n="rs.th_model">模型</th>
+                    <th data-i18n="rs.th_efforts">支持挡位</th>
+                    <th data-i18n="rs.th_probed">探测时间</th>
+                    <th data-i18n="rs.th_status">状态</th>
+                  </tr></thead>
+                  <tbody id="reasoning-tbody"><tr><td colspan="4" class="empty" data-i18n="common.loading">加载中…</td></tr></tbody>
+                </table>
+              </div>
             </div>
           </div>
         </section>
@@ -918,28 +928,30 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.touch_10m': '每十分钟',
       'msg.touch_saved': '使用记录粒度已保存',
       'err.settings_invalid': '无效的设置值。',
-      'rs.title': '思考挡位获取',
-      'rs.desc': '逐模型探测上游接受的 reasoning_effort 思考挡位，并在 /v1/models 透出 reasoning 字段。探测发送携带哨兵值的最小请求（max_tokens=1），由上游校验错误解析挡位，零 token 成本。',
+      'rs.title': '思考挡位设置',
+      'rs.desc': '通过向上游服务端提交特殊字段获取模型支持的思考挡位，并在 /v1/models 中以 reasoning 字段透出。',
       'rs.enabled_label': '返回思考挡位',
-      'rs.enabled_hint': '关闭后 /v1/models 不再返回 reasoning 字段，也不发起探测。',
+      'rs.enabled_hint': '关闭后不发起探测，也不会在 /v1/models 中返回 reasoning 字段。',
       'rs.on': '开启',
       'rs.off': '关闭',
       'rs.refresh_label': '自动刷新',
-      'rs.refresh_hint': '挡位缓存超过所选时长即自动重探；关闭后仅可通过下方按钮手动刷新。',
+      'rs.refresh_hint': '自动重探的间隔时长。关闭后仅可通过点击"立即探测"按钮或使用客户端调用 /v1/models 时触发刷新。',
       'rs.refresh_off': '关闭自动刷新',
+      'rs.params_title': '思考挡位探测参数',
+      'rs.cache_title': '已缓存的模型及其思考挡位',
       'rs.concurrency_label': '探测并发数（1–8）',
       'rs.timeout_label': '单模型超时（秒，1–120）',
-      'rs.wait_label': '/v1/models 等待时长（秒，0–30，0 为不等待）',
-      'rs.save': '保存设置',
+      'rs.wait_label': '等待时长（秒，0–30，0 不等待）',
+      'rs.save': '保存',
       'rs.saved': '思考挡位设置已保存',
-      'rs.refresh': '立即探测并刷新',
+      'rs.refresh': '立即探测',
       'rs.refresh_done': '探测完成：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个',
       'rs.refresh_auth': '探测中途凭证失效（HTTP 401/403），已中止：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个。请重新导入 Session',
       'rs.th_model': '模型',
       'rs.th_efforts': '支持挡位',
       'rs.th_probed': '探测时间',
       'rs.th_status': '状态',
-      'rs.empty': '暂无探测结果，点击「立即探测并刷新」开始',
+      'rs.empty': '暂无探测结果，点击「立即探测」开始',
       'rs.unprobeable': '上游未校验，无法获知挡位',
       'rs.st_fresh': '最新',
       'rs.st_expired': '已过期，将自动重探',
@@ -1102,28 +1114,30 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.touch_10m': 'Every 10 minutes',
       'msg.touch_saved': 'Tracking granularity saved',
       'err.settings_invalid': 'Invalid setting value.',
-      'rs.title': 'Reasoning Efforts',
-      'rs.desc': 'Probes which reasoning_effort levels each model accepts upstream and serves the reasoning field on /v1/models. A minimal request with a sentinel value (max_tokens=1) triggers the upstream validation error that enumerates the levels — at zero token cost.',
+      'rs.title': 'Reasoning Settings',
+      'rs.desc': 'Obtains the reasoning levels each model supports by submitting a special field to the upstream server, and serves them as the reasoning field on /v1/models.',
       'rs.enabled_label': 'Serve Reasoning Efforts',
-      'rs.enabled_hint': 'When off, /v1/models no longer returns the reasoning field and no probes are sent.',
+      'rs.enabled_hint': 'When off, no probes are sent and the reasoning field is not returned on /v1/models.',
       'rs.on': 'On',
       'rs.off': 'Off',
       'rs.refresh_label': 'Auto Refresh',
-      'rs.refresh_hint': 'Cache entries older than the chosen interval are re-probed automatically; when off, only the button below refreshes.',
+      'rs.refresh_hint': 'Interval between automatic re-probes. When off, refresh only happens via the "Probe Now" button or when clients call /v1/models.',
       'rs.refresh_off': 'Auto refresh off',
+      'rs.params_title': 'Probe Parameters',
+      'rs.cache_title': 'Cached Models & Reasoning Levels',
       'rs.concurrency_label': 'Probe Concurrency (1–8)',
       'rs.timeout_label': 'Per-model Timeout (seconds, 1–120)',
-      'rs.wait_label': '/v1/models Wait Time (seconds, 0–30, 0 = no wait)',
-      'rs.save': 'Save Settings',
+      'rs.wait_label': 'Wait Time (seconds, 0–30; 0 = no wait)',
+      'rs.save': 'Save',
       'rs.saved': 'Reasoning settings saved',
-      'rs.refresh': 'Probe & Refresh Now',
+      'rs.refresh': 'Probe Now',
       'rs.refresh_done': 'Probe finished: {probed} probed, {unknown} unprobeable, {failed} failed',
       'rs.refresh_auth': 'Credentials expired mid-probe (HTTP 401/403); aborted: {probed} probed, {unknown} unprobeable, {failed} failed. Please re-import the session',
       'rs.th_model': 'Model',
       'rs.th_efforts': 'Supported Efforts',
       'rs.th_probed': 'Probed At',
       'rs.th_status': 'Status',
-      'rs.empty': 'No probe results yet — click "Probe & Refresh Now" to start',
+      'rs.empty': 'No probe results yet — click "Probe Now" to start',
       'rs.unprobeable': 'Upstream accepted the probe without validating',
       'rs.st_fresh': 'Fresh',
       'rs.st_expired': 'Expired, will re-probe',
@@ -1601,10 +1615,77 @@ export const ADMIN_UI = `<!DOCTYPE html>
     }).join('');
   }
 
+  // Last server-known settings; fallback for the immediate-save paths so
+  // toggling the switch never submits half-edited probe parameters.
+  //
+  // 最近一次服务端设置的快照；立即保存路径的参数回退来源，保证切换开关
+  // 不会连带提交尚未保存完毕的探测参数。
+  var _rs = null;
+
+  // Build the settings payload: explicit overrides win, everything else comes
+  // from the inputs with the server-known values as fallback.
+  //
+  // 构建设置负载：显式覆盖值优先，其余取输入框，输入无效时回退服务端值。
+  function buildReasoningBody(enabled, refreshInterval) {
+    var base = _rs || { enabled: true, refreshInterval: 86400, concurrency: 4, timeout: 30, wait: 5 };
+    var numOr = function (id, fallback) {
+      var v = parseInt($(id).value, 10);
+      return isNaN(v) ? fallback : v;
+    };
+    return {
+      enabled: enabled !== undefined ? enabled : base.enabled,
+      refresh_interval: refreshInterval !== undefined ? refreshInterval : base.refreshInterval,
+      concurrency: numOr('rs-concurrency', base.concurrency),
+      timeout: numOr('rs-timeout', base.timeout),
+      wait: numOr('rs-wait', base.wait)
+    };
+  }
+
+  // Show/hide the detail rows (auto-refresh, probe parameters, cache table)
+  // when the feature switch changes.
+  //
+  // 功能开关变化时显示/隐藏下方详细配置（自动刷新、探测参数、缓存列表）。
+  function toggleRsDetail(on) {
+    var el = $('rs-detail');
+    if (el) el.style.display = on ? '' : 'none';
+  }
+
+  // The feature switch saves immediately (mirrors the tracking-granularity
+  // select); on failure the whole panel is reloaded from the server.
+  //
+  // 功能开关立即保存（与「使用记录粒度」一致）；失败时从服务端整体恢复。
+  function saveReasoningEnabled(v) {
+    var on = v === 'on';
+    api('/admin/api/reasoning/settings', { method: 'POST', body: buildReasoningBody(on) })
+      .then(function (d) {
+        _rs = d.settings;
+        toggleRsDetail(on);
+        toast(t('rs.saved'), 'ok');
+      })
+      .catch(function (err) {
+        toast(etext(err.message), 'err');
+        loadReasoning(); // revert the select to the persisted value / 恢复为已保存的值
+      });
+  }
+
+  // Auto-refresh granularity also saves immediately.
+  // 自动刷新粒度同样立即保存。
+  function saveReasoningRefresh(v) {
+    var n = parseInt(v, 10);
+    api('/admin/api/reasoning/settings', { method: 'POST', body: buildReasoningBody(undefined, n) })
+      .then(function (d) { _rs = d.settings; toast(t('rs.saved'), 'ok'); })
+      .catch(function (err) {
+        toast(etext(err.message), 'err');
+        loadReasoning(); // revert the select to the persisted value / 恢复为已保存的值
+      });
+  }
+
   function loadReasoning() {
     api('/admin/api/reasoning').then(function (d) {
       if (!$('rs-enabled-select')) return;
+      _rs = d.settings;
       $('rs-enabled-select').value = d.settings.enabled ? 'on' : 'off';
+      toggleRsDetail(d.settings.enabled);
       fillRsRefreshSelect(d.settings.refreshInterval, d.refreshIntervalOptions);
       $('rs-concurrency').value = String(d.settings.concurrency);
       $('rs-timeout').value = String(d.settings.timeout);
@@ -1619,20 +1700,27 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   function saveReasoningSettings() {
+    var c = parseInt($('rs-concurrency').value, 10);
+    var t = parseInt($('rs-timeout').value, 10);
+    var w = parseInt($('rs-wait').value, 10);
+    clearBanner('reasoning-banner');
+    // Strict validation for the explicit Save: no silent fallbacks.
+    // 显式「保存」走严格校验：不静默回退。
+    if (!_rs || isNaN(c) || isNaN(t) || isNaN(w)) {
+      setBanner('reasoning-banner', 'err', function () { return etext('err.settings_invalid'); });
+      return;
+    }
     var btn = event.target;
     setLoading(btn, true);
-    clearBanner('reasoning-banner');
     api('/admin/api/reasoning/settings', {
       method: 'POST',
-      body: {
-        enabled: $('rs-enabled-select').value === 'on',
-        refresh_interval: parseInt($('rs-refresh-select').value, 10),
-        concurrency: parseInt($('rs-concurrency').value, 10),
-        timeout: parseInt($('rs-timeout').value, 10),
-        wait: parseInt($('rs-wait').value, 10)
-      }
+      body: { enabled: _rs.enabled, refresh_interval: _rs.refreshInterval, concurrency: c, timeout: t, wait: w }
     })
-      .then(function () { toast(t('rs.saved'), 'ok'); loadReasoning(); })
+      .then(function (d) {
+        _rs = d.settings;
+        toast(t('rs.saved'), 'ok');
+        loadReasoning(); // refresh expiry markers / 刷新列表过期标记
+      })
       .catch(function (err) { setBanner('reasoning-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
   }
