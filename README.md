@@ -30,10 +30,13 @@ OpenAI clients ──▶ Bearer sk-xxx ──▶  /v1/*            │
 │   ├── src/
 │   │   ├── index.ts                 # Entry point and routing
 │   │   ├── types.ts                 # Shared types
-│   │   ├── kv.ts                    # KV data layer (in-memory cache)
+│   │   ├── kv.ts                    # KV data layer (generic primitives + in-memory cache)
+│   │   ├── intervals.ts             # Shared granularity steps (daily … 10 min)
+│   │   ├── touch.ts                 # API-key last_used write throttle
 │   │   ├── auth.ts                  # Admin / client authentication
 │   │   ├── session.ts               # Upstream credential request headers
 │   │   ├── proxy.ts                 # /v1/* OpenAI-compatible proxy
+│   │   ├── reasoning.ts             # Reasoning-effort probe, settings & cache
 │   │   ├── admin.ts                 # Admin REST API
 │   │   └── ui.ts                    # Admin console (embedded single page)
 │   ├── wrangler.jsonc               # Worker config (KV binding)
@@ -141,6 +144,28 @@ curl https://<your-worker-domain>/v1/models \
 
 > `/v1/models` collapses upstream model objects into the standard OpenAI shape `{id, object, created, owned_by}`, plus a whitelist of generic-template fields: `max_context_length` / `context_length` (with `max_model_len` kept as a compatibility alias), `quantization` (parsed from the model id, e.g. `NVFP4`), `capabilities` (with a derived `function_calling` flag) and `description`. Private upstream fields (`user_id`, `access_grants`, `permission`, `urlIdx`, ...) are never exposed.
 
+### Reasoning-effort probing
+
+Aligned with the upstream project, each model on `/v1/models` can carry a `reasoning` object so OpenAI-compatible clients can display and pick thinking levels:
+
+```json
+{
+  "reasoning": {
+    "supported_efforts": ["none", "low", "medium", "high"],
+    "default_effort": "medium",
+    "default_enabled": true,
+    "mandatory": false
+  }
+}
+```
+
+How it works: a minimal completion request carrying the sentinel value `reasoning_effort: "__probe__"` (`max_tokens=1`) is sent per model. Upstreams that validate the field as a Literal enum (vLLM and friends) reject it with a 400 whose error text enumerates every accepted value — validation happens before generation, so probing costs no tokens. Results are persisted per model in KV and served from cache; models the upstream accepts without validating are remembered as "unprobeable" to avoid re-probing.
+
+- **Toggle & tuning**: admin console → **Upstream Server → Reasoning Efforts** card — turn the `/v1/models` reasoning field on/off (on by default) and adjust probe concurrency (default 4), per-model timeout (default 30s) and the bounded `/v1/models` wait (default 5s, 0 = never wait).
+- **Auto refresh**: cache entries older than the configured granularity are re-probed automatically on `/v1/models` requests; the granularity reuses the tracking-interval options (default: daily) and can be turned off.
+- **Manual refresh**: the "Probe & Refresh Now" button forces a full synchronous re-probe and shows per-model results (model, supported efforts, probed time, freshness).
+- Models without cache coverage are served without the `reasoning` field until a background refresh fills them in, so probing never blocks the model list.
+
 Python (OpenAI SDK):
 
 ```python
@@ -171,6 +196,9 @@ for chunk in resp:
 | POST            | `/admin/api/password`                   | admin session | Change admin password (all old sessions invalidated) |
 | POST            | `/admin/api/session`                    | admin session | Import session (supports `test`/`save`) |
 | GET/POST/DELETE | `/admin/api/keys`                       | admin session | API key management                  |
+| GET             | `/admin/api/reasoning`                  | admin session | Reasoning probe settings & per-model results |
+| POST            | `/admin/api/reasoning/settings`         | admin session | Update reasoning probe settings      |
+| POST            | `/admin/api/reasoning/refresh`          | admin session | Force a full reasoning re-probe      |
 | GET             | `/v1/models`                            | API key      | Model list (sanitized, safe fields only) |
 | POST            | `/v1/chat/completions`                  | API key      | Chat completions (incl. SSE streaming) |
 | POST            | `/v1/embeddings`                        | API key      | Embeddings                           |
@@ -184,13 +212,14 @@ Client authentication accepts both `Authorization: Bearer <key>` and `X-API-Key:
 | -------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `ADMIN_PASSWORD`     | `wrangler secret put` / Dashboard Variables | Admin password (optional; the Secret is verified directly and not written to KV; a console change stores it in KV and overrides it) |
 | `SESSION_SECRET`     | `wrangler secret put`                       | Session signing secret (optional; auto-derived and stored in KV if not set)                   |
-| KV Namespace         | `wrangler.jsonc` (auto-created)             | Stores session / API keys / admin password; omitting the binding `id` enables automatic provisioning and creation on first deploy |
+| KV Namespace         | `wrangler.jsonc` (auto-created)             | Stores session / API keys / admin password / reasoning settings & probe cache; omitting the binding `id` enables automatic provisioning and creation on first deploy |
 
 ## Free-tier Resource Adaptation
 
 - Storage uses only **Workers KV** (100k reads/day, 1k writes/day): the session is cached in the Worker instance for 60 seconds; each proxy request performs only 1 KV read (API key verification).
 - API key verification is O(1): the key plaintext is the KV key name, no iteration needed.
-- `last_used` updates are throttled and written asynchronously via `ctx.waitUntil`: a never-used key is recorded immediately on its first call, afterwards at most once per configured interval (default: daily, adjustable in the admin console under Settings → Usage Tracking Granularity).
+- `last_used` updates are throttled and written asynchronously via `ctx.waitUntil`: a never-used key is recorded immediately on its first call, afterwards at most once per configured interval (default: daily, adjustable in the admin console under API Management → Usage Tracking Granularity).
+- Reasoning-effort probes run at limited concurrency, are deduplicated in-flight per isolate and write the cache back exactly once per round, staying clear of KV write limits; results persist across refreshes, and with many models the free-plan sub-request cap simply spreads probing over successive requests.
 - SSE streaming passes through via `response.body`, keeping CPU usage extremely low.
 
 ## Security Notes

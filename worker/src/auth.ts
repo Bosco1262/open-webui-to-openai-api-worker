@@ -43,8 +43,8 @@ import {
   getSessionEpoch,
   randomBytes,
   setPasswordHash,
-  touchApiKey,
 } from "./kv";
+import { touchApiKey } from "./touch";
 
 const PBKDF2_ITERATIONS = 100_000;
 const PBKDF2_BITS = 256;

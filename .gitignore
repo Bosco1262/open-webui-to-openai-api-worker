@@ -12,6 +12,9 @@ local/session.json
 # Credentials — never commit
 session.json
 
+# curl cookie jars may capture upstream login cookies
+cookies.txt
+
 # OS
 .DS_Store
 Thumbs.db

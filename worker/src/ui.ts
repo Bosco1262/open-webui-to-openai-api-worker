@@ -542,9 +542,15 @@ export const ADMIN_UI = `<!DOCTYPE html>
           </div>
 
           <div class="card">
-            <h3><span class="ic">▸</span> <span data-i18n="up.status_title">当前凭证状态</span></h3>
-            <div class="desc" data-i18n="up.status_desc">最近一次导入的凭证摘要，凭证过期后请重新登录上游并再次导入。</div>
-            <div class="stats" style="grid-template-columns:1fr 1fr;">
+            <div style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">
+              <div style="flex:1; min-width:0;">
+                <h3><span class="ic">▸</span> <span data-i18n="up.status_title">当前凭证状态</span></h3>
+                <div class="desc" style="margin-bottom:0;" data-i18n="up.status_desc">最近一次导入的凭证摘要，凭证过期后请重新登录上游并再次导入。</div>
+              </div>
+              <button class="btn btn-ghost" style="width:auto; flex:none; margin:12px 0;" onclick="checkSession()" data-i18n="up.check_session">检测 Session 连通性</button>
+              <button class="btn btn-danger btn-sm" style="flex:none; margin:12px 0;" onclick="deleteSession()" data-i18n="up.delete_session">删除 Session</button>
+            </div>
+            <div class="stats" style="grid-template-columns:1fr 1fr; margin-top:16px;">
               <div class="stat">
                 <div class="label" data-i18n="up.state">状态</div>
                 <div class="value"><span id="up-session">—</span></div>
@@ -568,9 +574,65 @@ export const ADMIN_UI = `<!DOCTYPE html>
             <div class="btn-row">
               <button class="btn btn-ghost" onclick="testSession()" data-i18n="up.test">校验并测试连通</button>
               <button class="btn btn-primary" style="width:auto;" onclick="importSession()" data-i18n="up.import">导入 Session</button>
-              <button class="btn btn-danger btn-sm" onclick="deleteSession()" data-i18n="common.delete">删除</button>
             </div>
             <div class="banner" id="session-banner"></div>
+          </div>
+
+          <div class="card">
+            <h3><span class="ic">▸</span> <span data-i18n="rs.title">思考挡位获取</span></h3>
+            <div class="desc" data-i18n="rs.desc">逐模型探测上游接受的 reasoning_effort 思考挡位，并在 /v1/models 透出 reasoning 字段。探测发送携带哨兵值的最小请求（max_tokens=1），由上游校验错误解析挡位，零 token 成本。</div>
+
+            <div class="setting-row" style="margin-bottom:12px;">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="rs.enabled_label">返回思考挡位</div>
+                <div class="setting-hint" data-i18n="rs.enabled_hint">关闭后 /v1/models 不再返回 reasoning 字段，也不发起探测。</div>
+              </div>
+              <select id="rs-enabled-select" style="width:180px;">
+                <option value="on" data-i18n="rs.on">开启</option>
+                <option value="off" data-i18n="rs.off">关闭</option>
+              </select>
+            </div>
+
+            <div class="setting-row" style="margin-bottom:12px;">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="rs.refresh_label">自动刷新</div>
+                <div class="setting-hint" data-i18n="rs.refresh_hint">挡位缓存超过所选时长即自动重探；关闭后仅可通过下方按钮手动刷新。</div>
+              </div>
+              <select id="rs-refresh-select" style="width:180px;"></select>
+            </div>
+
+            <div class="grid2">
+              <div class="form-row" style="margin-bottom:0;">
+                <label class="lbl" data-i18n="rs.concurrency_label">探测并发数（1–8）</label>
+                <input id="rs-concurrency" type="number" min="1" max="8" placeholder="4" />
+              </div>
+              <div class="form-row" style="margin-bottom:0;">
+                <label class="lbl" data-i18n="rs.timeout_label">单模型超时（秒，1–120）</label>
+                <input id="rs-timeout" type="number" min="1" max="120" placeholder="30" />
+              </div>
+              <div class="form-row full" style="margin-bottom:0;">
+                <label class="lbl" data-i18n="rs.wait_label">/v1/models 等待时长（秒，0–30，0 为不等待）</label>
+                <input id="rs-wait" type="number" min="0" max="30" placeholder="5" />
+              </div>
+            </div>
+
+            <div class="btn-row">
+              <button class="btn btn-primary" style="width:auto;" onclick="saveReasoningSettings()" data-i18n="rs.save">保存设置</button>
+              <button class="btn btn-ghost" style="width:auto;" onclick="refreshReasoning()" data-i18n="rs.refresh">立即探测并刷新</button>
+            </div>
+            <div class="banner" id="reasoning-banner"></div>
+
+            <div style="margin-top:18px;">
+              <table class="table">
+                <thead><tr>
+                  <th data-i18n="rs.th_model">模型</th>
+                  <th data-i18n="rs.th_efforts">支持挡位</th>
+                  <th data-i18n="rs.th_probed">探测时间</th>
+                  <th data-i18n="rs.th_status">状态</th>
+                </tr></thead>
+                <tbody id="reasoning-tbody"><tr><td colspan="4" class="empty" data-i18n="common.loading">加载中…</td></tr></tbody>
+              </table>
+            </div>
           </div>
         </section>
 
@@ -605,6 +667,18 @@ export const ADMIN_UI = `<!DOCTYPE html>
               </table>
             </div>
             <div class="banner" id="keys-banner"></div>
+          </div>
+
+          <div class="card">
+            <h3><span class="ic">▸</span> <span data-i18n="set.touch_title">使用记录粒度</span></h3>
+            <div class="desc" data-i18n="set.touch_desc">控制 API Key「最近使用」时间的 KV 写入频率。从未使用的 Key 首次调用会立即记录一次，之后按所选粒度更新；粒度越粗，KV 写入次数越少（免费层每日写入上限 1000 次）。</div>
+            <div class="setting-row">
+              <div class="setting-info">
+                <div class="setting-label" data-i18n="set.touch_label">记录间隔</div>
+                <div class="setting-hint" data-i18n="set.touch_hint">更改立即生效，无需重新部署。</div>
+              </div>
+              <select id="touch-interval-select" style="width:180px;" onchange="saveTouchInterval(this.value)"></select>
+            </div>
           </div>
         </section>
 
@@ -642,18 +716,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
                 <option value="en" data-i18n="set.lang_en">English</option>
                 <option value="zh-CN" data-i18n="set.lang_zh">简体中文</option>
               </select>
-            </div>
-          </div>
-
-          <div class="card">
-            <h3><span class="ic">▸</span> <span data-i18n="set.touch_title">使用记录粒度</span></h3>
-            <div class="desc" data-i18n="set.touch_desc">控制 API Key「最近使用」时间的 KV 写入频率。从未使用的 Key 首次调用会立即记录一次，之后按所选粒度更新；粒度越粗，KV 写入次数越少（免费层每日写入上限 1000 次）。</div>
-            <div class="setting-row">
-              <div class="setting-info">
-                <div class="setting-label" data-i18n="set.touch_label">记录间隔</div>
-                <div class="setting-hint" data-i18n="set.touch_hint">更改立即生效，无需重新部署。</div>
-              </div>
-              <select id="touch-interval-select" style="width:180px;" onchange="saveTouchInterval(this.value)"></select>
             </div>
           </div>
         </section>
@@ -803,6 +865,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'err.key_name_duplicate': '已存在同名 Key，请更换名称。',
       'up.del_confirm': '确认删除已导入的 Session？客户端将无法使用代理。',
       'up.deleted': 'Session 已删除',
+      'up.check_session': '检测 Session 连通性',
+      'up.delete_session': '删除 Session',
+      'err.session_not_imported': '尚未导入 Session，请先在下方导入后再检测。',
       'keys.subtitle': '生成与管理客户端使用的 API Key。',
       'keys.title': '管理 API Key',
       'keys.desc1': '客户端使用以下 API Key 访问 ',
@@ -822,6 +887,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'keys.del_confirm': '确认删除 Key ',
       'keys.del_confirm_end': '？',
       'keys.deleted': 'Key 已删除',
+      'keys.rotate': '轮转',
+      'keys.rotate_confirm': '确认轮转 Key ',
+      'keys.rotate_confirm_end': '？旧 Key 将立即失效，使用它的客户端需更换为新 Key。',
+      'keys.rotated': 'Key 已轮转，旧 Key 已失效',
       'set.subtitle': '控制台自身账号与安全配置。',
       'set.pw_title': '密码设置',
       'set.pw_desc': '管理控制台的登录密码。修改后所有已登录的管理会话将失效，需重新登录。',
@@ -849,6 +918,34 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.touch_10m': '每十分钟',
       'msg.touch_saved': '使用记录粒度已保存',
       'err.settings_invalid': '无效的设置值。',
+      'rs.title': '思考挡位获取',
+      'rs.desc': '逐模型探测上游接受的 reasoning_effort 思考挡位，并在 /v1/models 透出 reasoning 字段。探测发送携带哨兵值的最小请求（max_tokens=1），由上游校验错误解析挡位，零 token 成本。',
+      'rs.enabled_label': '返回思考挡位',
+      'rs.enabled_hint': '关闭后 /v1/models 不再返回 reasoning 字段，也不发起探测。',
+      'rs.on': '开启',
+      'rs.off': '关闭',
+      'rs.refresh_label': '自动刷新',
+      'rs.refresh_hint': '挡位缓存超过所选时长即自动重探；关闭后仅可通过下方按钮手动刷新。',
+      'rs.refresh_off': '关闭自动刷新',
+      'rs.concurrency_label': '探测并发数（1–8）',
+      'rs.timeout_label': '单模型超时（秒，1–120）',
+      'rs.wait_label': '/v1/models 等待时长（秒，0–30，0 为不等待）',
+      'rs.save': '保存设置',
+      'rs.saved': '思考挡位设置已保存',
+      'rs.refresh': '立即探测并刷新',
+      'rs.refresh_done': '探测完成：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个',
+      'rs.refresh_auth': '探测中途凭证失效（HTTP 401/403），已中止：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个。请重新导入 Session',
+      'rs.th_model': '模型',
+      'rs.th_efforts': '支持挡位',
+      'rs.th_probed': '探测时间',
+      'rs.th_status': '状态',
+      'rs.empty': '暂无探测结果，点击「立即探测并刷新」开始',
+      'rs.unprobeable': '上游未校验，无法获知挡位',
+      'rs.st_fresh': '最新',
+      'rs.st_expired': '已过期，将自动重探',
+      'rs.st_unprobeable': '不可探测',
+      'err.reasoning_session_missing': '尚未导入 Session，无法探测。',
+      'err.reasoning_models_failed': '无法获取上游模型列表，请检查凭证或稍后重试。',
       'km.title': 'API Key 已生成',
       'km.note': '请立即复制保存，关闭后将无法再次查看完整 Key。',
       'pm.title': '修改管理密码',
@@ -952,6 +1049,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'err.key_name_duplicate': 'A key with the same name already exists. Choose another.',
       'up.del_confirm': 'Delete the imported session? Clients will no longer be able to use the proxy.',
       'up.deleted': 'Session deleted',
+      'up.check_session': 'Check Session Connectivity',
+      'up.delete_session': 'Delete Session',
+      'err.session_not_imported': 'No session imported yet; import one below first.',
       'keys.subtitle': 'Generate and manage client API keys.',
       'keys.title': 'Manage API Keys',
       'keys.desc1': 'Clients use these API keys to access ',
@@ -971,6 +1071,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'keys.del_confirm': 'Delete key ',
       'keys.del_confirm_end': '?',
       'keys.deleted': 'Key deleted',
+      'keys.rotate': 'Rotate',
+      'keys.rotate_confirm': 'Rotate key ',
+      'keys.rotate_confirm_end': '? The old key is invalidated immediately; clients using it must switch to the new key.',
+      'keys.rotated': 'Key rotated; the old key is now invalid',
       'set.subtitle': 'Console account and security configuration.',
       'set.pw_title': 'Password',
       'set.pw_desc': 'Manage the console login password. Changing it signs out all admin sessions.',
@@ -998,6 +1102,34 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.touch_10m': 'Every 10 minutes',
       'msg.touch_saved': 'Tracking granularity saved',
       'err.settings_invalid': 'Invalid setting value.',
+      'rs.title': 'Reasoning Efforts',
+      'rs.desc': 'Probes which reasoning_effort levels each model accepts upstream and serves the reasoning field on /v1/models. A minimal request with a sentinel value (max_tokens=1) triggers the upstream validation error that enumerates the levels — at zero token cost.',
+      'rs.enabled_label': 'Serve Reasoning Efforts',
+      'rs.enabled_hint': 'When off, /v1/models no longer returns the reasoning field and no probes are sent.',
+      'rs.on': 'On',
+      'rs.off': 'Off',
+      'rs.refresh_label': 'Auto Refresh',
+      'rs.refresh_hint': 'Cache entries older than the chosen interval are re-probed automatically; when off, only the button below refreshes.',
+      'rs.refresh_off': 'Auto refresh off',
+      'rs.concurrency_label': 'Probe Concurrency (1–8)',
+      'rs.timeout_label': 'Per-model Timeout (seconds, 1–120)',
+      'rs.wait_label': '/v1/models Wait Time (seconds, 0–30, 0 = no wait)',
+      'rs.save': 'Save Settings',
+      'rs.saved': 'Reasoning settings saved',
+      'rs.refresh': 'Probe & Refresh Now',
+      'rs.refresh_done': 'Probe finished: {probed} probed, {unknown} unprobeable, {failed} failed',
+      'rs.refresh_auth': 'Credentials expired mid-probe (HTTP 401/403); aborted: {probed} probed, {unknown} unprobeable, {failed} failed. Please re-import the session',
+      'rs.th_model': 'Model',
+      'rs.th_efforts': 'Supported Efforts',
+      'rs.th_probed': 'Probed At',
+      'rs.th_status': 'Status',
+      'rs.empty': 'No probe results yet — click "Probe & Refresh Now" to start',
+      'rs.unprobeable': 'Upstream accepted the probe without validating',
+      'rs.st_fresh': 'Fresh',
+      'rs.st_expired': 'Expired, will re-probe',
+      'rs.st_unprobeable': 'Unprobeable',
+      'err.reasoning_session_missing': 'No session imported; cannot probe.',
+      'err.reasoning_models_failed': 'Cannot fetch the upstream model list. Check credentials or retry later.',
       'km.title': 'API Key Generated',
       'km.note': 'Copy and store it now — the full key cannot be viewed again after closing.',
       'pm.title': 'Change Admin Password',
@@ -1116,6 +1248,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     if (_loginMsgRender) setLoginMsg(_loginMsgRender);
     loadStatus();
     loadKeys();
+    loadReasoning();
     toast(t('set.lang_saved'), 'ok');
   }
 
@@ -1220,6 +1353,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     switchPage('dashboard');
     loadStatus();
     loadKeys();
+    loadReasoning();
   }
 
   // ---------- page switching ----------
@@ -1412,6 +1546,114 @@ export const ADMIN_UI = `<!DOCTYPE html>
       });
   }
 
+  // ---------- upstream: reasoning-effort probe ----------
+  // ---------- 上游：思考挡位探测 ----------
+  // Auto-refresh reuses the tracking-granularity options plus "off"; only the
+  // display labels live here.
+  //
+  // 自动刷新复用记录粒度的挡位并额外提供"关闭"项；仅展示文案保留在本端。
+  var RS_REFRESH_LABELS = {
+    '0': 'rs.refresh_off',
+    '86400': 'set.touch_daily',
+    '21600': 'set.touch_6h',
+    '10800': 'set.touch_3h',
+    '3600': 'set.touch_hourly',
+    '1800': 'set.touch_30m',
+    '600': 'set.touch_10m'
+  };
+
+  function fillRsRefreshSelect(current, options) {
+    var sel = $('rs-refresh-select');
+    if (!sel) return;
+    sel.innerHTML = '';
+    var opts = options && options.length ? options : [0, 86400, 21600, 10800, 3600, 1800, 600];
+    for (var i = 0; i < opts.length; i++) {
+      var v = String(opts[i]);
+      var o = document.createElement('option');
+      o.value = v;
+      o.textContent = t(RS_REFRESH_LABELS[v] || v);
+      sel.appendChild(o);
+    }
+    sel.value = String(current);
+  }
+
+  function renderReasoningTable(models) {
+    var tbody = $('reasoning-tbody');
+    if (!tbody) return;
+    if (!models || !models.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty">' + t('rs.empty') + '</td></tr>';
+      return;
+    }
+    tbody.innerHTML = models.map(function (m) {
+      var efforts = m.unprobeable
+        ? '<span style="color:var(--text-1)">' + t('rs.unprobeable') + '</span>'
+        : esc((m.supported_efforts || []).join(', '));
+      var probed = m.probed_at ? new Date(m.probed_at * 1000).toLocaleString() : '—';
+      var status = m.unprobeable
+        ? badge('gray', t('rs.st_unprobeable'))
+        : (m.expired ? badge('warn', t('rs.st_expired')) : badge('ok', t('rs.st_fresh')));
+      return '<tr>' +
+        '<td class="mono">' + esc(m.id) + '</td>' +
+        '<td>' + efforts + '</td>' +
+        '<td>' + probed + '</td>' +
+        '<td>' + status + '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function loadReasoning() {
+    api('/admin/api/reasoning').then(function (d) {
+      if (!$('rs-enabled-select')) return;
+      $('rs-enabled-select').value = d.settings.enabled ? 'on' : 'off';
+      fillRsRefreshSelect(d.settings.refreshInterval, d.refreshIntervalOptions);
+      $('rs-concurrency').value = String(d.settings.concurrency);
+      $('rs-timeout').value = String(d.settings.timeout);
+      $('rs-wait').value = String(d.settings.wait);
+      renderReasoningTable(d.models);
+    }).catch(function (err) {
+      // 401 is already handled by api(); skip to avoid duplicate toasts
+      // 401 已由 api() 统一提示（仅会话过期时），此处跳过避免重复弹窗
+      if (err && err.message === 'not authed') return;
+      toast(etext(err.message), 'err');
+    });
+  }
+
+  function saveReasoningSettings() {
+    var btn = event.target;
+    setLoading(btn, true);
+    clearBanner('reasoning-banner');
+    api('/admin/api/reasoning/settings', {
+      method: 'POST',
+      body: {
+        enabled: $('rs-enabled-select').value === 'on',
+        refresh_interval: parseInt($('rs-refresh-select').value, 10),
+        concurrency: parseInt($('rs-concurrency').value, 10),
+        timeout: parseInt($('rs-timeout').value, 10),
+        wait: parseInt($('rs-wait').value, 10)
+      }
+    })
+      .then(function () { toast(t('rs.saved'), 'ok'); loadReasoning(); })
+      .catch(function (err) { setBanner('reasoning-banner', 'err', function () { return etext(err.message); }); })
+      .finally(function () { setLoading(btn, false); });
+  }
+
+  function refreshReasoning() {
+    var btn = event.target;
+    setLoading(btn, true);
+    clearBanner('reasoning-banner');
+    api('/admin/api/reasoning/refresh', { method: 'POST' })
+      .then(function (d) {
+        setBanner('reasoning-banner', d.authExpired ? 'warn' : 'ok', function () {
+          return d.authExpired
+            ? tfmt('rs.refresh_auth', { probed: d.probed, unknown: d.unknown, failed: d.failed })
+            : tfmt('rs.refresh_done', { probed: d.probed, unknown: d.unknown, failed: d.failed });
+        });
+        loadReasoning();
+      })
+      .catch(function (err) { setBanner('reasoning-banner', 'err', function () { return etext(err.message); }); })
+      .finally(function () { setLoading(btn, false); });
+  }
+
   // ---------- status ----------
   // ---------- 状态 ----------
   function badge(type, text) {
@@ -1447,10 +1689,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
       // 上游页面状态
       fillSessionStatus('up', s);
 
-      // keys
-      // Key 计数
-      $('st-keys').textContent = String(s.apiKeys.count);
-      $('nav-key-count').textContent = String(s.apiKeys.count);
+      // The key count is intentionally NOT rendered here: it comes from the
+      // eventually-consistent KV list and would briefly lag behind creates.
+      // renderKeys() owns it from the local _keys snapshot instead.
+      //
+      // 此处刻意不渲染 Key 计数：它来自最终一致的 KV list，创建后会短暂
+      // 滞后；计数改由 renderKeys() 用本地 _keys 快照统一维护。
 
       // admin password source badge
       // 管理密码来源徽标
@@ -1474,6 +1718,20 @@ export const ADMIN_UI = `<!DOCTYPE html>
     setLoading(btn, true);
     clearBanner('session-banner');
     api('/admin/api/session', { method: 'POST', body: { json: $('session-json').value, test: true, save: false } })
+      .then(function (d) {
+        setBanner('session-banner', d.test.ok ? 'ok' : 'warn', function () { return testDetail(d.test); });
+      })
+      .catch(function (err) { setBanner('session-banner', 'err', function () { return etext(err.message); }); })
+      .finally(function () { setLoading(btn, false); });
+  }
+
+  // Connectivity check for the session already stored in KV (no paste needed).
+  // 针对已导入 KV 的 session 的连通性检测（无需粘贴内容）。
+  function checkSession() {
+    var btn = event.target;
+    setLoading(btn, true);
+    clearBanner('session-banner');
+    api('/admin/api/session/check', { method: 'POST' })
       .then(function (d) {
         setBanner('session-banner', d.test.ok ? 'ok' : 'warn', function () { return testDetail(d.test); });
       })
@@ -1532,8 +1790,22 @@ export const ADMIN_UI = `<!DOCTYPE html>
         closeKeyModal();
         $('key-modal-value').textContent = d.key;
         $('key-modal').classList.add('show');
+        // Insert the new key locally instead of re-listing: the KV list index
+        // is eventually consistent, so an immediate re-fetch may not include
+        // it yet. loadKeys() from the next refresh overwrites once synced.
+        //
+        // 在本地插入新 Key 而非重新拉取列表：KV list 索引是最终一致的，
+        // 立即重新拉取可能还看不到它；下次 loadKeys() 同步后自然覆盖。
+        _keys.unshift({
+          key: d.key,
+          name: d.name,
+          prefix: d.prefix,
+          created_at: d.created_at,
+          last_used: d.last_used,
+          masked: d.masked || (d.key.slice(0, 12) + '…' + d.key.slice(-4))
+        });
+        renderKeys();
         loadStatus();
-        loadKeys();
       })
       .catch(function (err) { setBanner('key-name-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
@@ -1543,26 +1815,42 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   var _keys = [];
 
+  // Render the key table from the local _keys snapshot. The dashboard key
+  // count reads the same local snapshot, so it updates immediately on
+  // create/delete — including consecutive adds — without waiting for the
+  // eventually-consistent KV list behind /admin/api/status.
+  //
+  // 根据本地 _keys 快照渲染 Key 表格。仪表盘计数读取同一份本地快照，
+  // 创建/删除（含连续添加）都会立即更新，无需等待 /admin/api/status 背后
+  // 最终一致的 KV list。
+  function renderKeys() {
+    var tbody = $('key-tbody');
+    $('st-keys').textContent = String(_keys.length);
+    $('nav-key-count').textContent = String(_keys.length);
+    if (!_keys.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">' + t('keys.empty') + '</td></tr>';
+      return;
+    }
+    tbody.innerHTML = _keys.map(function (k, i) {
+      var created = new Date(k.created_at * 1000).toLocaleString();
+      var used = k.last_used ? new Date(k.last_used * 1000).toLocaleString() : t('keys.never_used');
+      return '<tr>' +
+        '<td>' + esc(k.name) + '</td>' +
+        '<td class="mono">' + esc(k.masked) + '</td>' +
+        '<td>' + created + '</td>' +
+        '<td>' + used + '</td>' +
+        '<td style="text-align:right; white-space:nowrap;">' +
+          '<button class="btn btn-ghost btn-sm" onclick="rotateKey(' + i + ')">' + t('keys.rotate') + '</button> ' +
+          '<button class="btn btn-danger btn-sm" onclick="deleteKey(' + i + ')">' + t('common.delete') + '</button>' +
+        '</td>' +
+        '</tr>';
+    }).join('');
+  }
+
   function loadKeys() {
     api('/admin/api/keys').then(function (d) {
-      var tbody = $('key-tbody');
-      if (!d.keys || !d.keys.length) {
-        _keys = [];
-        tbody.innerHTML = '<tr><td colspan="5" class="empty">' + t('keys.empty') + '</td></tr>';
-        return;
-      }
-      _keys = d.keys;
-      tbody.innerHTML = d.keys.map(function (k, i) {
-        var created = new Date(k.created_at * 1000).toLocaleString();
-        var used = k.last_used ? new Date(k.last_used * 1000).toLocaleString() : t('keys.never_used');
-        return '<tr>' +
-          '<td>' + esc(k.name) + '</td>' +
-          '<td class="mono">' + esc(k.masked) + '</td>' +
-          '<td>' + created + '</td>' +
-          '<td>' + used + '</td>' +
-          '<td style="text-align:right"><button class="btn btn-danger btn-sm" onclick="deleteKey(' + i + ')">' + t('common.delete') + '</button></td>' +
-          '</tr>';
-      }).join('');
+      _keys = d.keys || [];
+      renderKeys();
     }).catch(function (err) {
       // 401 is already handled by api(); skip to avoid duplicate toasts
       // 401 已由 api() 统一提示（仅会话过期时），此处跳过避免重复弹窗
@@ -1576,7 +1864,46 @@ export const ADMIN_UI = `<!DOCTYPE html>
     if (!k) return;
     if (!confirm(t('keys.del_confirm') + '[' + k.name + ']' + t('keys.del_confirm_end'))) return;
     api('/admin/api/keys', { method: 'DELETE', body: { key: k.key } })
-      .then(function () { toast(t('keys.deleted'), 'ok'); loadKeys(); loadStatus(); })
+      .then(function () {
+        toast(t('keys.deleted'), 'ok');
+        // Remove locally first: the KV list index is eventually consistent and
+        // an immediate re-list may still return the deleted key.
+        //
+        // 先在本地移除：KV list 索引是最终一致的，立即重新拉取
+        // 可能仍返回已删除的 Key。
+        _keys.splice(i, 1);
+        renderKeys();
+        loadStatus();
+        loadKeys(); // overwrite with the server list once it has caught up / 服务端列表同步后覆盖
+      })
+      .catch(function (err) { toast(etext(err.message), 'err'); });
+  }
+
+  function rotateKey(i) {
+    var k = _keys[i];
+    if (!k) return;
+    if (!confirm(t('keys.rotate_confirm') + '[' + k.name + ']' + t('keys.rotate_confirm_end'))) return;
+    api('/admin/api/keys/rotate', { method: 'POST', body: { key: k.key } })
+      .then(function (d) {
+        // Replace the row locally (same write-after-read compensation as
+        // create/delete), then force the one-time copy modal for the new key.
+        //
+        // 本地替换该行（与创建/删除相同的写后读补偿机制），随后弹出
+        // 新 Key 的一次性复制弹窗。
+        _keys[i] = {
+          key: d.key,
+          name: d.name,
+          prefix: d.prefix,
+          created_at: d.created_at,
+          last_used: d.last_used,
+          masked: d.masked || (d.key.slice(0, 12) + '…' + d.key.slice(-4))
+        };
+        renderKeys();
+        $('key-modal-value').textContent = d.key;
+        $('key-modal').classList.add('show');
+        toast(t('keys.rotated'), 'ok');
+        loadStatus();
+      })
       .catch(function (err) { toast(etext(err.message), 'err'); });
   }
 

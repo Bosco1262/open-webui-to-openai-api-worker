@@ -27,6 +27,12 @@
 import type { Env, StoredSession } from "./types";
 import { sessionHeaders } from "./session";
 import { getSession } from "./kv";
+import {
+  buildReasoningInfo,
+  getReasoningCache,
+  getReasoningSettings,
+  refreshReasoningCache,
+} from "./reasoning";
 import { verifyClientApiKey } from "./auth";
 
 /** Upstream prefixes in probe priority order (Open WebUI >= 0.6 vs legacy). */
@@ -316,7 +322,12 @@ async function detectPrefix(request: Request, session: StoredSession): Promise<s
 
 // GET /v1/models — fetch and normalize the upstream model list.
 // GET /v1/models —— 获取并规范化上游模型列表。
-async function handleModels(request: Request, session: StoredSession): Promise<Response> {
+async function handleModels(
+  request: Request,
+  session: StoredSession,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   const prefix = await detectPrefix(request, session);
   const base = session.base_url;
   const headers = buildUpstreamHeaders(request, session);
@@ -356,7 +367,87 @@ async function handleModels(request: Request, session: StoredSession): Promise<R
   const models = extractModelList(payload)
     .map(normalizeModel)
     .filter((m): m is Record<string, unknown> => m !== null);
+
+  // Reasoning-effort info is best-effort: it must never fail the models list.
+  // 思考挡位信息是尽力而为的：绝不能让模型列表请求失败。
+  try {
+    await attachReasoningInfo(env, ctx, models);
+  } catch (err) {
+    console.error(
+      JSON.stringify({ message: "reasoning attach failed", error: err instanceof Error ? err.message : String(err) }),
+    );
+  }
   return Response.json({ object: "list", data: models });
+}
+
+// Attach cached reasoning-effort info to each model. When models lack cache
+// coverage (fresh upstream additions, or entries older than the auto-refresh
+// granularity) a background refresh fills the cache for the next request;
+// the current response optionally waits `wait` seconds for it to land first.
+//
+// 为每个模型附加缓存中的思考挡位信息。缓存未覆盖的模型（上游新增，或条目
+// 超过自动刷新粒度）由后台刷新补齐缓存供下次请求使用；当前响应可先等待
+// `wait` 秒让刷新落地。
+//
+// Mirrors the upstream app.py /v1/models logic (missing -> bounded wait ->
+// merge again).
+// 与上游 app.py 的 /v1/models 逻辑一致（缺失 -> 有限等待 -> 再合并一轮）。
+async function attachReasoningInfo(
+  env: Env,
+  ctx: ExecutionContext,
+  models: Array<Record<string, unknown>>,
+): Promise<void> {
+  const settings = await getReasoningSettings(env);
+  if (!settings.enabled) return;
+
+  let cache = await getReasoningCache(env);
+  const ttl = settings.refreshInterval;
+  const now = Date.now() / 1000;
+
+  // Covered = probed and still within the auto-refresh granularity.
+  // refreshInterval=0 keeps serving whatever the cache holds (auto-refresh
+  // off, manual refresh only).
+  //
+  // 已覆盖 = 已探测且仍在自动刷新粒度内。refreshInterval=0 时缓存里有什么
+  // 就继续返回什么（自动刷新关闭，仅手动刷新）。
+  const isCovered = (id: string): boolean => {
+    const entry = cache.models[id];
+    return Boolean(entry && (ttl <= 0 || entry.probed_at + ttl > now));
+  };
+  const attach = (): void => {
+    for (const model of models) {
+      if (typeof model.id !== "string" || model.reasoning !== undefined) continue;
+      if (!isCovered(model.id)) continue;
+      const info = buildReasoningInfo(cache.models[model.id].supported_efforts);
+      if (info) model.reasoning = info;
+    }
+  };
+
+  attach();
+  if (models.every((m) => typeof m.id !== "string" || isCovered(m.id))) return;
+
+  // Lazy refresh: deduped in-flight by base_url inside refreshReasoningCache.
+  // waitUntil keeps the round running even after this response returns.
+  //
+  // 惰性刷新：refreshReasoningCache 内部按 base_url 去重进行中的刷新。
+  // waitUntil 让本轮刷新在响应返回后仍能继续完成。
+  const refresh = refreshReasoningCache(env, { force: false });
+  ctx.waitUntil(refresh.catch(() => {}));
+
+  if (settings.wait > 0) {
+    // Bounded wait, then merge again: models probed during the wait are now
+    // covered (putReasoningCache refreshes the instance cache, so the re-read
+    // below sees fresh data).
+    //
+    // 有限等待后合并一轮：等待期间探测完成的模型现在已有缓存
+    // （putReasoningCache 会同步实例缓存，下方重读即可拿到新数据）。
+    await Promise.race([
+      refresh.catch(() => null),
+      new Promise((resolve) => setTimeout(resolve, settings.wait * 1000)),
+    ]);
+    cache = await getReasoningCache(env);
+    attach();
+  }
 }
 
 // POST /v1/chat/completions — validate the payload, then forward (SSE-aware).
@@ -563,7 +654,7 @@ export async function handleV1Request(
 
   try {
     if (subpath === "/models" || subpath === "/models/") {
-      return await handleModels(request, session);
+      return await handleModels(request, session, env, ctx);
     }
     if (subpath === "/chat/completions" || subpath === "/chat/completions/") {
       return await handleChat(request, session);

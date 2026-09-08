@@ -30,10 +30,13 @@ OpenAI 客户端 ──▶ Bearer sk-xxx ──▶  /v1/*        │
 │   ├── src/
 │   │   ├── index.ts                 # 入口与路由
 │   │   ├── types.ts                 # 共享类型
-│   │   ├── kv.ts                    # KV 数据层（内存缓存）
+│   │   ├── kv.ts                    # KV 数据层（通用原语 + 内存缓存）
+│   │   ├── intervals.ts             # 共享粒度档位（每天 … 每十分钟）
+│   │   ├── touch.ts                 # API Key last_used 写入节流
 │   │   ├── auth.ts                  # 管理员/客户端鉴权
 │   │   ├── session.ts               # 上游凭证请求头
 │   │   ├── proxy.ts                 # /v1/* OpenAI 兼容代理
+│   │   ├── reasoning.ts             # 思考挡位探测、设置与缓存
 │   │   ├── admin.ts                 # 管理 REST API
 │   │   └── ui.ts                    # 管理界面（内嵌单页）
 │   ├── wrangler.jsonc               # Worker 配置（KV 绑定）
@@ -141,6 +144,28 @@ curl https://<你的worker域名>/v1/models \
 
 > `/v1/models` 会把上游模型对象收敛成标准的 OpenAI 结构 `{id, object, created, owned_by}`，并按白名单透出通用模板字段：`max_context_length` / `context_length`（`max_model_len` 作为兼容别名保留）、`quantization`（从模型名解析，如 `NVFP4`）、`capabilities`（含派生的 `function_calling` 标志）与 `description`；上游私有字段（`user_id`、`access_grants`、`permission`、`urlIdx` 等）一律不透出。
 
+### 思考挡位获取
+
+与上游项目对齐，`/v1/models` 的每个模型可附带 `reasoning` 对象，供 OpenAI 兼容客户端展示与选择思考挡位：
+
+```json
+{
+  "reasoning": {
+    "supported_efforts": ["none", "low", "medium", "high"],
+    "default_effort": "medium",
+    "default_enabled": true,
+    "mandatory": false
+  }
+}
+```
+
+探测原理：对每个模型发送一个携带哨兵值 `reasoning_effort: "__probe__"` 的最小补全请求（`max_tokens=1`）。把该字段声明为 Literal 枚举校验的上游（vLLM 等）会以 400 拒绝它，错误文本恰好枚举全部可接受值——校验发生在生成之前，因此探测零 token 成本。结果按模型持久化到 KV 并由缓存服务；上游未校验哨兵的模型会被记为"不可探测"，避免反复重探。
+
+- **开关与调参**：管理控制台 → **上游服务端 → 思考挡位获取** 卡片——控制 `/v1/models` 是否返回思考挡位（默认开启），并可调整探测并发数（默认 4）、单模型超时（默认 30 秒）与 `/v1/models` 有限等待时长（默认 5 秒，0 为不等待）。
+- **自动刷新**：挡位缓存超过所选时长后，`/v1/models` 请求时自动增量重探；时长档位与"使用记录粒度"共用（默认每天），也可选择关闭。
+- **手动刷新**：「立即探测并刷新」按钮强制同步全量重探，并展示逐模型结果（模型、支持挡位、探测时间与状态）。
+- 缓存未覆盖的模型先不带 `reasoning` 字段返回，由后台刷新补齐后下次请求即可见，探测不会阻塞模型列表。
+
 Python（OpenAI SDK）：
 
 ```python
@@ -171,6 +196,9 @@ for chunk in resp:
 | POST            | `/admin/api/password`                  | 管理会话 | 修改管理密码（旧会话全部失效）         |
 | POST            | `/admin/api/session`                    | 管理会话 | 导入 Session（支持 `test`/`save`） |
 | GET/POST/DELETE | `/admin/api/keys`                       | 管理会话 | API Key 管理                       |
+| GET             | `/admin/api/reasoning`                  | 管理会话 | 思考挡位设置与逐模型探测结果       |
+| POST            | `/admin/api/reasoning/settings`         | 管理会话 | 更新思考挡位探测设置               |
+| POST            | `/admin/api/reasoning/refresh`          | 管理会话 | 强制全量重探思考挡位               |
 | GET             | `/v1/models`                            | API Key  | 模型列表（安全收敛，仅透出安全字段） |
 | POST            | `/v1/chat/completions`                  | API Key  | 对话补全（含 SSE 流式）            |
 | POST            | `/v1/embeddings`                        | API Key  | 向量嵌入                           |
@@ -184,13 +212,14 @@ for chunk in resp:
 | -------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `ADMIN_PASSWORD`     | `wrangler secret put` / Dashboard Variables | 管理密码（可选；Secret 直接验证不写 KV，后台改密后存 KV 并覆盖它） |
 | `SESSION_SECRET`     | `wrangler secret put`                       | 会话签名密钥（可选，未设则自动派生存 KV）                                                |
-| KV Namespace         | `wrangler.jsonc`（自动创建）                | 存储 session / API Key / 管理密码；绑定省略 `id` 即自动资源供应，首次部署自动创建 |
+| KV Namespace         | `wrangler.jsonc`（自动创建）                | 存储 session / API Key / 管理密码 / 思考挡位设置与探测缓存；绑定省略 `id` 即自动资源供应，首次部署自动创建 |
 
 ## 免费层资源适配
 
 - 存储仅使用 **Workers KV**（100k 读/天、1k 写/天）：session 在 Worker 实例内缓存 60 秒；代理路径每次请求仅 1 次 KV 读（API Key 校验）。
 - API Key 校验为 O(1)：Key 明文即 KV 键名，无需遍历。
-- `last_used` 更新通过 `ctx.waitUntil` 异步写入并节流：从未使用的 Key 首次调用立即记录一次，之后至多按配置粒度写一次（默认每天，可在管理控制台「网页设置 → 使用记录粒度」调整）。
+- `last_used` 更新通过 `ctx.waitUntil` 异步写入并节流：从未使用的 Key 首次调用立即记录一次，之后至多按配置粒度写一次（默认每天，可在管理控制台「API 管理 → 使用记录粒度」调整）。
+- 思考挡位探测以受限并发执行、按 isolate 去重进行中的刷新，且每轮只写回一次缓存，规避 KV 写入限制；探测结果跨刷新持久，模型很多时免费层子请求上限只会把探测自然分摊到后续请求。
 - SSE 流式通过 `response.body` 直通，CPU 消耗极低。
 
 ## 安全提示
