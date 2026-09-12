@@ -6,7 +6,7 @@
  * 除 login/setup 外，所有路由均要求有效的管理会话 Cookie。
  */
 
-import type { ApiKeyMeta, Env, StoredSession } from "./types";
+import type { ApiKeyMeta, Env, StoredSession } from "./types.ts";
 import {
   adminChangePassword,
   adminPasswordSource,
@@ -20,17 +20,19 @@ import {
   lockoutClear,
   lockoutRecord,
   setAdminCookie,
-} from "./auth";
-import { sessionHeaders } from "./session";
+} from "./auth.ts";
+import { fetchUpstream, sessionHeaders, sessionIsUsable } from "./session.ts";
+import { PREFIX_CANDIDATES, confirmUpstreamPrefix } from "./upstream.ts";
 import {
-  ReasoningRefreshError,
-  getReasoningCache,
-  getReasoningSettings,
-  putReasoningSettings,
-  refreshReasoningCache,
-} from "./reasoning";
-import { getTouchInterval, setTouchInterval } from "./touch";
-import { INTERVAL_OPTIONS } from "./intervals";
+  PROBE_BUDGET_PRESETS,
+  parseProbeSettingsInput,
+  readProbeSettings,
+  writeProbeSettings,
+} from "./probeSettings.ts";
+import { RoundUnavailable } from "./probeRuntime.ts";
+import type { ModelProbeCoordinator, ProbeCoordinatorView } from "./probeCoordinator.ts";
+import { getTouchInterval, setTouchInterval } from "./touch.ts";
+import { INTERVAL_OPTIONS } from "./intervals.ts";
 import {
   bytesToBase64Url,
   deleteApiKey,
@@ -41,11 +43,7 @@ import {
   putApiKey,
   randomBytes,
   setSession,
-} from "./kv";
-
-/** Upstream prefixes in probe priority order (Open WebUI >= 0.6 vs legacy). */
-/** 上游前缀探测优先级顺序（Open WebUI >= 0.6 与旧版本）。 */
-const PREFIX_CANDIDATES = ["/api/v1", "/api"];
+} from "./kv.ts";
 
 interface JsonResult {
   ok: boolean;
@@ -85,15 +83,6 @@ function isValidBaseUrl(url: string): boolean {
   } catch {
     return false;
   }
-}
-
-// A session is usable if it carries a non-empty Authorization or Cookie.
-// session 携带非空 Authorization 或 Cookie 即视为可用。
-function sessionIsUsable(session: StoredSession): boolean {
-  return Boolean(
-    (session.authorization && session.authorization.trim()) ||
-      (session.cookie && session.cookie.trim()),
-  );
 }
 
 /** Redacted credential summary, safe for the UI. */
@@ -199,6 +188,17 @@ async function handleLogin(env: Env, request: Request): Promise<Response> {
 // POST /admin/api/setup — first-visit password setup (only in "none" mode).
 // POST /admin/api/setup —— 首次访问设密（仅 "none" 模式允许）。
 async function handleSetup(env: Env, request: Request): Promise<Response> {
+  // When the password comes from the ADMIN_PASSWORD secret, setup is closed outright:
+  // the web setup exists only for the "nothing configured yet" state. That state is
+  // inherently claimable by whoever reaches /admin first, which is why the README
+  // tells operators to preset the secret before exposing the Worker.
+  //
+  // 密码来自 ADMIN_PASSWORD Secret 时，设密入口直接关闭：网页设密只为"尚未配置任何
+  // 密码"的状态而存在，而那个状态本来就会被第一个访问 /admin 的人占住——这正是 README
+  // 要求运维在暴露 Worker 之前先预设 Secret 的原因。
+  if ((await adminPasswordSource(env)) === "secret") {
+    return fail("err.setup_secret_exists", 403);
+  }
   const body = await readBody(request);
   const password = typeof body.password === "string" ? body.password : "";
   const confirm = typeof body.confirm === "string" ? body.confirm : "";
@@ -248,9 +248,17 @@ async function handleChangePassword(env: Env, request: Request): Promise<Respons
 // a structured connectivity result for the UI. Shared by "test pasted JSON"
 // (handleImportSession) and "check stored session" (handleCheckSession).
 //
+// The prefix is confirmed with the SAME rule the proxy and the coordinator use, and
+// the loop must `continue` rather than fail on the first candidate: a deployment whose
+// first candidate is the SPA's "200 + HTML" page would otherwise never test OK, no
+// matter how healthy it is.
+//
 // 用候选前缀探测上游 /models，返回供 UI 展示的结构化连通性结果。
 // 由"测试粘贴的 JSON"（handleImportSession）与"检测已导入 session"
 // （handleCheckSession）共用。
+//
+// 前缀确认规则与代理、协调者完全相同；循环必须 `continue` 而不是在首个候选上直接
+// 失败：否则首选候选是 SPA 的 "200 + HTML" 页面的部署，无论多健康都永远测不通。
 async function testUpstreamSession(
   session: StoredSession,
 ): Promise<{
@@ -260,21 +268,45 @@ async function testUpstreamSession(
   status?: number;
   error?: string;
 }> {
-  for (const prefix of PREFIX_CANDIDATES) {
-    try {
-      const resp = await fetch(`${session.base_url}${prefix}/models`, {
-        headers: sessionHeaders(session),
-      });
-      await resp.text().catch(() => {});
-      if (resp.status === 404) continue;
-      return resp.ok
-        ? { ok: true, code: "up.test_ok", prefix, status: resp.status }
-        : { ok: false, code: "up.test_http", prefix, status: resp.status };
-    } catch (err) {
-      return { ok: false, code: "up.test_network", error: String(err) };
+  try {
+    const confirmed = await confirmUpstreamPrefix(PREFIX_CANDIDATES, async (prefix) => {
+      const resp = await fetchUpstream(
+        `${session.base_url}${prefix}/models`,
+        { headers: sessionHeaders(session) },
+        { metadata: true },
+      );
+      return {
+        status: resp.status,
+        contentType: resp.headers.get("content-type"),
+        text: await resp.text().catch(() => ""),
+      };
+    });
+    if (confirmed) {
+      // A 401/403 confirms the route but not the credentials: the UI wording differs
+      // ("credentials may have expired" rather than "direct connection OK").
+      //
+      // 401/403 确认了路由但没确认凭证：UI 的措辞不同（"凭证可能已过期"而不是"直连
+      // 连通"）。
+      return confirmed.authFailure
+        ? { ok: false, code: "up.test_http", prefix: confirmed.prefix, status: confirmed.status }
+        : { ok: true, code: "up.test_ok", prefix: confirmed.prefix, status: confirmed.status };
     }
+  } catch (err) {
+    // A transport failure on ANY candidate is reported as a network error: the other
+    // candidates would fail the same way.
+    //
+    // 任意一个候选出现传输层失败都报网络错误：其余候选会以同样方式失败。
+    return { ok: false, code: "up.test_network", error: String(err) };
   }
-  return { ok: false, code: "up.test_404" };
+  // Nothing could be confirmed: no candidate answered with a model list, and the
+  // upstream never rejected the credentials either. The old `up.test_404` wording
+  // ("all prefixes returned 404") is no longer true -- a SPA-hijacked 200 and a 5xx
+  // land here too.
+  //
+  // 一个都确认不了：没有任何候选以模型列表作答，上游也没有拒绝凭证。旧的
+  // `up.test_404`（"所有前缀都返回 404"）已不再准确——被 SPA 接管的 200 与 5xx 也会
+  // 落到这里。
+  return { ok: false, code: "up.test_not_models" };
 }
 
 // POST /admin/api/session — validate (`test`) and/or store (`save`) a session.
@@ -380,10 +412,16 @@ async function handleCreateKey(env: Env, request: Request): Promise<Response> {
   const body = await readBody(request);
   const name = typeof body.name === "string" ? body.name.trim().slice(0, 64) : "";
   if (!name) return fail("err.key_name_required");
-  // Reject names already used by an existing key (case-insensitive).
-  // 拒绝与已有 Key 重名的名称（不区分大小写）。
+  // Reject names already used by an existing key (case-insensitive). `name` is
+  // whatever KV returned, so it is coerced first: a hand-edited or foreign entry with a
+  // numeric name would otherwise throw a TypeError here and the operator could not
+  // create ANY key.
+  //
+  // 拒绝与已有 Key 重名的名称（不区分大小写）。`name` 是 KV 返回的任意值，因此先做
+  // 强制转换：否则一条手改的或外来的、name 为数字的条目会在这里抛 TypeError，运维就
+  // 一个 Key 都建不了了。
   const existing = await listApiKeys(env);
-  if (existing.some(({ meta }) => meta.name.toLowerCase() === name.toLowerCase())) {
+  if (existing.some(({ meta }) => String(meta.name ?? "").toLowerCase() === name.toLowerCase())) {
     return fail("err.key_name_duplicate");
   }
   const key = generateApiKey();
@@ -446,93 +484,85 @@ async function handleRotateKey(env: Env, request: Request): Promise<Response> {
 }
 
 // --------------------------------------------------------------------------- //
-// Reasoning-effort probe
-// 思考挡位探测
+// Model probe
+// 模型探测
 // --------------------------------------------------------------------------- //
 
-// GET /admin/api/reasoning — settings plus the per-model probe results.
-// GET /admin/api/reasoning —— 设置与逐模型探测结果。
-async function handleReasoningInfo(env: Env): Promise<Response> {
-  const settings = await getReasoningSettings(env);
-  const cache = await getReasoningCache(env);
-  const now = Math.floor(Date.now() / 1000);
-  const models = Object.entries(cache.models)
-    .map(([id, entry]) => ({
-      id,
-      supported_efforts: entry.supported_efforts,
-      probed_at: entry.probed_at,
-      // Empty set = probed but the upstream accepted the sentinel without
-      // validating; expired = older than the auto-refresh granularity.
-      //
-      // 空集合 = 已探测但上游未校验哨兵（不可探测）；过期 = 超过自动刷新粒度。
-      unprobeable: entry.supported_efforts.length === 0,
-      expired:
-        settings.refreshInterval > 0 &&
-        entry.probed_at + settings.refreshInterval <= now,
-    }))
-    .sort((a, b) => a.id.localeCompare(b.id));
+// GET /admin/api/probe — settings plus the per-model probe results.
+// GET /admin/api/probe —— 设置与逐模型探测结果。
+async function handleProbeInfo(env: Env): Promise<Response> {
+  const settings = await readProbeSettings(env, { useCache: false });
+  const coordinator = probeCoordinatorFor(env, await getSession(env));
+  let view: ProbeCoordinatorView = { models: [], cached: 0, now: Date.now() / 1000 };
+  if (coordinator) {
+    try {
+      view = await coordinator.view();
+    } catch (err) {
+      console.error(
+        JSON.stringify({
+          message: "probe view unavailable",
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
+  }
   return json({
     ok: true,
     settings,
-    // 0 = auto-refresh off, then the shared granularity options.
-    // 0 = 关闭自动刷新，其后为共用的粒度挡位。
-    refreshIntervalOptions: [0, ...INTERVAL_OPTIONS],
-    models,
-    now,
+    // The presets carry their platform ceiling: the free plan allows 50 subrequests
+    // per invocation, the paid plan 10,000.
+    //
+    // 预设带上各自的平台上限：免费层每次调用 50 个子请求，付费层 10,000。
+    budgetPresets: PROBE_BUDGET_PRESETS,
+    models: view.models,
+    cached: view.cached,
+    now: view.now,
   });
 }
 
-// POST /admin/api/reasoning/settings — validate and persist probe settings.
-// POST /admin/api/reasoning/settings —— 校验并持久化探测设置。
-async function handleReasoningSettings(env: Env, request: Request): Promise<Response> {
+// POST /admin/api/probe/settings — validate and persist probe settings.
+// POST /admin/api/probe/settings —— 校验并持久化探测设置。
+async function handleProbeSettings(env: Env, request: Request): Promise<Response> {
   const body = await readBody(request);
-  if (typeof body.enabled !== "boolean") return fail("err.settings_invalid");
-  const intIn = (v: unknown, lo: number, hi: number): number | null => {
-    const value = Number(v);
-    return Number.isInteger(value) && value >= lo && value <= hi ? value : null;
-  };
-  const concurrency = intIn(body.concurrency, 1, 8);
-  const timeout = intIn(body.timeout, 1, 120);
-  const wait = intIn(body.wait, 0, 30);
-  if (concurrency === null || timeout === null || wait === null) {
-    return fail("err.settings_invalid");
-  }
-  const refreshInterval = Number(body.refresh_interval);
-  // 0 = auto-refresh off; otherwise must be a known granularity option.
-  // 0 = 关闭自动刷新；其余必须是已知粒度挡位。
-  if (
-    !Number.isInteger(refreshInterval) ||
-    (refreshInterval !== 0 && !INTERVAL_OPTIONS.includes(refreshInterval))
-  ) {
-    return fail("err.settings_invalid");
-  }
-  const settings = { enabled: body.enabled, concurrency, timeout, wait, refreshInterval };
-  await putReasoningSettings(env, settings);
+  const settings = parseProbeSettingsInput(body);
+  if (!settings) return fail("err.settings_invalid");
+  await writeProbeSettings(env, settings);
   return json({ ok: true, settings });
 }
 
-// POST /admin/api/reasoning/refresh — force a full synchronous re-probe.
-// Probe requests are I/O-bound, so waiting inline inside the Worker is fine.
-// Free-plan sub-request limits may cut very large model lists short; the
-// partial stats are still returned and a later refresh resumes.
+// POST /admin/api/probe/refresh — force a re-probe (one model when `model` is given,
+// everything otherwise). The coordinator bounds it by `budget` and keeps going with
+// its own alarm, so a truncated answer means "the rest is still being probed".
 //
-// POST /admin/api/reasoning/refresh —— 强制同步全量重探。探测请求以 I/O
-// 等待为主，Worker 内同步等待可行。免费层的子请求上限可能截断超大模型
-// 列表；仍返回部分统计，后续刷新可续。
-async function handleReasoningRefresh(env: Env): Promise<Response> {
-  let stats;
+// POST /admin/api/probe/refresh —— 强制重探（带 `model` 时只探该模型，否则全部）。
+// 协调者按 `budget` 限流并用自身的 alarm 继续推进，因此被截断的答复含义是
+// "其余仍在探测中"。
+async function handleProbeRefresh(env: Env, request: Request): Promise<Response> {
+  const body = await readBody(request);
+  const coordinator = probeCoordinatorFor(env, await getSession(env));
+  if (!coordinator) return fail("err.probe_session_missing", 502);
   try {
-    stats = await refreshReasoningCache(env, { force: true });
+    const requested = typeof body.model === "string" && body.model ? body.model : null;
+    const stats = requested ? await coordinator.probeOne(requested) : await coordinator.refresh(true);
+    return json({ ok: true, model: requested, stats });
   } catch (err) {
-    if (err instanceof ReasoningRefreshError) {
+    if (err instanceof RoundUnavailable) {
       return fail(
-        err.code === "session_missing" ? "err.reasoning_session_missing" : "err.reasoning_models_failed",
+        err.code === "session_missing" ? "err.probe_session_missing" : "err.probe_models_failed",
         502,
       );
     }
-    return fail(String(err), 500);
+    return fail(err instanceof Error ? err.message : String(err), 500);
   }
-  return json({ ok: true, ...stats });
+}
+
+/** The coordinator stub, or null while no session has been imported (there is
+ *  nothing to probe, and no upstream to name the instance after). */
+/** 协调者 stub；尚未导入 session 时为 null（没有可探测的对象，也没有可用于命名实例的
+ *  上游）。 */
+function probeCoordinatorFor(env: Env, session: StoredSession | null): DurableObjectStub<ModelProbeCoordinator> | null {
+  if (!session || !session.base_url) return null;
+  return env.PROBE.getByName(session.base_url);
 }
 
 // --------------------------------------------------------------------------- //
@@ -593,19 +623,13 @@ export async function handleAdminApiRequest(
       return handleChangePassword(env, request);
     case "POST /admin/api/settings":
       return handleSettings(env, request);
-    case "GET /admin/api/reasoning":
-      return handleReasoningInfo(env);
-    case "POST /admin/api/reasoning/settings":
-      return handleReasoningSettings(env, request);
-    case "POST /admin/api/reasoning/refresh":
-      return handleReasoningRefresh(env);
+    case "GET /admin/api/probe":
+      return handleProbeInfo(env);
+    case "POST /admin/api/probe/settings":
+      return handleProbeSettings(env, request);
+    case "POST /admin/api/probe/refresh":
+      return handleProbeRefresh(env, request);
     default:
       return json({ ok: false, error: "err.unknown_endpoint" }, 404);
   }
-}
-
-/** Whether /admin should show the "set password" view instead of the login view. */
-/** /admin 是否应显示「设置密码」视图而非登录视图。 */
-export async function adminNeedsSetup(env: Env): Promise<boolean> {
-  return (await adminPasswordSource(env)) === "none";
 }

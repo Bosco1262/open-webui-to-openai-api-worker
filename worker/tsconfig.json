@@ -5,10 +5,23 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    // Relative imports carry an explicit .ts extension so the very same sources
+    // can run under Node's type stripping in tests and be bundled by Wrangler.
+    //
+    // 相对导入显式带 .ts 扩展名，使同一份源码既能在测试里被 Node 的类型擦除直接
+    // 运行，也能被 Wrangler 打包。
+    "allowImportingTsExtensions": true,
     "lib": ["ES2022"],
     "types": ["@cloudflare/workers-types"],
     "strict": true,
     "noEmit": true,
+    // Tests run straight from TypeScript under Node's strip-only type removal, so
+    // only erasable syntax may be used anywhere in src/ (no parameter properties,
+    // enums or namespaces). This flag makes `tsc` enforce that.
+    //
+    // 测试直接在 Node 的"仅擦除类型"模式下运行 TypeScript，因此 src/ 里只能使用
+    // 可擦除语法（不能用构造函数参数属性、enum、namespace）。该开关让 `tsc` 强制这一点。
+    "erasableSyntaxOnly": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,

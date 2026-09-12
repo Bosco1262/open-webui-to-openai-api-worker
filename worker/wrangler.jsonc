@@ -19,6 +19,38 @@
       // 如需复用已有 KV，可在此补上 "id": "<你的 KV namespace id>"。
     }
   ],
+  // The probe coordinator: ONE Durable Object instance per upstream holds the
+  // per-model probe facts (SQLite, one row per model) and drives the probe queue
+  // with its own alarms. SQLite storage is required -- the free plan supports only
+  // SQLite-backed Durable Objects.
+  //
+  // 探测协调者：每个上游一个 Durable Object 实例，持有逐模型的探测事实（SQLite，
+  // 每模型一行），并用自身的 alarm 驱动探测队列。必须使用 SQLite 存储——免费层只
+  // 支持 SQLite 后端的 Durable Object。
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PROBE",
+        "class_name": "ModelProbeCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      // First deployment of the coordinator. No data migration is needed: the probe
+      // cache is a cache, and a missing one simply means every model is re-probed.
+      //
+      // 协调者的首次部署。不需要数据迁移：探测缓存就是缓存，缺失只意味着全部重探。
+      "tag": "v1",
+      "new_sqlite_classes": ["ModelProbeCoordinator"]
+    }
+  ],
+  // No Cron Trigger on purpose: the coordinator is woken by traffic and then keeps
+  // its own queue draining with Durable Object alarms (15 minutes of wall time per
+  // invocation), so a scheduled trigger would only duplicate that.
+  //
+  // 刻意不加 Cron Trigger：协调者由流量唤醒，随后用自己的 Durable Object alarm
+  // （单次调用 15 分钟墙钟）把队列排空，定时触发器只会重复这件事。
   // Explicitly disabled: no *.workers.dev route and no per-version preview URLs.
   // Access must go through a custom domain / route bound to this Worker.
   //

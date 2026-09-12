@@ -32,7 +32,7 @@
  * 客户端 API Key 以 Key 明文作为 KV 键名，实现 O(1) 校验。
  */
 
-import type { AdminPasswordSource, Env, PasswordHash } from "./types";
+import type { AdminPasswordSource, Env, PasswordHash } from "./types.ts";
 import {
   base64UrlToBytes,
   bumpSessionEpoch,
@@ -43,8 +43,8 @@ import {
   getSessionEpoch,
   randomBytes,
   setPasswordHash,
-} from "./kv";
-import { touchApiKey } from "./touch";
+} from "./kv.ts";
+import { touchApiKey } from "./touch.ts";
 
 const PBKDF2_ITERATIONS = 100_000;
 const PBKDF2_BITS = 256;
@@ -56,19 +56,44 @@ const ADMIN_COOKIE = "ow2_admin";
 // 常数时间比较
 // --------------------------------------------------------------------------- //
 
-export function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
+/**
+ * Byte comparison that never short-circuits.
+ *
+ * `crypto.subtle.timingSafeEqual` is a Cloudflare Workers extension of WebCrypto:
+ * the test runner imports these sources directly under Node, whose WebCrypto does
+ * not have it, so fall back to a plain loop. Workers always take the native branch.
+ *
+ * 不会提前返回的逐字节比较。
+ *
+ * `crypto.subtle.timingSafeEqual` 是 Cloudflare Workers 对 WebCrypto 的扩展：测试
+ * 运行器会在 Node 下直接导入这些源码，而 Node 的 WebCrypto 没有它，因此回退为普通
+ * 循环。Workers 上始终走原生分支。
+ */
+function compareBytesConstantTime(a: Uint8Array, b: Uint8Array): boolean {
+  const subtle = crypto.subtle as SubtleCrypto & {
+    timingSafeEqual?: (x: ArrayBuffer, y: ArrayBuffer) => boolean;
+  };
+  if (typeof subtle.timingSafeEqual === "function") {
+    return subtle.timingSafeEqual(a.buffer as ArrayBuffer, b.buffer as ArrayBuffer);
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
+function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
-  return crypto.subtle.timingSafeEqual(a.buffer as ArrayBuffer, b.buffer as ArrayBuffer);
+  return compareBytesConstantTime(a, b);
 }
 
 /** Hash both sides to a fixed size first, then compare in constant time. */
 /** 先将两侧哈希到定长，再做常数时间比较。 */
-export async function timingSafeEqualStr(a: string, b: string): Promise<boolean> {
+async function timingSafeEqualStr(a: string, b: string): Promise<boolean> {
   const [ha, hb] = await Promise.all([
     crypto.subtle.digest("SHA-256", new TextEncoder().encode(a)),
     crypto.subtle.digest("SHA-256", new TextEncoder().encode(b)),
   ]);
-  return crypto.subtle.timingSafeEqual(ha, hb);
+  return compareBytesConstantTime(new Uint8Array(ha), new Uint8Array(hb));
 }
 
 // --------------------------------------------------------------------------- //
@@ -102,7 +127,7 @@ async function pbkdf2(password: string, salt: Uint8Array): Promise<Uint8Array> {
 
 // Hash a password with a fresh random salt (returned base64url-encoded).
 // 用新随机盐对密码做哈希（返回 base64url 编码的盐与哈希）。
-export async function hashPassword(password: string): Promise<PasswordHash> {
+async function hashPassword(password: string): Promise<PasswordHash> {
   const salt = randomBytes(16);
   const hash = await pbkdf2(password, salt);
   return {
@@ -113,7 +138,7 @@ export async function hashPassword(password: string): Promise<PasswordHash> {
 
 // Verify a password against the stored PBKDF2 hash in constant time.
 // 对存储的 PBKDF2 哈希做常数时间密码校验。
-export async function verifyPassword(password: string, stored: PasswordHash): Promise<boolean> {
+async function verifyPassword(password: string, stored: PasswordHash): Promise<boolean> {
   try {
     const salt = base64UrlToBytes(stored.salt);
     const expected = base64UrlToBytes(stored.hash);
@@ -146,12 +171,6 @@ export async function adminPasswordSource(env: Env): Promise<AdminPasswordSource
   if (await getPasswordHash(env)) return "kv";
   if (env.ADMIN_PASSWORD) return "secret";
   return "none";
-}
-
-/** Whether an admin password is available (secret or KV). */
-/** 是否已有可用的管理密码（Secret 或 KV）。 */
-export async function adminHasPassword(env: Env): Promise<boolean> {
-  return (await adminPasswordSource(env)) !== "none";
 }
 
 /** Set the admin password from the web UI (only allowed in "none" mode). */
@@ -246,7 +265,7 @@ export async function createAdminToken(env: Env): Promise<string> {
 
 // Verify signature, expiry and epoch of an admin session token.
 // 校验管理会话令牌的签名、过期时间与纪元。
-export async function verifyAdminToken(env: Env, token: string): Promise<boolean> {
+async function verifyAdminToken(env: Env, token: string): Promise<boolean> {
   const dot = token.lastIndexOf(".");
   if (dot <= 0 || dot === token.length - 1) return false;
   const payloadB64 = token.slice(0, dot);
@@ -274,7 +293,7 @@ export async function verifyAdminToken(env: Env, token: string): Promise<boolean
 
 // Extract the admin session cookie value from the request, if present.
 // 从请求中提取管理会话 Cookie 值（若存在）。
-export function readAdminCookie(request: Request): string {
+function readAdminCookie(request: Request): string {
   const header = request.headers.get("Cookie") || "";
   for (const part of header.split(";")) {
     const eqIndex = part.indexOf("=");
@@ -391,7 +410,7 @@ export function clientIP(request: Request): string {
 
 // Read the client key from "Authorization: Bearer <key>" or "X-API-Key: <key>".
 // 从 "Authorization: Bearer <key>" 或 "X-API-Key: <key>" 读取客户端 Key。
-export function extractClientApiKey(request: Request): string {
+function extractClientApiKey(request: Request): string {
   const auth = request.headers.get("Authorization") || "";
   if (auth.toLowerCase().startsWith("bearer ")) {
     return auth.slice("bearer ".length).trim();

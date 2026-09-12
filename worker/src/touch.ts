@@ -13,9 +13,9 @@
  * 配置值存放在独立的 KV 键中，仅约束本节流逻辑。
  */
 
-import type { ApiKeyMeta, Env } from "./types";
-import { apiKeyKVKey, cacheGet, cacheSet } from "./kv";
-import { DEFAULT_INTERVAL, isIntervalOption } from "./intervals";
+import type { ApiKeyMeta, Env } from "./types.ts";
+import { apiKeyKVKey, cacheGet, cacheSet } from "./kv.ts";
+import { DEFAULT_INTERVAL, isIntervalOption } from "./intervals.ts";
 
 /** KV key storing the configured `last_used` refresh interval (seconds). */
 /** 存储所配置 `last_used` 刷新间隔（秒）的 KV 键。 */

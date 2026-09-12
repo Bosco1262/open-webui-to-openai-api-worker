@@ -24,27 +24,34 @@
  * 上游：直连 {session.base_url}/{path}。
  */
 
-import type { Env, StoredSession } from "./types";
-import { sessionHeaders } from "./session";
-import { getSession } from "./kv";
-import {
-  buildReasoningInfo,
-  getReasoningCache,
-  getReasoningSettings,
-  refreshReasoningCache,
-} from "./reasoning";
-import { verifyClientApiKey } from "./auth";
+import type { Env, InstanceMeta, ModelProbeFields, ProbeSettings, StoredSession } from "./types.ts";
+import { fetchUpstream, sessionHeaders, sessionIsUsable } from "./session.ts";
+import { AUTH_FAILURE_CODES, PREFIX_CANDIDATES, confirmUpstreamPrefix } from "./upstream.ts";
+import type { ConfirmedPrefix } from "./upstream.ts";
+import { getSession } from "./kv.ts";
+import { extractModelList, modelFingerprint, modelIdOf, normalizeModel, sharedDefaultCapabilities } from "./modelCatalog.ts";
+import { instanceMetaToEnvelope, isInstanceMetaUsable } from "./instanceMeta.ts";
+import { readProbeSettings } from "./probeSettings.ts";
+import { looksLikeEffortError } from "./modelProbe.ts";
+import type { ModelProbeCoordinator } from "./probeCoordinator.ts";
+import { verifyClientApiKey } from "./auth.ts";
 
-/** Upstream prefixes in probe priority order (Open WebUI >= 0.6 vs legacy). */
-/** 上游前缀探测优先级顺序（Open WebUI >= 0.6 与旧版本）。 */
-const PREFIX_CANDIDATES = ["/api/v1", "/api"];
-
-/** Upstream returning these means the credentials are dead. */
-/** 上游返回这些状态码说明凭证已失效。 */
-const AUTH_FAILURE_CODES = [401, 403];
-
-/** Request headers that must not be forwarded upstream. */
-/** 不得转发给上游的请求头。 */
+/**
+ * Request headers that must not be forwarded upstream.
+ *
+ * `accept-encoding` is the Worker-side equivalent of the upstream project's
+ * compression fix (it changed `aiter_raw` to `aiter_bytes` so an upstream-compressed
+ * body is decoded before use): this proxy never asks for a compressed body and
+ * `HOP_BY_HOP_RESPONSE` likewise drops `content-encoding`, so a body can always be
+ * inspected as text -- and a streamed body is still passed through untouched.
+ *
+ * 不得转发给上游的请求头。
+ *
+ * `accept-encoding` 相当于上游项目压缩修复（把 `aiter_raw` 改为 `aiter_bytes`，以便
+ * 上游压缩的响应体先被解码再使用）在本项目里的对应实现：本代理从不索取压缩响应体，
+ * `HOP_BY_HOP_RESPONSE` 同样会剥掉 `content-encoding`，因此响应体总是能当文本检查——
+ * 而流式响应体依然原样直通。
+ */
 const HOP_BY_HOP_REQUEST = new Set([
   "connection",
   "keep-alive",
@@ -90,7 +97,7 @@ interface ErrorOpts {
 
 // Build an OpenAI-style error response body with the given status.
 // 用给定状态码构造 OpenAI 风格的错误响应体。
-export function openaiError(message: string, status = 400, opts: ErrorOpts = {}): Response {
+function openaiError(message: string, status = 400, opts: ErrorOpts = {}): Response {
   return Response.json(
     {
       error: {
@@ -114,142 +121,30 @@ function authFailureResponse(status: number): Response {
   );
 }
 
+// The handler's own configuration could not be read (a KV failure). That is not an
+// upstream problem, so it answers its own code instead of `upstream_error` -- which
+// would send the operator hunting for a fault on the Open WebUI side.
+//
+// 处理函数自己的配置读不出来（KV 故障）。这不是上游的问题，因此回它自己的错误码，
+// 而不是 `upstream_error`——后者会让运维去 Open WebUI 那一侧找故障。
+function settingsUnavailable(err: unknown): Response {
+  return openaiError(`Probe settings unavailable: ${String(err)}`, 500, {
+    type: "server_error",
+    code: "settings_unavailable",
+  });
+}
+
 // --------------------------------------------------------------------------- //
 // Helpers
 // 辅助函数
 // --------------------------------------------------------------------------- //
 
-// A session is usable if it carries a non-empty Authorization or Cookie.
-// session 携带非空 Authorization 或 Cookie 即视为可用。
-function sessionIsUsable(session: StoredSession): boolean {
-  return Boolean(
-    (session.authorization && session.authorization.trim()) ||
-      (session.cookie && session.cookie.trim()),
-  );
-}
-
-// Quantization tokens recognizable in model ids: NVFP4, FP8, FP16, INT8, GPTQ, AWQ, ...
-// 模型名中可识别的量化标识：NVFP4、FP8、FP16、INT8、GPTQ、AWQ 等
-const QUANT_PATTERN =
-  /\b(NVFP4|FP4|FP8|FP16|INT8|INT4|GPTQ(?:-?[0-9]+BIT)?|AWQ|GGUF|Q[0-9](?:_[A-Z0-9]+)*)\b/i;
-
-/** Collapse an upstream model object into the OpenAI model structure.
- *
- * Standard fields stay intact; a whitelist of safe, useful extras aligned
- * with the generic /v1/models template is preserved when present:
- * max_model_len (kept for compatibility) plus max_context_length and
- * context_length, quantization (parsed from the model id), capabilities
- * (with a derived function_calling flag) and description. Private upstream
- * fields (user_id, access_grants, permission, urlIdx, ...) are never exposed.
- *
- * 把上游的模型对象收敛成 OpenAI 的 model 结构。
- *
- * 标准字段原样保留，另有一份白名单按通用 /v1/models 模板透出安全且
- * 有用的扩展字段：max_model_len（兼容保留）+ max_context_length/
- * context_length、quantization（从模型名解析）、capabilities（含派生的
- * function_calling）与 description；上游私有字段（user_id、access_grants、
- * permission、urlIdx 等）一律不透出。
- */
-function normalizeModel(raw: unknown): Record<string, unknown> | null {
-  if (typeof raw === "string") {
-    return { id: raw, object: "model", created: 0, owned_by: "openai" };
-  }
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const obj = raw as Record<string, unknown>;
-  // Accept the various id-like fields used by different Open WebUI versions.
-  // 兼容不同 Open WebUI 版本使用的各类 id 字段。
-  const modelId = obj.id ?? obj.name ?? obj.model;
-  if (!modelId) return null;
-
-  const info = isPlainObject(obj.info) ? obj.info : {};
-  const meta = isPlainObject(info.meta) ? info.meta : {};
-  const openaiObj = isPlainObject(obj.openai) ? obj.openai : {};
-
-  // info.created_at is the model's real creation time; the "created" on the
-  // OpenAI layer is the serving engine's start time, not the model's.
-  //
-  // info.created_at 才是模型真实创建时间；OpenAI 层的 created 是推理引擎
-  // 的启动时间，并非模型本身的。
-  let created: unknown = info.created_at;
-  if (created === null || created === undefined) created = obj.created;
-  if (created === null || created === undefined) created = obj.created_at;
-  if (typeof created === "string") created = Number(created);
-  if (typeof created !== "number" || Number.isNaN(created)) created = 0;
-
-  // Prefer the inner engine attribution (e.g. "vllm") over the OpenAI-layer default.
-  // 优先取内层引擎归属（如 "vllm"），而非 OpenAI 层的默认值。
-  const ownedBy = openaiObj.owned_by ?? obj.owned_by ?? "openai";
-
-  const model: Record<string, unknown> = {
-    id: String(modelId),
-    object: "model",
-    created,
-    owned_by: String(ownedBy),
-  };
-
-  // Allowlisted extras: only emitted when the upstream provides them, so
-  // minimal/legacy model objects keep the exact 4-field OpenAI shape.
-  //
-  // 白名单扩展字段：上游提供时才输出，极简/老版本模型对象仍保持
-  // 精确的 4 字段 OpenAI 结构。
-  const maxModelLen = obj.max_model_len || openaiObj.max_model_len;
-  if (typeof maxModelLen === "number" && Number.isFinite(maxModelLen)) {
-    const contextLength = Math.trunc(maxModelLen);
-    // Generic-template field names; max_model_len stays as a compatibility alias
-    // 通用模板字段名；max_model_len 作为兼容别名保留
-    model.max_model_len = contextLength;
-    model.max_context_length = contextLength;
-    model.context_length = contextLength;
-  }
-
-  // Quantization is not a dedicated upstream field; parse it from the model id
-  // (e.g. "GLM-5.2-NVFP4" -> "NVFP4"). Omitted when nothing matches.
-  //
-  // 量化信息不是上游的独立字段，从模型名解析（如 "GLM-5.2-NVFP4" ->
-  // "NVFP4"）。匹配不到时不输出该字段。
-  const quantMatch = QUANT_PATTERN.exec(String(modelId));
-  if (quantMatch) {
-    model.quantization = quantMatch[1].toUpperCase();
-  }
-
-  const description = meta.description;
-  if (typeof description === "string" && description) {
-    model.description = description;
-  }
-
-  const capabilities = meta.capabilities;
-  if (isPlainObject(capabilities)) {
-    const caps: Record<string, boolean> = {};
-    for (const [key, value] of Object.entries(capabilities)) {
-      if (typeof value === "boolean") caps[key] = value;
-    }
-    if (Object.keys(caps).length > 0) {
-      // Derived flag: builtin_tools maps onto the template's function_calling
-      // 派生字段：builtin_tools 对应通用模板的 function_calling
-      caps.function_calling = Boolean(caps.builtin_tools ?? false);
-      model.capabilities = caps;
-    }
-  }
-
-  return model;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-/** Extract the model array from inconsistent upstream payload shapes. */
-/** 从不一致的上游负载结构中提取模型数组。 */
-function extractModelList(payload: unknown): unknown[] {
-  if (Array.isArray(payload)) return payload;
-  if (payload && typeof payload === "object") {
-    const obj = payload as Record<string, unknown>;
-    for (const key of ["data", "items", "models"]) {
-      if (Array.isArray(obj[key])) return obj[key] as unknown[];
-    }
-  }
-  return [];
-}
+// Model normalization, the shared capability template and the engine fingerprint live
+// in modelCatalog.ts: the Durable Object needs exactly the same three when it probes
+// on its own alarm, and duplicating them would let the two drift apart.
+//
+// 模型规范化、共享能力模板与引擎指纹都放在 modelCatalog.ts：Durable Object 按自身
+// alarm 探测时需要的正是同样这三样，复制一份只会让两边逐渐不一致。
 
 // Copy response headers while dropping hop-by-hop and identity headers.
 // 复制响应头，同时剔除逐跳头与身份相关头。
@@ -291,28 +186,70 @@ function buildUpstreamHeaders(request: Request, session: StoredSession): Headers
 let cachedPrefixKey = "";
 let cachedPrefix = PREFIX_CANDIDATES[0];
 
-// Detect the working upstream API prefix by probing /models; 404 tries the next.
-// 通过探测 /models 判定可用的上游 API 前缀；404 则尝试下一个。
+// Detect the working upstream API prefix by probing /models. A prefix is only
+// accepted when the answer CONFIRMS it (a model list, or 401/403); a 404, a 5xx or the
+// SPA's "200 + HTML" all move on to the next candidate. The body is read here anyway
+// (the connection is drained either way) and reused for that decision, so confirming
+// costs no extra request.
+//
+// 通过探测 /models 判定可用的上游 API 前缀。只有答案**确认**了该前缀才接受（可读的模型
+// 列表，或 401/403）；404、5xx、以及 SPA 的 "200 + HTML" 都会继续试下一个候选。响应体
+// 在这里本来就要读完（无论如何都要排空连接），正好用于这个判定，因此确认过程不多花请求。
 async function detectPrefix(request: Request, session: StoredSession): Promise<string> {
   const base = session.base_url;
   if (cachedPrefixKey === base) return cachedPrefix;
 
-  for (const prefix of PREFIX_CANDIDATES) {
-    const resp = await fetch(`${base}${prefix}/models`, {
-      method: "GET",
-      headers: buildUpstreamHeaders(request, session),
+  const headers = buildUpstreamHeaders(request, session);
+  let confirmed: ConfirmedPrefix | null = null;
+  let probingCompleted = true;
+  try {
+    confirmed = await confirmUpstreamPrefix(PREFIX_CANDIDATES, async (prefix) => {
+      const resp = await fetchUpstream(`${base}${prefix}/models`, { method: "GET", headers }, { metadata: true });
+      return {
+        status: resp.status,
+        contentType: resp.headers.get("content-type"),
+        text: await resp.text().catch(() => ""),
+      };
     });
-    await resp.text().catch(() => {});
-    if (resp.status === 404) continue; // route does not exist, try the next prefix / 路由不存在，尝试下一个前缀
-    cachedPrefix = prefix;
-    cachedPrefixKey = base;
-    return prefix;
+  } catch {
+    // Unreachable or timed out: fail fast on THIS request (the other candidate shares
+    // the same host and would fail identically) and let the actual request report the
+    // real error. The fallback below is returned but NOT remembered in this case --
+    // remembering it would freeze a legacy deployment onto the wrong prefix for the
+    // isolate's whole lifetime after a single transient outage.
+    //
+    // 连不上或超时：本次请求快速失败（另一个候选共用同一主机，必然同样失败），让真正的
+    // 那次请求去报告错误。这种情况下下面的兜底会返回但**不会**被记住——否则一次瞬时故障
+    // 就会让旧版部署在整个 isolate 生命周期内都锁在错误的前缀上。
+    probingCompleted = false;
   }
-  // All candidates 404: fall back to the first so the caller gets a real error.
-  // 所有候选前缀均 404：回退到第一个，让调用方拿到真实错误。
-  cachedPrefix = PREFIX_CANDIDATES[0];
-  cachedPrefixKey = base;
-  return cachedPrefix;
+  if (confirmed) {
+    cachedPrefix = confirmed.prefix;
+    cachedPrefixKey = base;
+    return confirmed.prefix;
+  }
+  if (probingCompleted) {
+    // Every candidate answered and none could be confirmed: the deployment's routes are
+    // not going to change between two requests, so the fallback IS remembered. This is
+    // still not a success and must not be reported as one (the warn is its only trace).
+    //
+    // 所有候选都作答了、且一个都确认不了：部署的路由不会在两次请求之间改变，因此兜底
+    // 值**会**被记住。这依然不是成功，也不得当成成功上报（warn 是它唯一的痕迹）。
+    console.warn(
+      JSON.stringify({
+        message: "upstream prefix not confirmed",
+        base_url: base,
+        candidates: PREFIX_CANDIDATES,
+      }),
+    );
+    cachedPrefix = PREFIX_CANDIDATES[0];
+    cachedPrefixKey = base;
+  }
+  // Fall back to the first candidate so the caller gets a real error from the actual
+  // request.
+  //
+  // 回退到第一个候选，让调用方从真正的那次请求拿到真实错误。
+  return PREFIX_CANDIDATES[0];
 }
 
 // --------------------------------------------------------------------------- //
@@ -334,7 +271,7 @@ async function handleModels(
 
   let resp: Response;
   try {
-    resp = await fetch(`${base}${prefix}/models`, { method: "GET", headers });
+    resp = await fetchUpstream(`${base}${prefix}/models`, { method: "GET", headers }, { metadata: true });
   } catch (err) {
     return openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {
       type: "server_error",
@@ -364,95 +301,235 @@ async function handleModels(
       code: "upstream_error",
     });
   }
-  const models = extractModelList(payload)
-    .map(normalizeModel)
-    .filter((m): m is Record<string, unknown> => m !== null);
+  const rawModels = extractModelList(payload);
+  const { models, refs } = await normalizeCatalog(rawModels);
 
-  // Reasoning-effort info is best-effort: it must never fail the models list.
-  // 思考挡位信息是尽力而为的：绝不能让模型列表请求失败。
+  // Probe-derived fields and the instance envelope are best-effort: neither may ever
+  // fail the model list. BOTH now arrive in ONE coordinator call -- the instance
+  // snapshot lives beside the probe facts, so the Worker neither reads a second store
+  // nor fetches /api/config itself.
+  //
+  // 探测字段与实例信封都是尽力而为的：两者都绝不能让模型列表请求失败。现在两者来自
+  // **同一次**协调者调用——实例快照就存放在探测事实旁边，因此 Worker 既不用读第二个
+  // 存储，也不用自己拉 /api/config。
+  //
+  // Reading the settings is NOT best-effort: it is this handler's own configuration,
+  // and a failure here has nothing to do with the upstream, so it gets its own
+  // structured error instead of being reported as one.
+  //
+  // 读取设置**不是**尽力而为的：它是本处理函数自己的配置，这里失败与上游毫无关系，
+  // 因此给它自己的结构化错误，而不是报成上游错误。
+  let settings: ProbeSettings;
   try {
-    await attachReasoningInfo(env, ctx, models);
+    settings = await readProbeSettings(env);
   } catch (err) {
-    console.error(
-      JSON.stringify({ message: "reasoning attach failed", error: err instanceof Error ? err.message : String(err) }),
-    );
+    return settingsUnavailable(err);
   }
-  return Response.json({ object: "list", data: models });
+  const wantsFields = settings.enabled;
+  const wantsEnvelope = settings.exposeInstanceMeta;
+  let instanceMeta: InstanceMeta | null = null;
+  if (wantsFields || wantsEnvelope) {
+    try {
+      const presented = await probeCoordinatorFor(env, session).present(
+        wantsFields ? refs : [],
+        wantsFields ? settings.wait : 0,
+        {
+          wantInstanceMeta: wantsEnvelope,
+          defaultModelCapabilities: sharedDefaultCapabilities(rawModels),
+        },
+      );
+      if (wantsFields) {
+        for (const model of models) {
+          const id = typeof model.id === "string" ? model.id : "";
+          const fields = presented.fields[id];
+          if (fields) Object.assign(model, fields);
+        }
+      }
+      instanceMeta = presented.instanceMeta;
+    } catch (err) {
+      console.error(
+        JSON.stringify({
+          message: "probe fields unavailable",
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
+  }
+
+  const envelope: Record<string, unknown> = { object: "list", data: models };
+  if (instanceMeta && isInstanceMetaUsable(instanceMeta)) {
+    envelope.x_open_webui = instanceMetaToEnvelope(instanceMeta);
+  }
+  return Response.json(envelope);
 }
 
-// Attach cached reasoning-effort info to each model. When models lack cache
-// coverage (fresh upstream additions, or entries older than the auto-refresh
-// granularity) a background refresh fills the cache for the next request;
-// the current response optionally waits `wait` seconds for it to land first.
-//
-// 为每个模型附加缓存中的思考挡位信息。缓存未覆盖的模型（上游新增，或条目
-// 超过自动刷新粒度）由后台刷新补齐缓存供下次请求使用；当前响应可先等待
-// `wait` 秒让刷新落地。
-//
-// Mirrors the upstream app.py /v1/models logic (missing -> bounded wait ->
-// merge again).
-// 与上游 app.py 的 /v1/models 逻辑一致（缺失 -> 有限等待 -> 再合并一轮）。
-async function attachReasoningInfo(
+/**
+ * Normalize the upstream model list and compute the (id, engine fingerprint) pairs
+ * the coordinator needs.
+ *
+ * Fingerprints are derived from the RAW upstream objects -- normalization drops
+ * `info.updated_at` and `openai.root`, which are exactly what makes a fingerprint
+ * move when the engine behind a model is swapped.
+ *
+ * 规范化上游模型列表，并算出协调者需要的 (模型 id, 引擎指纹) 对。
+ *
+ * 指纹由**原始**上游对象推导——规范化会丢掉 `info.updated_at` 与 `openai.root`，
+ * 而这两个恰是"模型背后的引擎被换掉"时让指纹变化的字段。
+ */
+async function normalizeCatalog(
+  rawModels: unknown[],
+): Promise<{ models: Array<Record<string, unknown>>; refs: Array<[string, string]> }> {
+  const shared = sharedDefaultCapabilities(rawModels);
+  const models: Array<Record<string, unknown>> = [];
+  const refs: Array<[string, string]> = [];
+  for (const raw of rawModels) {
+    const model = normalizeModel(raw, shared);
+    if (!model) continue;
+    models.push(model);
+    const modelId = typeof model.id === "string" ? model.id : String(modelIdOf(raw) ?? "");
+    refs.push([modelId, await modelFingerprint(raw, modelId)]);
+  }
+  return { models, refs };
+}
+
+/** The coordinator stub for this upstream. One instance per upstream base URL, so
+ *  every location talks to the same coordinator. */
+/** 该上游的协调者 stub。每个上游根地址一个实例，因此所有机房都对话同一个协调者。 */
+function probeCoordinatorFor(env: Env, session: StoredSession): DurableObjectStub<ModelProbeCoordinator> {
+  return env.PROBE.getByName(session.base_url);
+}
+
+/**
+ * Fire-and-forget self-heal: drop the level the upstream just rejected and make the
+ * model eligible for a re-probe.
+ *
+ * Never blocks and never throws -- the client's error is already on its way, and a
+ * failing heal must not turn a clean 400 into a 500.
+ *
+ * 即发即忘的自愈：剔除上游刚刚拒绝的那个挡位，并让该模型可以被重探。
+ *
+ * 绝不阻塞、绝不抛出——客户端的错误已经在路上，自愈失败不能把一个干净的 400
+ * 变成 500。
+ */
+function triggerProbeHeal(
   env: Env,
   ctx: ExecutionContext,
-  models: Array<Record<string, unknown>>,
-): Promise<void> {
-  const settings = await getReasoningSettings(env);
-  if (!settings.enabled) return;
+  session: StoredSession,
+  modelId: unknown,
+  effort: unknown,
+): void {
+  if (typeof modelId !== "string" || !modelId) return;
+  const level = typeof effort === "string" && effort ? effort : null;
+  const work = probeCoordinatorFor(env, session)
+    .invalidate(modelId, level)
+    .catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          message: "probe self-heal failed",
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    });
+  ctx.waitUntil(work);
+}
 
-  let cache = await getReasoningCache(env);
-  const ttl = settings.refreshInterval;
-  const now = Date.now() / 1000;
-
-  // Covered = probed and still within the auto-refresh granularity.
-  // refreshInterval=0 keeps serving whatever the cache holds (auto-refresh
-  // off, manual refresh only).
-  //
-  // 已覆盖 = 已探测且仍在自动刷新粒度内。refreshInterval=0 时缓存里有什么
-  // 就继续返回什么（自动刷新关闭，仅手动刷新）。
-  const isCovered = (id: string): boolean => {
-    const entry = cache.models[id];
-    return Boolean(entry && (ttl <= 0 || entry.probed_at + ttl > now));
-  };
-  const attach = (): void => {
-    for (const model of models) {
-      if (typeof model.id !== "string" || model.reasoning !== undefined) continue;
-      if (!isCovered(model.id)) continue;
-      const info = buildReasoningInfo(cache.models[model.id].supported_efforts);
-      if (info) model.reasoning = info;
-    }
-  };
-
-  attach();
-  if (models.every((m) => typeof m.id !== "string" || isCovered(m.id))) return;
-
-  // Lazy refresh: deduped in-flight by base_url inside refreshReasoningCache.
-  // waitUntil keeps the round running even after this response returns.
-  //
-  // 惰性刷新：refreshReasoningCache 内部按 base_url 去重进行中的刷新。
-  // waitUntil 让本轮刷新在响应返回后仍能继续完成。
-  const refresh = refreshReasoningCache(env, { force: false });
-  ctx.waitUntil(refresh.catch(() => {}));
-
-  if (settings.wait > 0) {
-    // Bounded wait, then merge again: models probed during the wait are now
-    // covered (putReasoningCache refreshes the instance cache, so the re-read
-    // below sees fresh data).
-    //
-    // 有限等待后合并一轮：等待期间探测完成的模型现在已有缓存
-    // （putReasoningCache 会同步实例缓存，下方重读即可拿到新数据）。
-    await Promise.race([
-      refresh.catch(() => null),
-      new Promise((resolve) => setTimeout(resolve, settings.wait * 1000)),
-    ]);
-    cache = await getReasoningCache(env);
-    attach();
+// GET /v1/models/{id} -- one normalized model, or an OpenAI-style 404.
+// GET /v1/models/{id} —— 单个规范化模型，或 OpenAI 风格的 404。
+async function handleRetrieveModel(
+  request: Request,
+  session: StoredSession,
+  env: Env,
+  modelId: string,
+): Promise<Response> {
+  const prefix = await detectPrefix(request, session);
+  const headers = buildUpstreamHeaders(request, session);
+  let resp: Response;
+  try {
+    resp = await fetchUpstream(`${session.base_url}${prefix}/models`, { method: "GET", headers }, { metadata: true });
+  } catch (err) {
+    return openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {
+      type: "server_error",
+      code: "upstream_unavailable",
+    });
   }
+  if (AUTH_FAILURE_CODES.includes(resp.status)) {
+    await resp.text().catch(() => {});
+    return authFailureResponse(resp.status);
+  }
+  if (resp.status !== 200) {
+    const text = (await resp.text()).slice(0, 500);
+    return openaiError(`Upstream /models returned HTTP ${resp.status}: ${text}`, 502, {
+      type: "server_error",
+      code: "upstream_error",
+    });
+  }
+
+  const text = await resp.text();
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return openaiError(`Upstream /models returned invalid JSON: ${text.slice(0, 500)}`, 502, {
+      type: "server_error",
+      code: "upstream_error",
+    });
+  }
+
+  const rawModels = extractModelList(payload);
+  const { models, refs } = await normalizeCatalog(rawModels);
+  const model = models.find((candidate) => candidate.id === modelId);
+
+  // Deliberately no envelope and no background refresh here: the upstream project
+  // does the same, so a single-model read never changes what is being probed.
+  //
+  // 这里刻意不带信封、也不触发后台刷新：上游项目同样如此，因此单模型读取不会改变
+  // 正在探测的内容。
+  if (!model) return modelNotFound(modelId);
+
+  let settings: ProbeSettings;
+  try {
+    settings = await readProbeSettings(env);
+  } catch (err) {
+    return settingsUnavailable(err);
+  }
+  if (settings.enabled) {
+    try {
+      const presented = await probeCoordinatorFor(env, session).present(
+        refs.filter(([id]) => id === modelId),
+        0,
+        { wantInstanceMeta: false },
+      );
+      const fields: ModelProbeFields | undefined = presented.fields[modelId];
+      if (fields) Object.assign(model, fields);
+    } catch (err) {
+      console.error(
+        JSON.stringify({
+          message: "probe fields unavailable",
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+    }
+  }
+  return Response.json(model);
+}
+
+/** The OpenAI "model not found" body, worded exactly like the upstream project. */
+/** OpenAI 的 "model not found" 错误体，措辞与上游项目完全一致。 */
+function modelNotFound(modelId: string): Response {
+  return openaiError(`The model '${modelId}' does not exist`, 404, {
+    code: "model_not_found",
+    param: "model",
+  });
 }
 
 // POST /v1/chat/completions — validate the payload, then forward (SSE-aware).
 // POST /v1/chat/completions —— 校验负载后转发（支持 SSE 流式）。
-async function handleChat(request: Request, session: StoredSession): Promise<Response> {
+async function handleChat(
+  request: Request,
+  session: StoredSession,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
   let payload: Record<string, unknown>;
   try {
     payload = (await request.json()) as Record<string, unknown>;
@@ -462,8 +539,19 @@ async function handleChat(request: Request, session: StoredSession): Promise<Res
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return openaiError("Request body must be a JSON object.", 400, { code: "invalid_json" });
   }
-  if (!payload.model) {
-    return openaiError("Missing required field: model.", 400, { code: "missing_required_field", param: "model" });
+  // `model` must be a non-empty STRING: `0` / `false` / `[]` / `{}` and a blank
+  // string are all truthy or falsy in ways that let them slip through a plain falsy
+  // check, and forwarding them upstream hands the client "an upstream error" instead
+  // of "your request is invalid".
+  //
+  // `model` 必须是去空白后非空的**字符串**：`0` / `false` / `[]` / `{}` 与纯空白串用
+  // 简单的真假判断都拦不住，原样转发给上游只会让客户端拿到"上游错误"，而不是"你的请求
+  // 不合法"。
+  if (typeof payload.model !== "string" || !payload.model.trim()) {
+    return openaiError("`model` must be a non-empty string.", 400, {
+      code: "invalid_type",
+      param: "model",
+    });
   }
   if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
     return openaiError("messages must be a non-empty array.", 400, { code: "missing_required_field", param: "messages" });
@@ -476,11 +564,15 @@ async function handleChat(request: Request, session: StoredSession): Promise<Res
 
   let resp: Response;
   try {
-    resp = await fetch(`${base}${prefix}/chat/completions`, {
+    // Streaming only bounds the wait for the headers; the SSE body itself must not be
+    // cut off (see `fetchUpstream`).
+    //
+    // 流式只限制等待响应头的时间；SSE 响应体本身绝不能被打断（见 `fetchUpstream`）。
+    resp = await fetchUpstream(`${base}${prefix}/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-    });
+    }, { stream: isStream });
   } catch (err) {
     return openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {
       type: "server_error",
@@ -494,6 +586,16 @@ async function handleChat(request: Request, session: StoredSession): Promise<Res
   }
   if (resp.status >= 400) {
     const text = (await resp.text()).slice(0, 2000);
+    // Self-heal: a 400/422 that names the reasoning effort disproves the level the
+    // client just used, so the cache drops it and the model is re-probed. The
+    // upstream's own error is what the client receives either way -- the heal never
+    // delays or rewrites it.
+    //
+    // 自愈：点名思考挡位的 400/422 证伪了客户端刚用的那个挡位，因此缓存剔除它并重探
+    // 该模型。无论是否自愈，客户端收到的都是上游原本的错误——自愈既不延迟也不改写它。
+    if ((resp.status === 400 || resp.status === 422) && looksLikeEffortError(text)) {
+      triggerProbeHeal(env, ctx, session, payload.model, payload.reasoning_effort);
+    }
     // 4xx maps back to the client, 5xx is masked as 502 upstream_error.
     // 4xx 原样映射回客户端，5xx 统一掩蔽为 502 upstream_error。
     return openaiError(
@@ -542,8 +644,22 @@ async function handleEmbeddings(request: Request, session: StoredSession): Promi
   } catch {
     return openaiError("Request body is not valid JSON.", 400, { code: "invalid_json" });
   }
-  if (!payload.model || !("input" in payload)) {
-    return openaiError("Missing required field: model / input.", 400, { code: "missing_required_field" });
+  // Same `model` rule as chat/completions, plus the required `input` field. The two
+  // are reported separately so the client is told which one is wrong.
+  //
+  // 与 chat/completions 相同的 `model` 规则，另加必填的 `input` 字段。两者分开报，
+  // 客户端才知道到底哪个字段不合法。
+  if (typeof payload.model !== "string" || !payload.model.trim()) {
+    return openaiError("`model` must be a non-empty string.", 400, {
+      code: "invalid_type",
+      param: "model",
+    });
+  }
+  if (!("input" in payload)) {
+    return openaiError("Missing required field: input.", 400, {
+      code: "missing_required_field",
+      param: "input",
+    });
   }
 
   const prefix = await detectPrefix(request, session);
@@ -552,7 +668,7 @@ async function handleEmbeddings(request: Request, session: StoredSession): Promi
 
   let resp: Response;
   try {
-    resp = await fetch(`${base}${prefix}/embeddings`, {
+    resp = await fetchUpstream(`${base}${prefix}/embeddings`, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
@@ -599,11 +715,15 @@ async function handlePassthrough(request: Request, session: StoredSession): Prom
 
   let resp: Response;
   try {
-    resp = await fetch(target, {
+    // The caller may have asked for a stream (the passthrough is route-agnostic), so
+    // only the wait for the response headers is bounded here as well.
+    //
+    // 调用方可能请求了流式（本透传不区分路由），因此这里同样只限制等待响应头的时间。
+    resp = await fetchUpstream(target, {
       method: request.method,
       headers,
       body: body || undefined,
-    });
+    }, { stream: true });
   } catch (err) {
     return openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {
       type: "server_error",
@@ -630,43 +750,67 @@ export async function handleV1Request(
   request: Request,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const authorized = await verifyClientApiKey(env, request, ctx);
-  if (!authorized) {
-    return openaiError("Invalid proxy API key.", 401, { code: "invalid_api_key" });
-  }
-
-  const session = await getSession(env);
-  if (!session) {
-    return openaiError("No session credentials imported. Please import session.json in the admin console first.", 503, {
-      type: "server_error",
-      code: "session_missing",
-    });
-  }
-  if (!sessionIsUsable(session)) {
-    return openaiError("Session credentials are unusable (missing Authorization / Cookie). Please re-import.", 500, {
-      type: "server_error",
-      code: "session_invalid",
-    });
-  }
-
   const url = new URL(request.url);
   const subpath = url.pathname.slice("/v1".length) || "/";
 
+  // Credential verification and session loading run INSIDE the try: a KV read that
+  // throws used to bubble up to the Worker entry point, which answers a plain 500
+  // body that an OpenAI client cannot parse. Failure codes below are deliberately
+  // distinct from the upstream ones -- the upstream was never reached.
+  //
+  // 凭证校验与 session 加载放在 try **内部**：一次抛错的 KV 读取此前会冒泡到 Worker
+  // 入口，返回 OpenAI 客户端无法解析的普通 500 响应体。下面的错误码刻意与上游错误区分：
+  // 这些情况下根本没碰到上游。
   try {
+    const authorized = await verifyClientApiKey(env, request, ctx);
+    if (!authorized) {
+      return openaiError("Invalid proxy API key.", 401, { code: "invalid_api_key" });
+    }
+
+    const session = await getSession(env);
+    if (!session) {
+      return openaiError("No session credentials imported. Please import session.json in the admin console first.", 503, {
+        type: "server_error",
+        code: "session_missing",
+      });
+    }
+    if (!sessionIsUsable(session)) {
+      return openaiError("Session credentials are unusable (missing Authorization / Cookie). Please re-import.", 500, {
+        type: "server_error",
+        code: "session_invalid",
+      });
+    }
+
     if (subpath === "/models" || subpath === "/models/") {
       return await handleModels(request, session, env, ctx);
     }
+    // Registered BEFORE the catch-all passthrough (and before `/models` can swallow
+    // it): an unknown id must answer a JSON 404 here, because the upstream answers
+    // an unknown path with 200 and a page of HTML.
+    //
+    // 必须注册在兜底透传之前：未知 id 要在这里返回 JSON 404，因为上游对未知路径会
+    // 回 200 加一页 HTML。
+    if (subpath.startsWith("/models/")) {
+      const modelId = decodeURIComponent(subpath.slice("/models/".length));
+      return await handleRetrieveModel(request, session, env, modelId);
+    }
     if (subpath === "/chat/completions" || subpath === "/chat/completions/") {
-      return await handleChat(request, session);
+      return await handleChat(request, session, env, ctx);
     }
     if (subpath === "/embeddings" || subpath === "/embeddings/") {
       return await handleEmbeddings(request, session);
     }
     return await handlePassthrough(request, session);
   } catch (err) {
-    return openaiError(`Proxy request failed: ${String(err)}`, 502, {
+    // Safety net for the plumbing (KV, RPC, an unexpected throw). Upstream failures
+    // are handled -- and coded -- by the individual handlers, so this one says
+    // "internal" rather than blaming Open WebUI.
+    //
+    // 兜底处理管线自身的失败（KV、RPC、未预期的抛出）。上游失败由各处理函数自行处理并
+    // 给出错误码，因此这一条说的是 "internal"，而不是甩锅给 Open WebUI。
+    return openaiError(`Proxy request failed: ${String(err)}`, 500, {
       type: "server_error",
-      code: "upstream_error",
+      code: "internal",
     });
   }
 }

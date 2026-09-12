@@ -10,11 +10,19 @@
  *                                     previously issued admin session tokens die at once
  *   - "settings:touch_interval"    -> number (seconds); how often a key's last_used is
  *                                     refreshed (default daily, adjustable in console)
- *   - "settings:reasoning"         -> ReasoningSettings; reasoning-effort probe feature
- *                                     switch, tuning knobs and auto-refresh granularity
- *   - "reasoning:cache"            -> ReasoningCacheFile; probed reasoning_effort sets
- *                                     per model, mirrored from the upstream project's
- *                                     reasoning_cache.json
+ *   - "settings:probe"             -> ProbeSettings; model probe feature switch and
+ *                                     tuning knobs
+ *
+ * Probe results are NOT stored in KV: they live in the ModelProbeCoordinator
+ * Durable Object (SQLite, one row per model), which is the single coordinator for
+ * the deployment and gives strongly consistent reads plus one write per model.
+ * KV is only used for the low-rate, deployment-level keys above.
+ *
+ * The instance snapshot is NOT in KV either: `/api/config`'s name / version / features
+ * and the shared capability template are stored in the coordinator's SQLite (key
+ * `instance_meta`), beside the probe facts, and the coordinator refreshes them from its
+ * own background `waitUntil`. The old KV key `instance:meta` is no longer read (and may
+ * be deleted by hand).
  * 
  * Admin password sources (mirror of M365-Copilot2API-on-Cloudflare-Worker):
  *   - ADMIN_PASSWORD secret is verified directly and is NEVER written to KV.
@@ -33,22 +41,45 @@
  *                                     已签发的管理会话令牌立即全部失效
  *   - "settings:touch_interval"    -> 数字（秒）；Key last_used 的刷新粒度
  *                                     （默认每天，可在控制台调整）
- *   - "settings:reasoning"         -> ReasoningSettings；思考挡位探测的功能开关、
- *                                     调节参数与自动刷新粒度
- *   - "reasoning:cache"            -> ReasoningCacheFile；逐模型探测到的
- *                                     reasoning_effort 挡位集合（对应上游
- *                                     reasoning_cache.json）
+ *   - "settings:probe"             -> ProbeSettings；模型探测的功能开关与调节参数
  *
+ * 探测结果**不放在 KV**：它们存放在 ModelProbeCoordinator Durable Object 里
+ * （SQLite，每模型一行）。该 DO 是本部署的唯一协调者，提供强一致读取与
+ * "每模型一次写入"的能力。KV 只承载上面这些低频的部署级键。
+ *
+ * 实例快照同样**不在 KV**：`/api/config` 的 name / version / features 与共享能力模板
+ * 存放在协调者的 SQLite（键 `instance_meta`），与探测事实相邻，并由协调者在自己的后台
+ * `waitUntil` 里刷新。旧的 KV 键 `instance:meta` 已不再被读取（可手动删除）。
+ * 
  * 管理密码来源（与 M365-Copilot2API-on-Cloudflare-Worker 对齐）：
  *   - ADMIN_PASSWORD Secret 直接参与验证，绝不写入 KV。
  *   - KV 哈希仅由网页控制台写入：首次访问设密（"none" 模式）或「修改密码」流程。
  *   - KV 哈希一旦存在，始终优先于 Secret 绑定。
  */
 
+// Type-only import: the binding is typed by the coordinator's RPC surface, and the
+// cycle (coordinator -> types) is erased at build time.
+//
+// 仅类型导入：该绑定按协调者的 RPC 面来定型，而这条循环（coordinator -> types）
+// 在构建期会被完全擦除。
+import type { ModelProbeCoordinator } from "./probeCoordinator.ts";
+
 export interface Env {
   /** KV binding: session / config / api keys / admin credentials. */
   /** KV 绑定：session / 配置 / API Key / 管理员凭证。 */
   KV: KVNamespace;
+  /**
+   * Durable Object binding: the deployment's single probe coordinator.
+   *
+   * Probe results live there (SQLite, one row per model) instead of KV, so reads are
+   * strongly consistent and each model is written as soon as it is established.
+   *
+   * Durable Object 绑定：本部署唯一的探测协调者。
+   *
+   * 探测结果存放在那里（SQLite，每模型一行）而不是 KV，使读取强一致，并且每个模型
+   * 一探完就能落盘。
+   */
+  PROBE: DurableObjectNamespace<ModelProbeCoordinator>;
   /**
    * Optional: preset admin password via `wrangler secret put ADMIN_PASSWORD`.
    * 
@@ -98,12 +129,6 @@ export interface ApiKeyMeta {
   last_used: number;
 }
 
-/** Full record returned only when a key is first generated. */
-/** 仅在 Key 首次生成时返回的完整记录。 */
-export interface ApiKeyRecord extends ApiKeyMeta {
-  key: string;
-}
-
 /** Stored admin password hash. */
 /** 存储的管理密码哈希。 */
 export interface PasswordHash {
@@ -111,63 +136,190 @@ export interface PasswordHash {
   hash: string;
 }
 
-/** Admin session cookie payload (HMAC-signed). */
-/** 管理会话 Cookie 负载（HMAC 签名）。 */
-export interface AdminSession {
-  exp: number;
-  iat: number;
-}
-
 // --------------------------------------------------------------------------- //
-// Reasoning-effort probe
-// 思考挡位探测
+// Model probe
+// 模型探测
 // --------------------------------------------------------------------------- //
 
-/** Settings for the reasoning-effort probe (KV key: "settings:reasoning"). */
-/** 思考挡位探测设置（KV 键名："settings:reasoning"）。 */
-export interface ReasoningSettings {
-  /** Whether /v1/models serves the "reasoning" field (default true). */
-  /** /v1/models 是否返回 reasoning 字段（默认 true）。 */
+/**
+ * Settings for the model probe (KV key: "settings:probe").
+ *
+ * Rounds are serial and budgeted, so the old `concurrency` knob is gone: one
+ * invocation may only have six connections waiting for response headers, and a
+ * serial round never needs more than one.
+ *
+ * 模型探测设置（KV 键名："settings:probe"）。
+ *
+ * 轮次是串行且有预算的，因此旧版的 `concurrency` 已被移除：单次调用最多只能有
+ * 六个"等待响应头"的连接，而串行轮次一个就够。
+ */
+export interface ProbeSettings {
+  /** Whether probe-derived model fields are served and probes are run (default true). */
+  /** 是否对外输出探测得出的模型字段、以及是否发起探测（默认 true）。 */
   enabled: boolean;
-  /** Probe concurrency, 1–8 (default 4). */
-  /** 探测并发数，1–8（默认 4）。 */
-  concurrency: number;
-  /** Per-model probe timeout in seconds, 1–120 (default 30). */
-  /** 单模型探测超时秒数，1–120（默认 30）。 */
+  /** Per-request probe timeout in seconds, 1–120 (default 30). */
+  /** 单个探测请求超时秒数，1–120（默认 30）。 */
   timeout: number;
-  /** Bounded wait on /v1/models for a missing-models probe, seconds, 0–30; 0 = never wait (default 5). */
-  /** /v1/models 为等待缺失模型探测完成的最长秒数，0–30；0 = 不等待（默认 5）。 */
+  /** Bounded wait on /v1/models for missing facts, seconds, 0–30; 0 = never wait (default 5). */
+  /** /v1/models 为缺失事实等待的最长秒数，0–30；0 = 不等待（默认 5）。 */
   wait: number;
-  /** Auto-refresh granularity in seconds: 0 = off, otherwise a touch-interval option (default 86400). */
-  /** 自动刷新粒度秒数：0 = 关闭，否则为使用记录粒度的挡位之一（默认 86400）。 */
-  refreshInterval: number;
+  /** Upstream subrequests one probe round may spend (default 40; the free plan allows 50 per invocation). */
+  /** 单轮探测可消耗的上游子请求数（默认 40；免费层每次调用上限 50）。 */
+  budget: number;
+  /** Whether the /v1/models envelope carries x_open_webui (default true). */
+  /** /v1/models 信封是否携带 x_open_webui（默认 true）。 */
+  exposeInstanceMeta: boolean;
 }
 
-/** One probed model entry in the reasoning cache. */
-/** 思考挡位缓存中的单模型条目。 */
-export interface ReasoningCacheEntry {
-  /** Accepted effort levels; empty means "probed, but the upstream accepted the sentinel without validating". */
-  /** 接受的挡位列表；空列表表示"已探测，但上游未校验哨兵值"（不可探测）。 */
-  supported_efforts: string[];
-  /** Unix epoch seconds of the last successful probe. */
-  /** 最近一次成功探测的 Unix 秒级时间戳。 */
+/**
+ * Probe outcome. `status` describes the DATA (how conclusive the cached facts
+ * are); a failed attempt is expressed by `retry_after` + `last_error`, so a
+ * failed re-probe never throws away facts that were already established.
+ *
+ * 探测结果状态。`status` 描述的是**数据**（缓存事实有多确定）；单次尝试的失败由
+ * `retry_after` + `last_error` 表达，因此一次失败的重探不会丢掉已确立的事实。
+ */
+export type ProbeStatus = "ok" | "partial" | "unprobeable" | "failed";
+
+/** Everything established about one model, plus how to treat it next time. */
+/** 关于单个模型已确立的一切，以及下次该如何对待它。 */
+export interface ModelProbe {
+  /** Engine fingerprint; a change invalidates every fact below. */
+  /** 引擎指纹；一旦变化，下面所有事实作废。 */
+  fingerprint: string;
+  /** Unix epoch seconds (float) of the probe. */
+  /** 探测时刻的 Unix 秒级时间戳（浮点）。 */
   probed_at: number;
+  status: ProbeStatus;
+  /** Consecutive failed/incomplete attempts (drives the backoff). */
+  /** 连续失败/未完成的次数（驱动退避）。 */
+  attempts: number;
+  /** Unix epoch seconds before which the model must not be re-probed. */
+  /** 早于该时刻不得重探（Unix 秒级时间戳）。 */
+  retry_after: number;
+  /** One-line reason for the last failed/incomplete attempt. */
+  /** 最近一次失败/未完成的原因（单行）。 */
+  last_error: string;
+  /** Accepted effort levels, only ever filled from a real 200. */
+  /** 接受的挡位，只由真实的 200 填出。 */
+  supported_efforts: string[];
+  /** True when every candidate was conclusively verified. */
+  /** 每个候选都得到了确定结论时为 true。 */
+  efforts_verified: boolean;
+  /** Engine-declared default level, when it names one. */
+  /** 引擎自己声明的默认挡位（说了才有）。 */
+  default_effort: string | null;
+  /** Whether thinking happens when reasoning_effort is omitted. */
+  /** 省略 reasoning_effort 时是否会产生思考。 */
+  default_enabled: boolean | null;
+  /** Only the keys actually established by probing. */
+  /** 只包含确实被探测确立的能力键。 */
+  capabilities: Record<string, boolean>;
+  /** Request parameters the engine did not reject, plus reasoning_effort. */
+  /** 引擎未拒绝的请求参数，外加 reasoning_effort。 */
+  supported_parameters: string[];
+  /** Engine build string reported in chat responses; diagnostics only. */
+  /** 聊天响应里上报的引擎构建串；仅供诊断。 */
+  system_fingerprint: string;
 }
 
-/** Persisted probe results (KV key: "reasoning:cache"; mirrors the upstream reasoning_cache.json). */
-/** 持久化的探测结果（KV 键名："reasoning:cache"；对应上游 reasoning_cache.json）。 */
-export interface ReasoningCacheFile {
-  version: number;
-  models: Record<string, ReasoningCacheEntry>;
-}
-
-/** The per-model "reasoning" object served on /v1/models. */
-/** /v1/models 上每个模型附加的 "reasoning" 对象。 */
+/** The per-model "reasoning" object served on /v1/models (OpenRouter's shape). */
+/** /v1/models 上每个模型附加的 "reasoning" 对象（OpenRouter 的形状）。 */
 export interface ReasoningInfo {
   supported_efforts: string[];
-  default_effort: string;
-  default_enabled: boolean;
   /** True when "none" is absent, i.e. thinking cannot be turned off. */
   /** 缺少 "none" 时为 true，即思考无法关闭。 */
   mandatory: boolean;
+  /** Omitted when the engine never named a default. */
+  /** 引擎没说默认值时省略。 */
+  default_effort?: string;
+  /** Omitted when the default behaviour could not be observed. */
+  /** 观察不出默认行为时省略。 */
+  default_enabled?: boolean;
+}
+
+/** Modality description derived from the vision probe. */
+/** 由视觉探测推导出的模态描述。 */
+export interface ArchitectureInfo {
+  modality: string;
+  input_modalities: string[];
+  output_modalities: string[];
+}
+
+/** The probe-derived fields merged into a /v1/models entry (each only when established). */
+/** 合并进 /v1/models 条目的探测字段（各自只在确立后出现）。 */
+export interface ModelProbeFields {
+  capabilities?: Record<string, boolean>;
+  supported_parameters?: string[];
+  reasoning?: ReasoningInfo;
+  architecture?: ArchitectureInfo;
+}
+
+/** A JSON primitive: the values `/api/config.features` actually carries, and the
+ *  deepest shape the coordinator hands back over RPC.
+ *
+ *  A recursive "any JSON" type would be more faithful, but the Durable Object RPC
+ *  layer maps return types with a recursive `Serializable<T>`, and a self-referencing
+ *  type makes TypeScript give up ("Type instantiation is excessively deep"). Real
+ *  `/api/config.features` payloads are flat maps of scalars, so this costs nothing --
+ *  and a nested value would still survive at runtime, because the payload is passed
+ *  through untouched (the annotation is simply narrower than the data).
+ *
+ *  JSON 原始值：`/api/config.features` 实际携带的取值，也是协调者通过 RPC 交回的
+ *  最深层形状。
+ *
+ *  递归的"任意 JSON"类型更忠实，但 Durable Object 的 RPC 层用递归的
+ *  `Serializable<T>` 映射返回类型，自引用类型会让 TypeScript 直接放弃
+ *  （"Type instantiation is excessively deep"）。真实 `/api/config.features` 都是
+ *  标量扁平映射，因此这样没有损失——嵌套值在运行时也依然能活下来，因为负载是原样
+ *  透传的（类型标注只是比数据更窄）。 */
+export type JsonPrimitive = string | number | boolean | null;
+
+/** Facts about the Open WebUI deployment itself (coordinator SQLite, key "instance_meta"). */
+/** 关于 Open WebUI 部署自身的事实（协调者 SQLite，键名 "instance_meta"）。 */
+export interface InstanceMeta {
+  name: string;
+  version: string;
+  /** Upstream /api/config.features, passed through verbatim.
+   *
+   *  Typed as JSON rather than `unknown` on purpose: this object crosses the Durable
+   *  Object RPC boundary, and Cloudflare's serializable-type mapping resolves
+   *  `unknown` to `never` -- which would make the whole `present` result unusable to
+   *  the caller.
+   *
+   *  刻意用 JSON 类型（而非 `unknown`）：该对象要跨越 Durable Object 的 RPC 边界，
+   *  而 Cloudflare 的可序列化类型映射会把 `unknown` 解析为 `never`，进而使整个
+   *  `present` 返回值对调用方不可用。 */
+  features: Record<string, JsonPrimitive>;
+  /** The capability template every reporting model agrees on. */
+  /** 所有上报能力的模型都一致同意的能力模板。 */
+  default_model_capabilities?: Record<string, boolean>;
+  /** Unix epoch seconds of the last /api/config read (successful or not). */
+  /** 最近一次读取 /api/config 的时刻（无论成功与否）。 */
+  fetched_at: number;
+}
+
+/** Counters returned by one probe round. */
+/** 单轮探测返回的统计计数。 */
+export interface ProbeRoundStats {
+  ok: number;
+  partial: number;
+  unprobeable: number;
+  failed: number;
+  /** True when the round was aborted by an upstream 401/403. */
+  /** 因上游 401/403 中止整轮时为 true。 */
+  authExpired: boolean;
+  /** Models selected for probing this round. */
+  /** 本轮选入待探测集合的模型数。 */
+  total: number;
+  /** Cached entries once the round is over (models still upstream, the ones probed
+   *  during this round included). */
+  /** 本轮结束后缓存持有的条目数（仍在上游的模型，含本轮刚探完的）。 */
+  cached: number;
+  /** Upstream subrequests actually spent. */
+  /** 实际消耗的上游子请求数。 */
+  budgetUsed: number;
+  /** True when the budget ran out before every selected model was probed. */
+  /** 预算耗尽、仍有选中的模型未探测时为 true。 */
+  truncated: boolean;
 }

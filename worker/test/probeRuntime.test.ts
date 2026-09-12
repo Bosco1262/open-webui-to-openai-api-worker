@@ -1,0 +1,232 @@
+/**
+ * Probe runtime decision tests.
+ *
+ * These cover the policy the Durable Object applies when nobody is watching: when to
+ * wake up again. Both failure modes are silent -- never waking (models stay stale
+ * until a client happens to ask) and waking in a loop (burning the free plan's
+ * subrequest quota) -- so they are asserted explicitly here rather than discovered in
+ * production.
+ *
+ * 探测运行时决策的测试。
+ *
+ * 覆盖 Durable Object 在没人盯着时执行的策略：什么时候再醒一次。两种失效模式都是
+ * 静默的——再也不醒（模型一直停在旧结论，直到恰好有客户端来问）与循环唤醒（烧掉免费层
+ * 的子请求配额）——因此在这里显式断言，而不是等线上发现。
+ */
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import { createModelProbe } from "../src/modelProbe.ts";
+import {
+  WAKE_MAX_MS,
+  WAKE_MIN_MS,
+  canJoinRound,
+  createTtlCache,
+  prefixCandidates,
+  refsFromCards,
+  retryWakeAtSeconds,
+  retryWakeDelayMs,
+} from "../src/probeRuntime.ts";
+import type { ModelProbe } from "../src/types.ts";
+
+function entry(id: string, patch: Partial<ModelProbe>): [string, ModelProbe] {
+  return [id, { ...createModelProbe("fp-" + id, 0), ...patch }];
+}
+
+// --------------------------------------------------------------------------- //
+// Wake-up policy
+// 唤醒策略
+// --------------------------------------------------------------------------- //
+
+test("conclusive entries never schedule a wake-up", () => {
+  const now = 1_000;
+  const entries = [
+    entry("ok", { status: "ok", retry_after: now + 5 }),
+    entry("unprobeable", { status: "unprobeable", retry_after: now + 5 }),
+  ];
+  assert.equal(retryWakeAtSeconds(entries, now), null);
+  assert.equal(retryWakeDelayMs(entries, now), null);
+});
+
+test("the earliest backoff deadline wins", () => {
+  const now = 1_000;
+  const entries = [
+    entry("slow", { status: "failed", retry_after: now + 600 }),
+    entry("soon", { status: "partial", retry_after: now + 60 }),
+    entry("done", { status: "ok" }),
+  ];
+  assert.equal(retryWakeAtSeconds(entries, now), now + 60);
+  assert.equal(retryWakeDelayMs(entries, now), 60_000);
+});
+
+test("an already-due retry still waits the minimum, never zero", () => {
+  const now = 1_000;
+  const entries = [entry("due", { status: "failed", retry_after: now - 5_000 })];
+  assert.equal(retryWakeAtSeconds(entries, now), now + WAKE_MIN_MS / 1000);
+  assert.equal(retryWakeDelayMs(entries, now), WAKE_MIN_MS);
+  assert.ok(WAKE_MIN_MS >= 1_000, "a tight alarm loop would burn the subrequest quota");
+});
+
+test("a far-future deadline is clamped to the horizon", () => {
+  const now = 1_000;
+  // The backoff cap can never exceed the horizon, but a hand-edited store might.
+  const entries = [entry("far", { status: "failed", retry_after: now + 30 * 86_400 })];
+  assert.equal(retryWakeDelayMs(entries, now), WAKE_MAX_MS);
+});
+
+test("bounds are overridable for tests and for a future quota guard", () => {
+  const now = 1_000;
+  const entries = [entry("due", { status: "failed", retry_after: now })];
+  assert.equal(retryWakeDelayMs(entries, now, { minMs: 3_000 }), 3_000);
+  assert.equal(
+    retryWakeDelayMs([entry("far", { status: "failed", retry_after: now + 10_000 })], now, {
+      maxMs: 2_000,
+    }),
+    2_000,
+  );
+});
+
+// --------------------------------------------------------------------------- //
+// Round join compatibility
+// 轮次加入的兼容性
+// --------------------------------------------------------------------------- //
+
+test("a caller joins only a round that is at least as thorough and covers its models", () => {
+  const full: { force: boolean; only?: readonly string[] } = { force: false };
+  const forcedFull = { force: true };
+
+  // Same shape: joining is the whole point (one probe, not two).
+  // 形态相同：加入正是目的（只需要一次探测）。
+  assert.equal(canJoinRound(full, full), true);
+  assert.equal(canJoinRound(forcedFull, forcedFull), true);
+  // A forced re-probe must not join an unforced round: it would force nothing while
+  // returning that round's statistics.
+  // 强制重探不得加入非强制轮次：那样什么都没强制，却返回了那个轮次的统计。
+  assert.equal(canJoinRound(full, forcedFull), false);
+  // The other direction is fine (a stronger round already covers the weaker request).
+  // 反方向没问题（更强的轮次本就覆盖更弱的请求）。
+  assert.equal(canJoinRound(forcedFull, full), true);
+
+  // Coverage: a whole-list request may only join a whole-list round ...
+  // 覆盖范围：全量请求只能加入全量轮次……
+  assert.equal(canJoinRound({ force: false, only: ["a"] }, full), false);
+  assert.equal(canJoinRound(full, { force: false, only: ["a"] }), true);
+  // ... while a request for specific models may join a round covering them, and must
+  // queue behind one that covers something else.
+  // ……而指定模型的请求可以加入覆盖它们的轮次，对覆盖别处的轮次则必须排队。
+  assert.equal(canJoinRound({ force: false, only: ["a"] }, { force: false, only: ["a", "b"] }), true);
+  assert.equal(canJoinRound({ force: false, only: ["a", "b"] }, { force: false, only: ["a"] }), false);
+  assert.equal(canJoinRound({ force: false, only: ["a"] }, { force: false, only: ["b"] }), false);
+});
+
+// --------------------------------------------------------------------------- //
+// Prefix order
+// 前缀顺序
+// --------------------------------------------------------------------------- //
+
+test("a remembered prefix is tried first, exactly once", () => {
+  const canonical = ["/api/v1", "/api"];
+  assert.deepEqual(prefixCandidates("/api", canonical), ["/api", "/api/v1"]);
+  assert.deepEqual(prefixCandidates("/api/v1", canonical), ["/api/v1", "/api"]);
+  assert.deepEqual(prefixCandidates(null, canonical), canonical);
+  // A remembered prefix that is no longer a candidate (config change, downgrade) must
+  // not be tried at all.
+  //
+  // 已不再是候选的旧前缀（配置变更、降级）绝不能再去试。
+  assert.deepEqual(prefixCandidates("/v2", canonical), canonical);
+});
+
+// --------------------------------------------------------------------------- //
+// Card -> refs
+// --------------------------------------------------------------------------- //
+
+test("refs keep upstream order, skip id-less cards and carry the fingerprint", async () => {
+  const cards = [
+    { id: "b", openai: { root: "/models/b", owned_by: "vllm" }, info: { updated_at: 2 } },
+    { nope: true },
+    { id: "a", openai: { root: "/models/a", owned_by: "vllm" }, info: { updated_at: 1 } },
+  ];
+  const refs = await refsFromCards(cards);
+  assert.deepEqual(
+    refs.map(([id]) => id),
+    ["b", "a"],
+  );
+  for (const [, fingerprint] of refs) assert.match(fingerprint, /^[0-9a-f]{16}$/);
+  // Different engine identity, different fingerprint: this is what makes a swapped
+  // engine re-probe even though the id never changed.
+  //
+  // 引擎标识不同则指纹不同：这正是"换了引擎、id 没变"也会重探的原因。
+  assert.notEqual(refs[0][1], refs[1][1]);
+  assert.deepEqual(await refsFromCards([]), []);
+});
+
+// --------------------------------------------------------------------------- //
+// TTL cache (the coordinator's settings read)
+// --------------------------------------------------------------------------- //
+
+test("the TTL cache loads once per window and serves the rest from memory", async () => {
+  let clock = 1_000;
+  let loads = 0;
+  const cached = createTtlCache(
+    async () => {
+      loads += 1;
+      return `v${loads}`;
+    },
+    100,
+    () => clock,
+  );
+
+  assert.equal(await cached(), "v1");
+  assert.equal(loads, 1);
+
+  clock += 99;
+  assert.equal(await cached(), "v1");
+  assert.equal(loads, 1, "a hit inside the window must not reload");
+
+  clock += 1;
+  assert.equal(await cached(), "v2");
+  assert.equal(loads, 2, "the window expiring must reload");
+});
+
+test("concurrent callers share one in-flight load", async () => {
+  let loads = 0;
+  let release: (() => void) | null = null;
+  const cached = createTtlCache(
+    async () => {
+      loads += 1;
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return "value";
+    },
+    1_000,
+    () => 0,
+  );
+
+  const first = cached();
+  const second = cached();
+  assert.equal(loads, 1, "the second call must join the first, not start another");
+  release?.();
+  assert.deepEqual(await Promise.all([first, second]), ["value", "value"]);
+  assert.equal(loads, 1);
+});
+
+test("a failing loader is never cached, so the next call retries", async () => {
+  let loads = 0;
+  let clock = 0;
+  const cached = createTtlCache(
+    async () => {
+      loads += 1;
+      if (loads === 1) throw new Error("transient");
+      return "ok";
+    },
+    100,
+    () => clock,
+  );
+
+  await assert.rejects(() => cached(), /transient/);
+  clock += 1; // far inside the window: a cached failure would be served from here
+  assert.equal(await cached(), "ok");
+  assert.equal(loads, 2);
+});

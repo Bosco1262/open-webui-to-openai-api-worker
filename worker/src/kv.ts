@@ -5,19 +5,20 @@
  * the hot proxy path are minimized (one API-key lookup per request) and the
  * session is cached in the instance for 60s so management writes don't force
  * repeated KV reads. Feature-specific storage lives beside it: the `last_used`
- * write throttle in touch.ts and the reasoning-effort settings & cache in
- * reasoning.ts, both reusing the instance-cache primitives exported here.
+ * write throttle in touch.ts, the model-probe settings in probeSettings.ts, and the
+ * probe facts themselves in the Durable Object (probeStore.ts). The first two reuse
+ * the instance-cache primitives exported here.
  *
  * KV 数据层：通用持久化原语。
  *
  * Worker 持久化的所有数据都存放在单一 KV 命名空间中。热代理路径上的读取被
  * 压到最低（每次请求仅 1 次 API Key 查询），session 在实例内缓存 60 秒，
  * 管理端写入不会强制触发重复的 KV 读取。各功能的存储逻辑分布在旁边：
- * `last_used` 写入节流在 touch.ts，思考挡位设置与缓存在 reasoning.ts，
- * 两者均复用此处导出的实例缓存原语。
+ * `last_used` 写入节流在 touch.ts，模型探测设置在 probeSettings.ts，而探测事实本身
+ * 存放在 Durable Object 里（probeStore.ts）。前两者复用此处导出的实例缓存原语。
  */
 
-import type { ApiKeyMeta, Env, PasswordHash, StoredSession } from "./types";
+import type { ApiKeyMeta, Env, PasswordHash, StoredSession } from "./types.ts";
 
 /** KV key constants. */
 /** KV 键名常量。 */
@@ -70,6 +71,43 @@ export function apiKeyKVKey(key: string): string {
   return K_API_KEY_PREFIX + key;
 }
 
+/**
+ * Read a JSON value from KV, treating anything unparseable as absent.
+ *
+ * `KV.get(key, "json")` does NOT mean "parse this as JSON and swallow the error":
+ * Cloudflare throws on malformed JSON, so a hand-edited, truncated or foreign value
+ * used to take the whole request down with it (an unparseable `session` made every
+ * `/v1/*` request fail, and it was not even repairable from the console). Every read
+ * of a value this Worker parses therefore goes through here.
+ *
+ * The value is fetched as TEXT and parsed locally, deliberately: catching the error
+ * from `type: "json"` instead would also swallow a genuine KV outage (an unreachable
+ * namespace would look exactly like "this key does not exist"), which would report a
+ * transport failure as "invalid API key" or "no session imported". Only a value we
+ * cannot parse degrades here; a failing read still propagates.
+ *
+ * 读取 KV 中的 JSON 值，任何解析不了的内容都按"不存在"处理。
+ *
+ * `KV.get(key, "json")` **不是**"解析成 JSON 并吞掉错误"：Cloudflare 在 JSON 损坏时会
+ * 抛出，因此一条被手改过、被截断或来自外部的值会把整个请求一起带走（一个解析不了的
+ * `session` 会让每个 `/v1/*` 请求都失败，而且从控制台都修不回来）。因此本 Worker 凡是
+ * 要解析的读取都走这里。
+ *
+ * 刻意按**文本**读取后在本地解析：若改为吞掉 `type: "json"` 的报错，就会连真正的 KV
+ * 故障一起吞掉（一个读不到的命名空间会和"这个键不存在"长得一模一样），从而把传输层故障
+ * 报成"API Key 无效"或"尚未导入 session"。这里只有"解析不了"才退化为不存在；读取失败
+ * 依然向上抛出。
+ */
+export async function readKvJson<T>(kv: KVNamespace, key: string): Promise<T | null> {
+  const raw = await kv.get(key);
+  if (raw === null || raw === undefined) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
 // --------------------------------------------------------------------------- //
 // Base64url helpers
 // Base64url 辅助函数
@@ -104,7 +142,7 @@ export function randomBytes(n: number): Uint8Array {
 
 // Random base64url string of n random bytes (n*8 bits of entropy).
 // n 个随机字节的 base64url 随机串（n*8 位熵）。
-export function randomBase64Url(n: number): string {
+function randomBase64Url(n: number): string {
   return bytesToBase64Url(randomBytes(n));
 }
 
@@ -118,7 +156,7 @@ export function randomBase64Url(n: number): string {
 export async function getSession(env: Env): Promise<StoredSession | null> {
   const cached = cacheGet<StoredSession>(K_SESSION);
   if (cached) return cached;
-  const raw = await env.KV.get<StoredSession>(K_SESSION, "json");
+  const raw = await readKvJson<StoredSession>(env.KV, K_SESSION);
   if (!raw) return null;
   cacheSet(K_SESSION, raw);
   return raw;
@@ -142,7 +180,7 @@ export async function deleteSession(env: Env): Promise<void> {
 // O(1) lookup: the key plaintext is the KV key name.
 // O(1) 查询：Key 明文即 KV 键名。
 export async function getApiKeyMeta(env: Env, key: string): Promise<ApiKeyMeta | null> {
-  return env.KV.get<ApiKeyMeta>(apiKeyKVKey(key), "json");
+  return readKvJson<ApiKeyMeta>(env.KV, apiKeyKVKey(key));
 }
 
 export async function putApiKey(env: Env, key: string, meta: ApiKeyMeta): Promise<void> {
@@ -163,7 +201,7 @@ export async function listApiKeys(
   do {
     const page = await env.KV.list({ prefix: K_API_KEY_PREFIX, cursor });
     for (const item of page.keys) {
-      const meta = await env.KV.get<ApiKeyMeta>(item.name, "json");
+      const meta = await readKvJson<ApiKeyMeta>(env.KV, item.name);
       if (meta) out.push({ key: item.name.slice(K_API_KEY_PREFIX.length), meta });
     }
     cursor = page.list_complete ? undefined : page.cursor;
@@ -184,7 +222,7 @@ export async function listApiKeys(
 // --------------------------------------------------------------------------- //
 
 export async function getPasswordHash(env: Env): Promise<PasswordHash | null> {
-  return env.KV.get<PasswordHash>(K_PASSWORD_HASH, "json");
+  return readKvJson<PasswordHash>(env.KV, K_PASSWORD_HASH);
 }
 
 export async function setPasswordHash(env: Env, ph: PasswordHash): Promise<void> {

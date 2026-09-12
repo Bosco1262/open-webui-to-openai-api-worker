@@ -294,6 +294,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
   .table tr:last-child td { border-bottom: none; }
   .table .mono { font-family: var(--mono); font-size: 12px; }
   .table .empty { text-align: center; color: var(--text-1); padding: 22px !important; }
+  /* Probe facts: one chip per capability, plus the parameters the engine accepted. */
+  /* 探测事实：每个能力一个 chip，以及引擎未拒绝的请求参数。 */
+  .mp-cap { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; margin: 0 4px 3px 0; white-space: nowrap; }
+  .mp-cap.on { background: rgba(34, 197, 94, 0.14); color: #86efac; }
+  .mp-cap.off { background: rgba(239, 68, 68, 0.14); color: #fca5a5; }
+  .mp-params { font-family: var(--mono); font-size: 11.5px; color: var(--text-1); line-height: 1.65; word-break: break-word; max-width: 260px; }
 
   .banner { border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-top: 14px; line-height: 1.5; display: none; }
   .banner.ok { display: block; background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.25); color: #86efac; }
@@ -586,82 +592,94 @@ export const ADMIN_UI = `<!DOCTYPE html>
           </div>
 
           <div class="card">
-            <h3><span class="ic">▸</span> <span data-i18n="rs.title">思考挡位设置</span></h3>
-            <div class="desc" data-i18n="rs.desc">通过向上游服务端提交特殊字段获取模型支持的思考挡位，并在 /v1/models 中以 reasoning 字段透出。</div>
+            <h3><span class="ic">▸</span> <span data-i18n="mp.title">模型探测</span></h3>
+            <div class="desc" data-i18n="mp.desc">逐模型探测上游引擎真正接受什么：每个思考挡位都用真实请求实证，视觉 / 函数调用 / 结构化输出等能力同样来自引擎。结果体现在 /v1/models 的 capabilities、supported_parameters、reasoning 与 architecture。</div>
 
             <div class="setting-row" style="margin-bottom:12px;">
               <div class="setting-info">
-                <div class="setting-label" data-i18n="rs.enabled_label">返回思考挡位</div>
-                <div class="setting-hint" data-i18n="rs.enabled_hint">关闭后不发起探测，也不会在 /v1/models 中返回 reasoning 字段。</div>
+                <div class="setting-label" data-i18n="mp.enabled_label">启用模型探测</div>
+                <div class="setting-hint" data-i18n="mp.enabled_hint">关闭后不发起探测，也不会在 /v1/models 中返回 reasoning 字段。</div>
               </div>
-              <select id="rs-enabled-select" style="width:180px;" onchange="saveReasoningEnabled(this.value)">
-                <option value="on" data-i18n="rs.on">开启</option>
-                <option value="off" data-i18n="rs.off">关闭</option>
+              <select id="mp-enabled-select" style="width:180px;" onchange="saveProbeEnabled(this.value)">
+                <option value="on" data-i18n="mp.on">开启</option>
+                <option value="off" data-i18n="mp.off">关闭</option>
               </select>
             </div>
 
-            <div id="rs-detail" class="collapse"><div>
+            <div id="mp-detail" class="collapse"><div>
               <div class="setting-row" style="margin-bottom:12px;">
                 <div class="setting-info">
-                  <div class="setting-label" data-i18n="rs.refresh_label">自动刷新</div>
-                  <div class="setting-hint" data-i18n="rs.refresh_hint">自动重探的间隔时长。关闭后仅可通过点击"立即探测"按钮或使用客户端调用 /v1/models 时触发刷新。</div>
+                  <div class="setting-label" data-i18n="mp.refresh_label">每轮子请求预算</div>
+                  <div class="setting-hint" data-i18n="mp.refresh_hint">单轮探测最多消耗的上游子请求数。免费层每次调用上限 50，付费层 10,000；预算用完时协调者会用自身 alarm 继续，不需要客户端再触发。</div>
                 </div>
-                <select id="rs-refresh-select" style="width:180px;" onchange="saveReasoningRefresh(this.value)"></select>
+                <select id="mp-budget-select" style="width:180px;" onchange="saveProbeBudget(this.value)"></select>
               </div>
 
               <div class="setting-row" style="margin-bottom:12px;">
                 <div style="flex:1; min-width:300px;">
                   <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;">
                     <div class="setting-info">
-                      <div class="setting-label" data-i18n="rs.params_title">思考挡位探测参数</div>
-                      <div class="setting-hint" data-i18n="rs.params_hint">此参数设置作用于所有探测。</div>
+                      <div class="setting-label" data-i18n="mp.params_title">探测参数</div>
+                      <div class="setting-hint" data-i18n="mp.params_hint">此参数设置作用于所有探测。</div>
                     </div>
-                    <button class="btn btn-primary" style="width:auto; flex:none;" onclick="saveReasoningSettings()" data-i18n="rs.save">保存</button>
+                    <button class="btn btn-primary" style="width:auto; flex:none;" onclick="saveProbeSettings()" data-i18n="mp.save">保存</button>
                   </div>
                   <div style="display:flex; flex-direction:column; gap:12px; margin-top:14px;">
                     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
                       <div class="setting-info" style="flex:1;">
-                        <div class="setting-label" data-i18n="rs.concurrency_label">探测并发数</div>
-                        <div class="setting-hint" data-i18n="rs.concurrency_hint">同时探测的模型数量（1–8）。值越大探测越快，但更容易触及子请求上限。</div>
+                        <div class="setting-label" data-i18n="mp.budget_label">自定义预算</div>
+                        <div class="setting-hint" data-i18n="mp.budget_hint">直接填写预算数值（4–9000）。一个模型典型消耗约 10 个子请求，最坏约 20 个。</div>
                       </div>
-                      <input id="rs-concurrency" type="number" min="1" max="8" style="width:130px; flex:none;" placeholder="4" />
+                      <input id="mp-budget" type="number" min="4" max="9000" style="width:130px; flex:none;" placeholder="40" />
                     </div>
                     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
                       <div class="setting-info" style="flex:1;">
-                        <div class="setting-label" data-i18n="rs.timeout_label">单模型超时</div>
-                        <div class="setting-hint" data-i18n="rs.timeout_hint">每个模型探测请求的最长等待时间（1–120 秒）。</div>
+                        <div class="setting-label" data-i18n="mp.timeout_label">单模型超时</div>
+                        <div class="setting-hint" data-i18n="mp.timeout_hint">每个模型探测请求的最长等待时间（1–120 秒）。</div>
                       </div>
-                      <input id="rs-timeout" type="number" min="1" max="120" style="width:130px; flex:none;" placeholder="30" />
+                      <input id="mp-timeout" type="number" min="1" max="120" style="width:130px; flex:none;" placeholder="30" />
                     </div>
                     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
                       <div class="setting-info" style="flex:1;">
-                        <div class="setting-label" data-i18n="rs.wait_label">等待时长</div>
-                        <div class="setting-hint" data-i18n="rs.wait_hint">/v1/models 最多等待缺失模型探测完成的时长（0–30 秒，0 为不等待）。</div>
+                        <div class="setting-label" data-i18n="mp.wait_label">等待时长</div>
+                        <div class="setting-hint" data-i18n="mp.wait_hint">/v1/models 最多等待缺失模型探测完成的时长（0–30 秒，0 为不等待）。</div>
                       </div>
-                      <input id="rs-wait" type="number" min="0" max="30" style="width:130px; flex:none;" placeholder="5" />
+                      <input id="mp-wait" type="number" min="0" max="30" style="width:130px; flex:none;" placeholder="5" />
+                    </div>
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
+                      <div class="setting-info" style="flex:1;">
+                        <div class="setting-label" data-i18n="mp.expose_label">实例元信息</div>
+                        <div class="setting-hint" data-i18n="mp.expose_hint">在 /v1/models 信封中输出上游部署的 name / version / features 与共享能力模板（x_open_webui）。</div>
+                      </div>
+                      <select id="mp-expose-select" style="width:130px; flex:none;" onchange="saveProbeExpose(this.value)">
+                        <option value="on" data-i18n="mp.on">开启</option>
+                        <option value="off" data-i18n="mp.off">关闭</option>
+                      </select>
                     </div>
                   </div>
                 </div>
               </div>
 
-              <div class="banner" id="reasoning-banner"></div>
+              <div class="banner" id="mp-banner"></div>
 
               <div class="setting-row" style="display:block;">
                 <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; margin-bottom:12px;">
                   <div class="setting-info">
-                    <div class="setting-label" data-i18n="rs.cache_title">已缓存的模型及其思考挡位</div>
-                    <div class="setting-hint" data-i18n="rs.cache_hint">列出已探测的模型及其接受的思考挡位。「不可探测」表示上游未校验探测值；「已过期」表示超过自动刷新时长，将在下次 /v1/models 调用时重探。</div>
+                    <div class="setting-label" data-i18n="mp.cache_title">已缓存的模型及其探测结果</div>
+                    <div class="setting-hint" data-i18n="mp.cache_hint">列出已探测的模型与状态：正常（结论完整）、部分结论（有请求未得出答案，会按退避重试）、不可探测（上游从不校验该字段）、失败待重试。能力与最后错误显示在挡位下方。</div>
                   </div>
-                  <button class="btn btn-ghost" style="width:auto; flex:none;" onclick="refreshReasoning()" data-i18n="rs.refresh">立即探测</button>
+                  <button class="btn btn-ghost" style="width:auto; flex:none;" onclick="refreshProbe()" data-i18n="mp.refresh">立即探测</button>
                 </div>
                 <table class="table">
                   <thead><tr>
-                    <th data-i18n="rs.th_model">模型</th>
-                    <th data-i18n="rs.th_efforts">支持挡位</th>
-                    <th data-i18n="rs.th_probed">探测时间</th>
-                    <th data-i18n="rs.th_status">状态</th>
+                    <th data-i18n="mp.th_model">模型</th>
+                    <th data-i18n="mp.th_efforts">支持挡位</th>
+                    <th data-i18n="mp.th_caps">能力字段</th>
+                    <th data-i18n="mp.th_params">支持参数</th>
+                    <th data-i18n="mp.th_probed">探测时间</th>
+                    <th data-i18n="mp.th_status">状态</th>
                   </tr></thead>
-                  <tbody id="reasoning-tbody"><tr><td colspan="4" class="empty" data-i18n="common.loading">加载中…</td></tr></tbody>
+                  <tbody id="mp-tbody"><tr><td colspan="6" class="empty" data-i18n="common.loading">加载中…</td></tr></tbody>
                 </table>
               </div>
             </div></div>
@@ -870,7 +888,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'up.test_ok': '直连连通（前缀 {prefix}，HTTP {status}）',
       'up.test_http': '上游返回 HTTP {status}（前缀 {prefix}），凭证可能已过期',
       'up.test_network': '无法连接上游：{error}',
-      'up.test_404': '所有候选前缀均返回 404，请确认地址指向 Open WebUI',
+      'up.test_not_models': '所有候选前缀都没有返回模型列表（可能是被前端页面接管或状态码异常），请确认地址指向 Open WebUI',
       'err.need_setup': '管理员密码尚未设置，请先完成首次设置。',
       'err.too_many': '登录失败次数过多，请稍后重试。',
       'err.wrong_password': '密码错误。',
@@ -947,44 +965,50 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.touch_3h': '每三小时',
       'set.touch_hourly': '每小时',
       'set.touch_30m': '每三十分钟',
-      'set.touch_10m': '每十分钟',
       'msg.touch_saved': '使用记录粒度已保存',
       'err.settings_invalid': '无效的设置值。',
-      'rs.title': '思考挡位设置',
-      'rs.desc': '通过向上游服务端提交特殊字段获取模型支持的思考挡位，并在 /v1/models 中以 reasoning 字段透出。',
-      'rs.enabled_label': '返回思考挡位',
-      'rs.enabled_hint': '关闭后不发起探测，也不会在 /v1/models 中返回 reasoning 字段。',
-      'rs.on': '开启',
-      'rs.off': '关闭',
-      'rs.refresh_label': '自动刷新',
-      'rs.refresh_hint': '自动重探的间隔时长。关闭后仅可通过点击"立即探测"按钮或使用客户端调用 /v1/models 时触发刷新。',
-      'rs.refresh_off': '关闭自动刷新',
-      'rs.params_title': '思考挡位探测参数',
-      'rs.params_hint': '此参数设置作用于所有探测。',
-      'rs.cache_title': '已缓存的模型及其思考挡位',
-      'rs.cache_hint': '列出已探测的模型及其接受的思考挡位。「不可探测」表示上游未校验探测值；「已过期」表示超过自动刷新时长，将在下次 /v1/models 调用时重探。',
-      'rs.concurrency_label': '探测并发数',
-      'rs.concurrency_hint': '同时探测的模型数量（1–8）。值越大探测越快，但更容易触及子请求上限。',
-      'rs.timeout_label': '单模型超时',
-      'rs.timeout_hint': '每个模型探测请求的最长等待时间（1–120 秒）。',
-      'rs.wait_label': '等待时长',
-      'rs.wait_hint': '/v1/models 最多等待缺失模型探测完成的时长（0–30 秒，0 为不等待）。',
-      'rs.save': '保存',
-      'rs.saved': '思考挡位设置已保存',
-      'rs.refresh': '立即探测',
-      'rs.refresh_done': '探测完成：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个',
-      'rs.refresh_auth': '探测中途凭证失效（HTTP 401/403），已中止：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个。请重新导入 Session',
-      'rs.th_model': '模型',
-      'rs.th_efforts': '支持挡位',
-      'rs.th_probed': '探测时间',
-      'rs.th_status': '状态',
-      'rs.empty': '暂无探测结果，点击「立即探测」开始',
-      'rs.unprobeable': '上游未校验，无法获知挡位',
-      'rs.st_fresh': '最新',
-      'rs.st_expired': '已过期，将自动重探',
-      'rs.st_unprobeable': '不可探测',
-      'err.reasoning_session_missing': '尚未导入 Session，无法探测。',
-      'err.reasoning_models_failed': '无法获取上游模型列表，请检查凭证或稍后重试。',
+      'mp.title': '模型探测',
+      'mp.desc': '逐模型探测上游引擎真正接受什么：每个思考挡位都用真实请求实证，视觉 / 函数调用 / 结构化输出等能力同样来自引擎。结果体现在 /v1/models 的 capabilities、supported_parameters、reasoning 与 architecture。',
+      'mp.enabled_label': '启用模型探测',
+      'mp.enabled_hint': '关闭后不发起任何探测，/v1/models 也不再输出探测得出的字段（capabilities、supported_parameters、reasoning、architecture）。',
+      'mp.on': '开启',
+      'mp.off': '关闭',
+      'mp.refresh_label': '每轮子请求预算',
+      'mp.refresh_hint': '单轮探测最多消耗的上游子请求数。免费层每次调用上限 50，付费层 10,000；预算用完时协调者会用自身 alarm 继续，不需要客户端再触发。',
+      'mp.params_title': '探测参数',
+      'mp.params_hint': '此参数设置作用于所有探测。',
+      'mp.cache_title': '已缓存的模型及其探测结果',
+      'mp.cache_hint': '列出已探测的模型与状态：正常（结论完整）、部分结论（有请求未得出答案，会按退避重试）、不可探测（上游从不校验该字段）、失败待重试。能力与最后错误显示在挡位下方。',
+      'mp.budget_label': '自定义预算',
+      'mp.budget_hint': '直接填写预算数值（4–9000）。一个模型典型消耗约 10 个子请求，最坏约 20 个。',
+      'mp.timeout_label': '单模型超时',
+      'mp.timeout_hint': '每个模型探测请求的最长等待时间（1–120 秒）。',
+      'mp.wait_label': '等待时长',
+      'mp.wait_hint': '/v1/models 最多等待缺失模型探测完成的时长（0–30 秒，0 为不等待）。',
+      'mp.save': '保存',
+      'mp.saved': '探测设置已保存',
+      'mp.refresh': '立即探测',
+      'mp.refresh_done': '探测完成：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个',
+      'mp.refresh_auth': '探测中途凭证失效（HTTP 401/403），已中止：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个。请重新导入 Session',
+      'mp.th_model': '模型',
+      'mp.th_efforts': '支持挡位',
+      'mp.th_probed': '探测时间',
+      'mp.th_status': '状态',
+      'mp.th_caps': '能力字段',
+      'mp.th_params': '支持参数',
+      'mp.empty': '暂无探测结果，点击「立即探测」开始',
+      'mp.unprobeable': '上游未校验，无法获知挡位',
+      'mp.st_unprobeable': '不可探测',
+      'mp.st_ok': '正常',
+      'mp.st_partial': '部分结论',
+      'mp.st_failed': '失败待重试',
+      'mp.budget_free': '免费层（40 子请求/轮）',
+      'mp.budget_paid': '付费层（2000 子请求/轮）',
+      'mp.reprobe': '重探',
+      'mp.expose_label': '实例元信息',
+      'mp.expose_hint': '在 /v1/models 信封中输出上游部署的 name / version / features 与共享能力模板（x_open_webui）。关闭后该键完全不出现。',
+      'err.probe_session_missing': '尚未导入 Session，无法探测。',
+      'err.probe_models_failed': '无法获取上游模型列表，请检查凭证或稍后重试。',
       'km.title': 'API Key 已生成',
       'km.note': '请立即复制保存，关闭后将无法再次查看完整 Key。',
       'pm.title': '修改管理密码',
@@ -1061,7 +1085,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'up.test_ok': 'Direct connection OK (prefix {prefix}, HTTP {status})',
       'up.test_http': 'Upstream returned HTTP {status} (prefix {prefix}); credentials may have expired',
       'up.test_network': 'Cannot connect to upstream: {error}',
-      'up.test_404': 'All candidate prefixes returned 404; please verify the URL points to Open WebUI',
+      'up.test_not_models': 'No candidate prefix returned a model list (the page may be served by the SPA, or the status code was unexpected); please verify the URL points to Open WebUI',
       'err.need_setup': 'Admin password is not set. Complete the first-time setup first.',
       'err.too_many': 'Too many failed attempts. Please try again later.',
       'err.wrong_password': 'Incorrect password.',
@@ -1138,44 +1162,50 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.touch_3h': 'Every 3 hours',
       'set.touch_hourly': 'Hourly',
       'set.touch_30m': 'Every 30 minutes',
-      'set.touch_10m': 'Every 10 minutes',
       'msg.touch_saved': 'Tracking granularity saved',
       'err.settings_invalid': 'Invalid setting value.',
-      'rs.title': 'Reasoning Settings',
-      'rs.desc': 'Obtains the reasoning levels each model supports by submitting a special field to the upstream server, and serves them as the reasoning field on /v1/models.',
-      'rs.enabled_label': 'Serve Reasoning Efforts',
-      'rs.enabled_hint': 'When off, no probes are sent and the reasoning field is not returned on /v1/models.',
-      'rs.on': 'On',
-      'rs.off': 'Off',
-      'rs.refresh_label': 'Auto Refresh',
-      'rs.refresh_hint': 'Interval between automatic re-probes. When off, refresh only happens via the "Probe Now" button or when clients call /v1/models.',
-      'rs.refresh_off': 'Auto refresh off',
-      'rs.params_title': 'Probe Parameters',
-      'rs.params_hint': 'These parameters apply to all probes.',
-      'rs.cache_title': 'Cached Models & Reasoning Levels',
-      'rs.cache_hint': 'Lists probed models and their accepted reasoning levels. "Unprobeable" means the upstream accepted the probe without validating; "Expired" means the auto-refresh interval has passed, re-probing happens on the next /v1/models call.',
-      'rs.concurrency_label': 'Probe Concurrency',
-      'rs.concurrency_hint': 'Models probed in parallel (1–8). Higher values probe faster but hit sub-request limits sooner.',
-      'rs.timeout_label': 'Per-model Timeout',
-      'rs.timeout_hint': 'Maximum wait per probe request (1–120 seconds).',
-      'rs.wait_label': 'Wait Time',
-      'rs.wait_hint': 'How long /v1/models may wait for a missing-models probe (0–30 seconds; 0 = never wait).',
-      'rs.save': 'Save',
-      'rs.saved': 'Reasoning settings saved',
-      'rs.refresh': 'Probe Now',
-      'rs.refresh_done': 'Probe finished: {probed} probed, {unknown} unprobeable, {failed} failed',
-      'rs.refresh_auth': 'Credentials expired mid-probe (HTTP 401/403); aborted: {probed} probed, {unknown} unprobeable, {failed} failed. Please re-import the session',
-      'rs.th_model': 'Model',
-      'rs.th_efforts': 'Supported Efforts',
-      'rs.th_probed': 'Probed At',
-      'rs.th_status': 'Status',
-      'rs.empty': 'No probe results yet — click "Probe Now" to start',
-      'rs.unprobeable': 'Upstream accepted the probe without validating',
-      'rs.st_fresh': 'Fresh',
-      'rs.st_expired': 'Expired, will re-probe',
-      'rs.st_unprobeable': 'Unprobeable',
-      'err.reasoning_session_missing': 'No session imported; cannot probe.',
-      'err.reasoning_models_failed': 'Cannot fetch the upstream model list. Check credentials or retry later.',
+      'mp.title': 'Model Probe',
+      'mp.desc': 'Establishes what each model really accepts: every reasoning level is verified with a real request, and vision / function calling / structured outputs come from the engine too. The results appear on /v1/models as capabilities, supported_parameters, reasoning and architecture.',
+      'mp.enabled_label': 'Enable Model Probe',
+      'mp.enabled_hint': 'When off, no probes are sent and /v1/models carries no probe-derived fields (capabilities, supported_parameters, reasoning, architecture).',
+      'mp.on': 'On',
+      'mp.off': 'Off',
+      'mp.refresh_label': 'Subrequest Budget Per Round',
+      'mp.refresh_hint': 'Upstream subrequests one round may spend. The free plan allows 50 per invocation, the paid plan 10,000; when the budget runs out the coordinator continues with its own alarm, so no client has to trigger it again.',
+      'mp.params_title': 'Probe Parameters',
+      'mp.params_hint': 'These parameters apply to all probes.',
+      'mp.cache_title': 'Cached Models & Probe Results',
+      'mp.cache_hint': 'Lists each probed model with its status: OK (conclusive), Partial (some request left the answer open, retried with backoff), Unprobeable (the upstream never validates the field) or Failed. Capabilities and the last error appear under the levels.',
+      'mp.budget_label': 'Custom Budget',
+      'mp.budget_hint': 'The budget itself (4–9000). One model typically costs about 10 subrequests, 20 in the worst case.',
+      'mp.timeout_label': 'Per-model Timeout',
+      'mp.timeout_hint': 'Maximum wait per probe request (1–120 seconds).',
+      'mp.wait_label': 'Wait Time',
+      'mp.wait_hint': 'How long /v1/models may wait for a missing-models probe (0–30 seconds; 0 = never wait).',
+      'mp.save': 'Save',
+      'mp.saved': 'Probe settings saved',
+      'mp.refresh': 'Probe Now',
+      'mp.refresh_done': 'Probe finished: {probed} probed, {unknown} unprobeable, {failed} failed',
+      'mp.refresh_auth': 'Credentials expired mid-probe (HTTP 401/403); aborted: {probed} probed, {unknown} unprobeable, {failed} failed. Please re-import the session',
+      'mp.th_model': 'Model',
+      'mp.th_efforts': 'Supported Efforts',
+      'mp.th_probed': 'Probed At',
+      'mp.th_status': 'Status',
+      'mp.th_caps': 'Capabilities',
+      'mp.th_params': 'Supported Parameters',
+      'mp.empty': 'No probe results yet — click "Probe Now" to start',
+      'mp.unprobeable': 'Upstream accepted the probe without validating',
+      'mp.st_unprobeable': 'Unprobeable',
+      'mp.st_ok': 'OK',
+      'mp.st_partial': 'Partial',
+      'mp.st_failed': 'Failed, will retry',
+      'mp.budget_free': 'Free plan (40 subrequests/round)',
+      'mp.budget_paid': 'Paid plan (2000 subrequests/round)',
+      'mp.reprobe': 'Re-probe',
+      'mp.expose_label': 'Instance Metadata',
+      'mp.expose_hint': 'Serves the upstream deployment name / version / features and the shared capability template as x_open_webui on the /v1/models envelope. When off, the key is absent entirely.',
+      'err.probe_session_missing': 'No session imported; cannot probe.',
+      'err.probe_models_failed': 'Cannot fetch the upstream model list. Check credentials or retry later.',
       'km.title': 'API Key Generated',
       'km.note': 'Copy and store it now — the full key cannot be viewed again after closing.',
       'pm.title': 'Change Admin Password',
@@ -1294,7 +1324,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     if (_loginMsgRender) setLoginMsg(_loginMsgRender);
     loadStatus();
     loadKeys();
-    loadReasoning();
+    loadProbe();
     toast(t('set.lang_saved'), 'ok');
   }
 
@@ -1399,7 +1429,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     switchPage('dashboard');
     loadStatus();
     loadKeys();
-    loadReasoning();
+    loadProbe();
   }
 
   // ---------- page switching ----------
@@ -1564,8 +1594,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     '21600': 'set.touch_6h',
     '10800': 'set.touch_3h',
     '3600': 'set.touch_hourly',
-    '1800': 'set.touch_30m',
-    '600': 'set.touch_10m'
+    '1800': 'set.touch_30m'
   };
 
   function fillTouchSelect(current, options) {
@@ -1592,138 +1621,179 @@ export const ADMIN_UI = `<!DOCTYPE html>
       });
   }
 
-  // ---------- upstream: reasoning-effort probe ----------
-  // ---------- 上游：思考挡位探测 ----------
-  // Auto-refresh reuses the tracking-granularity options plus "off"; only the
-  // display labels live here.
+  // ---------- upstream: model probe ----------
+  // ---------- 上游：模型探测 ----------
+  // The select next to the switch picks the per-round subrequest budget; the presets
+  // spell out their platform ceiling (the free plan allows 50 subrequests per
+  // invocation, and one model typically costs about 10 of them).
   //
-  // 自动刷新复用记录粒度的挡位并额外提供"关闭"项；仅展示文案保留在本端。
-  var RS_REFRESH_LABELS = {
-    '0': 'rs.refresh_off',
-    '86400': 'set.touch_daily',
-    '21600': 'set.touch_6h',
-    '10800': 'set.touch_3h',
-    '3600': 'set.touch_hourly',
-    '1800': 'set.touch_30m',
-    '600': 'set.touch_10m'
-  };
+  // 开关旁的下拉框选择「每轮子请求预算」；预设写明各自的平台上限（免费层单次调用
+  // 上限 50 个子请求，而一个模型典型消耗约 10 个）。
+  var MP_BUDGET_LABELS = { '40': 'mp.budget_free', '2000': 'mp.budget_paid' };
+  var MP_BUDGET_VALUES = [40, 2000];
 
-  function fillRsRefreshSelect(current, options) {
-    var sel = $('rs-refresh-select');
+  function fillBudgetSelect(current) {
+    var sel = $('mp-budget-select');
     if (!sel) return;
     sel.innerHTML = '';
-    var opts = options && options.length ? options : [0, 86400, 21600, 10800, 3600, 1800, 600];
-    for (var i = 0; i < opts.length; i++) {
-      var value = String(opts[i]);
+    for (var i = 0; i < MP_BUDGET_VALUES.length; i++) {
       var option = document.createElement('option');
-      option.value = value;
-      option.textContent = t(RS_REFRESH_LABELS[value] || value);
+      option.value = String(MP_BUDGET_VALUES[i]);
+      option.textContent = t(MP_BUDGET_LABELS[String(MP_BUDGET_VALUES[i])]);
       sel.appendChild(option);
     }
-    sel.value = String(current);
+    sel.value = Number(current) >= 1000 ? '2000' : '40';
   }
 
-  function renderReasoningTable(models) {
-    var tbody = $('reasoning-tbody');
+  // Four states, because "the upstream never validates the field" (unprobeable) and
+  // "the probe could not finish" (partial/failed) mean very different things.
+  //
+  // 四种状态： "上游从不校验该字段"（unprobeable）与 "探测没能完成"（partial/failed）
+  // 含义完全不同。
+  function probeStatusBadge(status) {
+    if (status === 'ok') return badge('ok', t('mp.st_ok'));
+    if (status === 'partial') return badge('warn', t('mp.st_partial'));
+    if (status === 'unprobeable') return badge('gray', t('mp.st_unprobeable'));
+    return badge('warn', t('mp.st_failed'));
+  }
+
+  // A chip per established capability. Both values are conclusions: "vision: false"
+  // disproved by the engine is as informative as "true", so neither is hidden -- the
+  // previous version showed only the true ones, which made "nothing established yet"
+  // look identical to "vision was disproved".
+  //
+  // 每个已确立的能力一个 chip。两种取值都是结论：引擎证伪的 "vision: false" 与
+  // "true" 同样有价值，因此两者都不隐藏——旧版本只显示 true，使"尚未探到能力"与
+  // "视觉已被证伪"看起来一模一样。
+  function renderCaps(caps) {
+    var keys = caps ? Object.keys(caps) : [];
+    if (!keys.length) return '<span style="color:var(--text-1)">—</span>';
+    return keys.map(function (k) {
+      var on = !!caps[k];
+      return '<span class="mp-cap ' + (on ? 'on' : 'off') + '">' +
+        (on ? '✓' : '✗') + ' ' + esc(k) + '</span>';
+    }).join('');
+  }
+
+  // The request parameters the engine did not reject. Rendered verbatim: this list is
+  // what explains why a capability or an effort level is missing elsewhere.
+  //
+  // 引擎未拒绝的请求参数。原样渲染：它正是"为什么某能力或挡位不在其它列里"的解释。
+  function renderParams(params) {
+    if (!params || !params.length) return '<span style="color:var(--text-1)">—</span>';
+    return '<div class="mp-params">' + esc(params.join(', ')) + '</div>';
+  }
+
+  function renderProbeTable(models) {
+    var tbody = $('mp-tbody');
     if (!tbody) return;
     if (!models || !models.length) {
-      tbody.innerHTML = '<tr><td colspan="4" class="empty">' + t('rs.empty') + '</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">' + t('mp.empty') + '</td></tr>';
       return;
     }
     tbody.innerHTML = models.map(function (m) {
-      var efforts = m.unprobeable
-        ? '<span style="color:var(--text-1)">' + t('rs.unprobeable') + '</span>'
-        : esc((m.supported_efforts || []).join(', '));
+      var efforts = m.status === 'unprobeable'
+        ? '<span style="color:var(--text-1)">' + t('mp.unprobeable') + '</span>'
+        : esc((m.supported_efforts || []).join(', ') || '—');
+      if (m.last_error) {
+        efforts += '<div style="color:var(--text-1);font-size:12px;">' + esc(m.last_error) + '</div>';
+      }
       var probed = m.probed_at ? new Date(m.probed_at * 1000).toLocaleString() : '—';
-      var status = m.unprobeable
-        ? badge('gray', t('rs.st_unprobeable'))
-        : (m.expired ? badge('warn', t('rs.st_expired')) : badge('ok', t('rs.st_fresh')));
+      var reprobe = '<button class="btn btn-ghost" style="width:auto;flex:none;margin-left:8px;"' +
+        ' data-probe-model="' + esc(m.id) + '" onclick="probeOneModel(this)">' + t('mp.reprobe') + '</button>';
       return '<tr>' +
         '<td class="mono">' + esc(m.id) + '</td>' +
         '<td>' + efforts + '</td>' +
+        '<td>' + renderCaps(m.capabilities) + '</td>' +
+        '<td>' + renderParams(m.supported_parameters) + '</td>' +
         '<td>' + probed + '</td>' +
-        '<td>' + status + '</td>' +
+        '<td>' + probeStatusBadge(m.status) + reprobe + '</td>' +
         '</tr>';
     }).join('');
   }
 
-  // Last server-known settings; fallback for the immediate-save paths so
-  // toggling the switch never submits half-edited probe parameters.
+  // Last server-known settings; fallback for the immediate-save paths so toggling the
+  // switch never submits half-edited probe parameters.
   //
-  // 最近一次服务端设置的快照；立即保存路径的参数回退来源，保证切换开关
-  // 不会连带提交尚未保存完毕的探测参数。
-  var _rs = null;
+  // 最近一次服务端设置的快照；立即保存路径的参数回退来源，保证切换开关不会连带提交
+  // 尚未保存完毕的探测参数。
+  var _probeSettings = null;
 
-  // Build the settings payload: explicit overrides win, everything else comes
-  // from the inputs with the server-known values as fallback.
-  //
-  // 构建设置负载：显式覆盖值优先，其余取输入框，输入无效时回退服务端值。
-  function buildReasoningBody(enabled, refreshInterval) {
-    var base = _rs || { enabled: true, refreshInterval: 86400, concurrency: 4, timeout: 30, wait: 5 };
+  function buildProbeBody(enabled, budgetOverride, exposeOverride) {
+    var base = _probeSettings || { enabled: true, timeout: 30, wait: 5, budget: 40, exposeInstanceMeta: true };
     var numOr = function (id, fallback) {
-      var parsed = parseInt($(id).value, 10);
+      var el = $(id);
+      var parsed = el ? parseInt(el.value, 10) : NaN;
       return isNaN(parsed) ? fallback : parsed;
     };
     return {
       enabled: enabled !== undefined ? enabled : base.enabled,
-      refresh_interval: refreshInterval !== undefined ? refreshInterval : base.refreshInterval,
-      concurrency: numOr('rs-concurrency', base.concurrency),
-      timeout: numOr('rs-timeout', base.timeout),
-      wait: numOr('rs-wait', base.wait)
+      timeout: numOr('mp-timeout', base.timeout),
+      wait: numOr('mp-wait', base.wait),
+      budget: budgetOverride !== undefined ? budgetOverride : numOr('mp-budget', base.budget),
+      // An explicit override wins (the switch saves immediately); otherwise the loaded
+      // value is round-tripped so saving a parameter never resets it.
+      //
+      // 显式覆盖值优先（开关立即保存）；否则把读到的值原样回传，避免保存参数时把它重置。
+      expose_instance_meta: exposeOverride !== undefined ? exposeOverride : base.exposeInstanceMeta !== false
     };
   }
 
-  // Show/hide the detail rows (auto-refresh, probe parameters, cache table)
-  // when the feature switch changes; the .collapse class animates it.
-  //
-  // 功能开关变化时显示/隐藏下方详细配置（自动刷新、探测参数、缓存列表），
-  // .collapse 类提供过渡动画。
-  function toggleRsDetail(on) {
-    var el = $('rs-detail');
+  function toggleProbeDetail(on) {
+    var el = $('mp-detail');
     if (el) el.classList.toggle('open', on);
   }
 
-  // The feature switch saves immediately (mirrors the tracking-granularity
-  // select); on failure the whole panel is reloaded from the server.
-  //
-  // 功能开关立即保存（与「使用记录粒度」一致）；失败时从服务端整体恢复。
-  function saveReasoningEnabled(value) {
+  function saveProbeEnabled(value) {
     var on = value === 'on';
-    api('/admin/api/reasoning/settings', { method: 'POST', body: buildReasoningBody(on) })
+    api('/admin/api/probe/settings', { method: 'POST', body: buildProbeBody(on) })
       .then(function (data) {
-        _rs = data.settings;
-        toggleRsDetail(on);
-        toast(t('rs.saved'), 'ok');
+        _probeSettings = data.settings;
+        toggleProbeDetail(on);
+        toast(t('mp.saved'), 'ok');
       })
       .catch(function (err) {
         toast(etext(err.message), 'err');
-        loadReasoning(); // revert the select to the persisted value / 恢复为已保存的值
+        loadProbe(); // revert the select to the persisted value / 恢复为已保存的值
       });
   }
 
-  // Auto-refresh granularity also saves immediately.
-  // 自动刷新粒度同样立即保存。
-  function saveReasoningRefresh(value) {
-    var interval = parseInt(value, 10);
-    api('/admin/api/reasoning/settings', { method: 'POST', body: buildReasoningBody(undefined, interval) })
-      .then(function (data) { _rs = data.settings; toast(t('rs.saved'), 'ok'); })
+  // The budget preset also saves immediately, and mirrors into the custom input.
+  // 预算预设同样立即保存，并同步到自定义输入框。
+  function saveProbeBudget(value) {
+    var budget = parseInt(value, 10);
+    if ($('mp-budget') && !isNaN(budget)) $('mp-budget').value = String(budget);
+    api('/admin/api/probe/settings', { method: 'POST', body: buildProbeBody(undefined, budget) })
+      .then(function (data) { _probeSettings = data.settings; toast(t('mp.saved'), 'ok'); })
       .catch(function (err) {
         toast(etext(err.message), 'err');
-        loadReasoning(); // revert the select to the persisted value / 恢复为已保存的值
+        loadProbe(); // revert the select to the persisted value / 恢复为已保存的值
       });
   }
 
-  function loadReasoning() {
-    api('/admin/api/reasoning').then(function (data) {
-      if (!$('rs-enabled-select')) return;
-      _rs = data.settings;
-      $('rs-enabled-select').value = data.settings.enabled ? 'on' : 'off';
-      toggleRsDetail(data.settings.enabled);
-      fillRsRefreshSelect(data.settings.refreshInterval, data.refreshIntervalOptions);
-      $('rs-concurrency').value = String(data.settings.concurrency);
-      $('rs-timeout').value = String(data.settings.timeout);
-      $('rs-wait').value = String(data.settings.wait);
-      renderReasoningTable(data.models);
+  // The instance-metadata switch saves immediately, like the others.
+  // 实例元信息开关同样立即保存。
+  function saveProbeExpose(value) {
+    var on = value === 'on';
+    api('/admin/api/probe/settings', { method: 'POST', body: buildProbeBody(undefined, undefined, on) })
+      .then(function (data) { _probeSettings = data.settings; toast(t('mp.saved'), 'ok'); })
+      .catch(function (err) {
+        toast(etext(err.message), 'err');
+        loadProbe(); // revert the select to the persisted value / 恢复为已保存的值
+      });
+  }
+  function loadProbe() {
+    api('/admin/api/probe').then(function (data) {
+      if (!$('mp-enabled-select')) return;
+      _probeSettings = data.settings;
+      $('mp-enabled-select').value = data.settings.enabled ? 'on' : 'off';
+      toggleProbeDetail(data.settings.enabled);
+      fillBudgetSelect(data.settings.budget);
+      $('mp-budget').value = String(data.settings.budget);
+      if ($('mp-expose-select')) $('mp-expose-select').value = data.settings.exposeInstanceMeta === false ? 'off' : 'on';
+      $('mp-timeout').value = String(data.settings.timeout);
+      $('mp-wait').value = String(data.settings.wait);
+      renderProbeTable(data.models);
     }).catch(function (err) {
       // 401 is already handled by api(); skip to avoid duplicate toasts
       // 401 已由 api() 统一提示（仅会话过期时），此处跳过避免重复弹窗
@@ -1732,51 +1802,78 @@ export const ADMIN_UI = `<!DOCTYPE html>
     });
   }
 
-  function saveReasoningSettings() {
-    var concurrency = parseInt($('rs-concurrency').value, 10);
+  function saveProbeSettings() {
+    var budget = parseInt($('mp-budget').value, 10);
     // NB: do NOT name this "t" — it would shadow the global i18n function t().
     // 注意：不要命名为 "t"，否则会遮蔽全局的 i18n 翻译函数 t()。
-    var timeoutSec = parseInt($('rs-timeout').value, 10);
-    var waitSec = parseInt($('rs-wait').value, 10);
-    clearBanner('reasoning-banner');
+    var timeoutSec = parseInt($('mp-timeout').value, 10);
+    var waitSec = parseInt($('mp-wait').value, 10);
+    clearBanner('mp-banner');
     // Strict validation for the explicit Save: no silent fallbacks.
     // 显式「保存」走严格校验：不静默回退。
-    if (!_rs || isNaN(concurrency) || isNaN(timeoutSec) || isNaN(waitSec)) {
-      setBanner('reasoning-banner', 'err', function () { return etext('err.settings_invalid'); });
+    if (!_probeSettings || isNaN(budget) || isNaN(timeoutSec) || isNaN(waitSec)) {
+      setBanner('mp-banner', 'err', function () { return etext('err.settings_invalid'); });
       return;
     }
     var btn = event.target;
     setLoading(btn, true);
-    api('/admin/api/reasoning/settings', {
+    api('/admin/api/probe/settings', {
       method: 'POST',
-      body: { enabled: _rs.enabled, refresh_interval: _rs.refreshInterval, concurrency: concurrency, timeout: timeoutSec, wait: waitSec }
+      body: {
+        enabled: _probeSettings.enabled,
+        timeout: timeoutSec,
+        wait: waitSec,
+        budget: budget,
+        expose_instance_meta: _probeSettings.exposeInstanceMeta !== false
+      }
     })
       .then(function (data) {
-        _rs = data.settings;
-        toast(t('rs.saved'), 'ok');
-        loadReasoning(); // refresh expiry markers / 刷新列表过期标记
+        _probeSettings = data.settings;
+        toast(t('mp.saved'), 'ok');
+        loadProbe();
       })
-      .catch(function (err) { setBanner('reasoning-banner', 'err', function () { return etext(err.message); }); })
+      .catch(function (err) { setBanner('mp-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
   }
 
-  function refreshReasoning() {
+  // The round counters are four-way now, but the banner copy only has three slots;
+  // "partial" is folded into "failed" so the message stays truthful and short.
+  //
+  // 轮次计数现在是四态，而横幅文案只有三个占位；partial 折进 failed，既不撒谎也不
+  // 让文案变长。
+  function probeBannerParams(data) {
+    var stats = data.stats || data;
+    return {
+      probed: stats.ok || 0,
+      unknown: stats.unprobeable || 0,
+      failed: (stats.failed || 0) + (stats.partial || 0)
+    };
+  }
+
+  function refreshProbe(model) {
     var btn = event.target;
     setLoading(btn, true);
-    clearBanner('reasoning-banner');
-    api('/admin/api/reasoning/refresh', { method: 'POST' })
+    clearBanner('mp-banner');
+    api('/admin/api/probe/refresh', { method: 'POST', body: model ? { model: model } : {} })
       .then(function (data) {
-        setBanner('reasoning-banner', data.authExpired ? 'warn' : 'ok', function () {
-          return data.authExpired
-            ? tfmt('rs.refresh_auth', { probed: data.probed, unknown: data.unknown, failed: data.failed })
-            : tfmt('rs.refresh_done', { probed: data.probed, unknown: data.unknown, failed: data.failed });
+        var params = probeBannerParams(data);
+        setBanner('mp-banner', data.authExpired ? 'warn' : 'ok', function () {
+          return data.authExpired ? tfmt('mp.refresh_auth', params) : tfmt('mp.refresh_done', params);
         });
-        loadReasoning();
+        loadProbe();
       })
-      .catch(function (err) { setBanner('reasoning-banner', 'err', function () { return etext(err.message); }); })
+      .catch(function (err) { setBanner('mp-banner', 'err', function () { return etext(err.message); }); })
       .finally(function () { setLoading(btn, false); });
   }
 
+  // Per-model re-probe (row button); the id travels in a data attribute so quoting
+  // can never break the markup.
+  //
+  // 单模型重探（行内按钮）；id 走 data 属性，因此引号永远不会破坏标记。
+  function probeOneModel(btn) {
+    var model = btn && btn.getAttribute ? btn.getAttribute('data-probe-model') : '';
+    if (model) refreshProbe(model);
+  }
   // ---------- status ----------
   // ---------- 状态 ----------
   function badge(type, text) {

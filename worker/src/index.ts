@@ -14,12 +14,20 @@
  *   GET  /admin               管理界面（HTML）
  *   /admin/api/*              管理 REST API
  *   /v1/*                     OpenAI 兼容代理
+ *
+ * The Durable Object class is re-exported from here because Wrangler only looks for
+ * Durable Object classes on the entry module.
+ *
+ * Durable Object 类必须从入口模块再导出，因为 Wrangler 只在入口模块上查找
+ * Durable Object 类。
  */
 
-import { handleAdminApiRequest } from "./admin";
-import { handleV1Request } from "./proxy";
-import { ADMIN_UI } from "./ui";
-import type { Env } from "./types";
+import { handleAdminApiRequest } from "./admin.ts";
+import { handleV1Request } from "./proxy.ts";
+import { ADMIN_UI } from "./ui.ts";
+import type { Env } from "./types.ts";
+
+export { ModelProbeCoordinator } from "./probeCoordinator.ts";
 
 const VERSION = "1.0.0";
 
