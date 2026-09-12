@@ -322,4 +322,15 @@ export interface ProbeRoundStats {
   /** True when the budget ran out before every selected model was probed. */
   /** 预算耗尽、仍有选中的模型未探测时为 true。 */
   truncated: boolean;
+  /** The selected models a truncated round never got to, in upstream order.
+   *
+   *  A truncated round hands THIS list (not "everything") to its alarm: resuming a
+   *  forced re-probe from the top would re-probe the models that just finished and
+   *  never reach the rest, burning the budget in a loop.
+   *
+   *  被截断的轮次未能探到的已选模型，按上游顺序排列。
+   *
+   *  被截断的轮次交给 alarm 的是**这份列表**（而不是"全部"）：从头部续跑一次强制重探
+   *  会重复刚探完的模型、永远到不了后面，把预算烧在循环里。 */
+  remaining: string[];
 }

@@ -436,13 +436,22 @@ export async function runProbeRound(input: ProbeRoundInput): Promise<ProbeRoundS
     cached: 0,
     budgetUsed: 0,
     truncated: false,
+    remaining: [],
   };
 
   const fingerprints = new Map(models.map(([modelId, fingerprint]) => [modelId, fingerprint]));
 
-  for (const modelId of selected) {
+  for (let index = 0; index < selected.length; index += 1) {
+    const modelId = selected[index];
     if (transport.budgetLeft() <= 0) {
       stats.truncated = true;
+      // What this round owed but never got to. The caller hands exactly this list to
+      // its alarm; "everything" would restart from the top of a forced re-probe and
+      // never reach the tail.
+      //
+      // 本轮该做却没轮到的模型。调用方把**这一份**交给 alarm；若交"全部"，强制重探就会
+      // 从头部重新开始，永远到不了尾部。
+      stats.remaining = selected.slice(index);
       break;
     }
     const fingerprint = fingerprints.get(modelId) ?? "";
@@ -457,9 +466,13 @@ export async function runProbeRound(input: ProbeRoundInput): Promise<ProbeRoundS
         break;
       }
       if (err instanceof ProbeBudgetExhausted) {
-        // Out of budget mid-model: leave the entry untouched for the next round.
-        // 探测中途预算耗尽：条目保持原样，留给下一轮。
+        // Out of budget mid-model: leave the entry untouched for the next round. This
+        // model is part of what the round owes, so it stays in `remaining`.
+        //
+        // 探测中途预算耗尽：条目保持原样，留给下一轮。这个模型属于本轮欠下的工作，因此
+        // 仍在 `remaining` 里。
         stats.truncated = true;
+        stats.remaining = selected.slice(index);
         break;
       }
       // Per-model isolation: one bad probe never kills the round.

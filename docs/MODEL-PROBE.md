@@ -226,6 +226,16 @@ outcome mapping (the detailed reasoning lives in the corresponding code comments
 | C4 | Duplicated implementations: `sessionIsUsable` x3, `isPlainObject` x3, prefix constants x3, prefix probing x2 | Extracted into shared modules (`session.ts` / `json.ts` / `upstream.ts`) |
 | C5 | Stale comments (pointing at the deleted `reasoning.ts`, the KV layout list, ...) | All updated |
 
+**Findings from the deployment verification (2026-09-12, real deployment + local workerd)**
+
+| Id | Problem | Disposition |
+|---|---|---|
+| A1 | Across the Durable Object RPC boundary only `name`/`message` survive: `instanceof RoundUnavailable` is always false and the `code` field is gone, so the console displayed the raw string `models_failed` as the error copy (with HTTP 500) | `roundUnavailableCode()` recognises it by `name`/`message` and maps back to `err.probe_models_failed` / `err.probe_session_missing` (502) |
+| A2 | The refresh response never surfaced `stats.authExpired`, so a round aborted by dead credentials still announced a green "probe finished" | `authExpired` is echoed at the top level; the banner reads it from the round stats (compatible with both shapes) |
+| A3 | The round banner sat **above** the "Cached Models & Probe Results" heading, disconnected from the "Probe Now" button that triggers it | Moved below the heading row and above the table (next to the button; DOM order verified in a browser) |
+| A4 | A budget-truncated round only told the alarm "there is work left", losing its forcedness: the alarm restarted with `force=false`, skipping every model that still holds an `ok` conclusion — on the free plan "Probe Now" re-probed only the first ~4 models, the rest of the list was never re-probed, and the banner's "the rest continues in the background" was untrue | `runProbeRound` reports the unfinished `stats.remaining`; on truncation it is written into the coordinator's meta table together with the force flag, and the alarm resumes the original request (measured locally: a forced re-probe drains `total` 6→5→4→3→2 hop by hop); the banner gained "probe still running / budget used up / the rest continues automatically" |
+| A5 | The budget select displayed a non-preset value as "Free plan (40 subrequests/round)", and its relation to the "Custom Budget" input read like two settings | The select gains a "Custom (N subrequests/round)" entry for non-preset values; the hint now explains both controls are the **same** `budget` value |
+
 ## 9. Verification
 
 **Static checks and tests**
@@ -237,11 +247,11 @@ npm.cmd run typecheck        # tsc --noEmit, 0 errors (including the erasableSyn
 npm.cmd test                 # node --test --test-isolation=none --test-concurrency=1
 ```
 
-Current measured state: `typecheck` 0 errors; `npm test` **140/140 passing** (12 test files):
+Current measured state: `typecheck` 0 errors; `npm test` **149/149 passing** (12 test files):
 
 ```text
-ℹ tests 140
-ℹ pass 140
+ℹ tests 149
+ℹ pass 149
 ℹ fail 0
 ```
 
@@ -255,14 +265,17 @@ two-layer "advertises 7, really accepts 4" verification, parameter attribution a
 `tools`/`tool_choice` drop, unattributable ⇒ `partial`, an empty `blamedSet` intersection ⇒
 stop immediately, non-empty `remaining` ⇒ never report `ok`, unprobeable still yields
 capabilities, budget truncation is not a failure, a 401 abort keeps established results,
-network-failure backoff, the per-model wall clock, per-model persistence, the fingerprint being
-byte-identical to Python's and excluding `created`, `max_model_len: 0` surviving, the shared
-capability template intersection, the cache version gate, sharded SQL queries, subset alignment
-not trimming other models, an id repeated only probed once, TTL cache hit/expiry/in-flight
-sharing/failure-not-cached, the `/api/config` HTML trap and snapshot merging, the prefix
-confirmation rule (500 / SPA 200+HTML do not confirm; 401/403 do), `canJoinRound`'s six
-combinations, corrupt KV values degrading, setup 403 while `ADMIN_PASSWORD` is bound, and the
-three outcomes of the connectivity test.
+a truncated round reporting `stats.remaining`, the pending round request's meta-table
+serialization/parsing (including corrupt values degrading and non-string ids dropped), an
+RPC-crossed `RoundUnavailable` still mapping to a localized 502, the refresh response echoing
+`authExpired`, network-failure backoff, the per-model wall clock, per-model persistence, the
+fingerprint being byte-identical to Python's and excluding `created`, `max_model_len: 0`
+surviving, the shared capability template intersection, the cache version gate, sharded SQL
+queries, subset alignment not trimming other models, an id repeated only probed once, TTL cache
+hit/expiry/in-flight sharing/failure-not-cached, the `/api/config` HTML trap and snapshot
+merging, the prefix confirmation rule (500 / SPA 200+HTML do not confirm; 401/403 do),
+`canJoinRound`'s six combinations, corrupt KV values degrading, setup 403 while
+`ADMIN_PASSWORD` is bound, and the three outcomes of the connectivity test.
 
 The contract test (`test/proxyContract.test.ts`, stub fetch + fake KV + fake DO) additionally
 pins `/v1/models`' field set and envelope, the upstream template never leaking into
@@ -296,25 +309,39 @@ carrying a signal, forwarded requests omitting `accept-encoding`, and more.
 > The end-to-end above uses the local mock upstream, so it proves the **plumbing**; the real
 > engine's numbers still need the checks below.
 
-## 10. Open items (need a real deployment)
+## 10. Real-deployment verification results (2026-09-12)
 
-1. **The five hard assertions against the real upstream** (curl them after `wrangler deploy`,
-   or use `wrangler dev` with a real session). They already rehearse green against the mock
-   (real HTTP, real probe code), so deployment only has to confirm the real engine's numbers:
-   - `Qwen3.8-27B` → `supported_efforts == [none, low, medium, xhigh]`, `default_effort == "xhigh"`
-   - `gpt-oss-120b` → `[low, medium, high]`, `mandatory == true`
-   - `DeepSeek-V4-Flash-0731` → `capabilities.vision == false`
-   - `gemma-4-31B-it` / `GLM-OCR` → `capabilities.function_calling == false`
-   - no model's `capabilities` ever contains `web_search` / `terminal` / `builtin_tools`
-2. **Free-plan quota measurement**: one full probe round's DO subrequests / row writes / actual
-   alarm CPU, and whether daily KV reads really shrink to "one per `/v1/models`". Thresholds to
-   compare against: Workers requests 100,000/day, CPU 10ms/request, subrequests 50/invocation;
-   KV reads 100,000/day, writes 1,000/day; DO has no daily request quota, 30s CPU per request,
-   15 minutes of alarm wall time.
-3. **First wake-up behaviour**: after deploying, request `/v1/models` once and then stop
-   sending anything; the alarm should probe the remaining models (`probe round finished` in the
-   logs).
-4. **The two-request envelope semantics**: the first request should carry only
-   `default_model_capabilities`, and `name` / `version` / `features` appear from the second
-   request on -- the expected behaviour of the background `/api/config` refresh (`waitUntil`),
-   not missing fields.
+Measured against the deployed Worker (free plan, a real Open WebUI upstream, all 7 models `ok`);
+item 3 was additionally re-checked in local workerd (`npm run mock` + `wrangler dev`,
+budget=12) for the hop-by-hop drain.
+
+1. **The five hard assertions against the real upstream — all pass**:
+   - `Qwen3.8-27B` → `supported_efforts == [none, low, medium, xhigh]`, `default_effort == "xhigh"` ✓
+   - `gpt-oss-120b` → `[low, medium, high]`, `mandatory == true` ✓
+   - `DeepSeek-V4-Flash-0731` → `capabilities.vision == false` ✓
+   - `gemma-4-31B-it` / `GLM-OCR` → `capabilities.function_calling == false` ✓
+   - no model's `capabilities` contains `web_search` / `terminal` / `builtin_tools` (they only
+     appear in the envelope's `default_model_capabilities` template) ✓
+   - Note: the upstream list has grown from 5 to 7 models (new `GLM-5.3-Flash`,
+     `Qwen3.5-397B-A17B`); both were fully probed, and `/v1/models/{id}` plus the unknown-id 404
+     structure match §5.
+2. **Free-plan quota — partially measured**: one forced full re-probe (7 models ≈ 70 subrequests)
+   truncated at `budget=40`, returning `budgetUsed=40, truncated=true`, matching "at most
+   `settings.budget` subrequests per invocation"; local workerd (budget=12) showed a single
+   round spending exactly 12 with `total` decreasing 6→5→4→3→2. Exact DO row-write counts,
+   alarm CPU and daily KV reads still need the Cloudflare analytics panel.
+3. **First wake-up / alarm self-continuation — pass**: on the real deployment a single
+   "Probe Now" truncated at the budget (4 probed); with no further client requests the alarm
+   probed the remaining 3 within ~40 seconds (their `probed_at` updated); local workerd drained
+   cold starts and forced re-probes the same way (`probe round finished` moving from
+   `truncated:true` to `truncated:false`).
+4. **The two-request envelope semantics — pass**: the first `/v1/models` request carried only
+   `default_model_capabilities`; `name` / `version` / `features` appeared from the second
+   request on, matching the background `/api/config` refresh (`waitUntil`) expectation.
+
+**Still open**
+
+- Fixes A1–A5 (§8) need one redeployment before they take effect online (see the working tree).
+- Exact free-plan readings (DO subrequests/row writes, alarm CPU, daily KV reads/writes) are
+  best observed in the Cloudflare Dashboard → Workers → Metrics / Durable Objects panels while
+  one full probe round runs.

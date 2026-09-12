@@ -44,6 +44,8 @@ import {
   RoundUnavailable,
   canJoinRound,
   createTtlCache,
+  pendingRoundFromMeta,
+  pendingRoundMeta,
   prefixCandidates,
   refsFromCards,
   retryWakeDelayMs,
@@ -79,6 +81,10 @@ import type {
 /** Bookkeeping key for the resolved upstream prefix. */
 /** 已确定的上游前缀的记账键。 */
 const META_PREFIX_KEY = "upstream_prefix";
+
+/** Bookkeeping key for the round request a budget-truncated round hands to its alarm. */
+/** 被预算截断的轮次交给 alarm 的轮次请求的记账键。 */
+const META_PENDING_ROUND_KEY = "pending_round";
 
 /** How soon to continue when a round ran out of budget (milliseconds). */
 /** 预算耗尽后多久继续（毫秒）。 */
@@ -457,8 +463,17 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
    * Continue the queue without a client: fetch the current model list, probe what is
    * due, and arm the next alarm.
    *
+   * When the previous round ran out of budget it left its request behind (see
+   * `runRound`), and the continuation resumes THAT request: a forced re-probe must
+   * stay forced, or the alarm's default selection would skip every model that still
+   * holds an `ok` conclusion and the rest of the list would never be re-probed.
+   *
    * 在没有客户端的情况下继续排空队列：拉取当前模型列表、探测到期项、并安排下一个
    * alarm。
+   *
+   * 上一轮预算耗尽时会把它的请求留下（见 `runRound`），续跑就按**那个**请求进行：
+   * 强制重探必须保持强制，否则 alarm 的默认选择会跳过所有仍持有 `ok` 结论的模型，
+   * 列表的其余部分永远不会被重探。
    */
   async alarm(): Promise<void> {
     this.ensureLoaded();
@@ -479,7 +494,14 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
         await this.ctx.storage.setAlarm(Date.now() + ALARM_RETRY_MS);
         return;
       }
-      await this.startRound(models, false, settings);
+      // The pending request is read only once the model list is in hand: an
+      // unreachable upstream must not throw away what the next attempt has to finish.
+      //
+      // 等到模型列表到手后才读取待续请求：上游不可达时绝不能丢掉下一次尝试要完成的事。
+      const pending = pendingRoundFromMeta(this.store.readMeta(META_PENDING_ROUND_KEY));
+      await this.startRound(models, pending?.force ?? false, settings, {
+        only: pending?.only,
+      });
     } catch (err) {
       console.error(
         JSON.stringify({
@@ -601,8 +623,24 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
     }
 
     if (stats.truncated) {
+      // Hand the unfinished models to the alarm together with the round's force flag:
+      // the continuation must be exactly as thorough, and it must start where this
+      // round stopped. Resuming a forced re-probe "from the top" would re-probe what
+      // just finished and never reach the tail, burning the budget in a loop.
+      //
+      // 把未完成的模型连同本轮的强制标记一起交给 alarm：续跑必须同样彻底，而且必须从
+      // 本轮停下的地方开始。让强制重探"从头再来"会重复刚探完的模型、永远到不了尾部，
+      // 把预算烧在循环里。
+      this.store.writeMeta(
+        META_PENDING_ROUND_KEY,
+        pendingRoundMeta({ force, only: stats.remaining }),
+      );
       await this.ctx.storage.setAlarm(Date.now() + ALARM_CONTINUE_MS);
     } else {
+      // The queue is drained: drop any request a previous truncated round left behind.
+      //
+      // 队列已排空：清掉此前被截断的轮次留下的请求。
+      this.store.writeMeta(META_PENDING_ROUND_KEY, "");
       await this.scheduleRetryWake();
     }
     return stats;

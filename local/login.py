@@ -164,21 +164,24 @@ def session_from_dict(raw: Dict[str, Any]) -> Session:
 def _normalize_headers(headers: Dict[str, str]) -> Dict[str, str]:
     # Lowercase all header names for case-insensitive lookup
     # 将所有请求头名称转为小写，便于大小写不敏感查找
-    return {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+    return {str(name).lower(): str(value) for name, value in (headers or {}).items()}
 
 
 def _build_cookie_header(cookies: Any) -> str:
-    # Join a Playwright cookie jar into a single "k=v; k=v" header string
-    # 将 Playwright Cookie Jar 拼接为 "k=v; k=v" 的请求头字符串
+    """
+    Render a Playwright cookie jar (or a ready-made header string) as a Cookie header.
+
+    把 Playwright 的 Cookie Jar（或现成的头字符串）渲染成 Cookie 请求头。
+    """
     if isinstance(cookies, str):
         return cookies
-    items = []
-    for item in cookies or []:
-        name = item.get("name")
-        value = item.get("value")
+    pairs = []
+    for cookie in cookies or []:
+        name = cookie.get("name")
+        value = cookie.get("value")
         if name is not None and value is not None:
-            items.append(f"{name}={value}")
-    return "; ".join(items)
+            pairs.append(f"{name}={value}")
+    return "; ".join(pairs)
 
 
 def is_login_signal(url: str, headers: Dict[str, str], api_prefix: str) -> bool:
@@ -197,7 +200,7 @@ def is_login_signal(url: str, headers: Dict[str, str], api_prefix: str) -> bool:
     if not url.startswith(api_prefix):
         return False
 
-    lowered = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+    lowered = {str(name).lower(): str(value) for name, value in (headers or {}).items()}
     authorization = lowered.get("authorization", "").strip()
     cookie = lowered.get("cookie", "").strip()
     if not authorization and not cookie:
@@ -206,6 +209,28 @@ def is_login_signal(url: str, headers: Dict[str, str], api_prefix: str) -> bool:
     if authorization.lower().startswith("bearer ") and len(authorization) > len("bearer "):
         return True
     return bool(cookie) and any(hint in url for hint in AUTHED_PATH_HINTS)
+
+
+def looks_like_model_list(response: httpx.Response) -> bool:
+    """
+    Whether a 2xx /models answer really is the model list.
+
+    Open WebUI's SPA answers unknown paths with HTTP 200 and an HTML page, so a 2xx
+    on its own proves neither that the route exists nor that the credentials are
+    valid. The check therefore looks at the body, not just the status code.
+
+    2xx 的 /models 回答是否真的是模型列表。
+
+    Open WebUI 的 SPA 会用 HTTP 200 + 一页 HTML 回答未知路径，因此单凭 2xx 既不能
+    证明路由存在，也不能证明凭证有效。因此必须看响应体，而不是只看状态码。
+    """
+    if "html" in response.headers.get("content-type", "").lower():
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    return isinstance(payload, (dict, list))
 
 
 async def credentials_are_valid(base_url: str, session: Session) -> bool:
@@ -217,14 +242,24 @@ async def credentials_are_valid(base_url: str, session: Session) -> bool:
     it carries is not necessarily valid: early in page load the frontend sends
     probing requests with an old token from localStorage; when a captive
     portal (e.g. campus network) is unauthenticated, every request gets
-    redirected by the gateway. Therefore credentials must pass one real
-    upstream authentication to be considered valid.
+    redirected by the gateway.
+
+    Therefore credentials only count as valid if they pass one real upstream
+    authentication: 401/403 (invalid/expired), 3xx (redirected by a portal) and
+    network errors are all judged invalid; 404 means trying the next candidate
+    prefix; and a 2xx whose body is not the model list (the SPA's 200 + HTML page
+    for an unknown path) proves nothing either, so that also moves on to the next
+    candidate.
 
     对上游做一次真实请求，校验抓到的凭证当前是否有效。
-    
+
     抓取逻辑只能看到"请求带了凭证"，但带的不一定是有效凭证：页面加载早期前端会
     用 localStorage 里的旧 Token 发探测请求；校园网等强制门户未完成认证时任何请求
-    都会被网关重定向。因此凭证必须通过上游一次真实鉴权才算有效。
+    都会被网关重定向。
+
+    因此凭证必须通过上游一次真实鉴权才算有效：401/403（无效/过期）、3xx（被门户
+    重定向）、网络错误一律判无效；404 换下一个候选前缀再试；响应体不是模型列表的
+    2xx（未知路径被 SPA 用 200 + HTML 回答）同样证明不了什么，也换下一个候选。
     """
     if not session.is_usable():
         return False
@@ -244,7 +279,11 @@ async def credentials_are_valid(base_url: str, session: Session) -> bool:
                 return False
             if resp.status_code == 404:
                 continue
-            return 200 <= resp.status_code < 300
+            if not (200 <= resp.status_code < 300):
+                return False
+            if not looks_like_model_list(resp):
+                continue
+            return True
     return False
 
 
@@ -297,8 +336,8 @@ async def perform_browser_login(
         except Exception as exc:
             logger.debug(lang.t("capture_error_debug", exc=exc))
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless)
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=headless)
         context = await browser.new_context(ignore_https_errors=not verify_ssl)
         page = await context.new_page()
         page.on("request", on_request)
@@ -387,8 +426,8 @@ async def _enrich_from_browser(page, context, session: Session) -> None:
         # other sites such as the campus portal
         #
         # 只取 Open WebUI 域的 Cookie，避免混入校园网门户等其他站点的 Cookie
-        jar = await context.cookies(session.base_url)
-        cookie_header = _build_cookie_header(jar)
+        cookies = await context.cookies(session.base_url)
+        cookie_header = _build_cookie_header(cookies)
         if cookie_header:
             session.cookie = cookie_header
     except Exception as exc:

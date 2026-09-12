@@ -49,14 +49,67 @@ class EmptyKV {
   }
 }
 
-function makeEnv(options: { adminPassword?: string } = {}): Env {
+/** A KV namespace that serves one stored session, so the probe RPC paths can run. */
+class SessionKV extends EmptyKV {
+  private readonly raw: string;
+
+  constructor(session: unknown) {
+    super();
+    this.raw = JSON.stringify(session);
+  }
+
+  async get(key: string): Promise<string | null> {
+    return key === "session" ? this.raw : null;
+  }
+}
+
+/** The credentials the probe refresh tests run against. */
+const STORED_SESSION = {
+  authorization: "Bearer stored-token",
+  cookie: "",
+  user_agent: "test-agent",
+  captured_at: 1_700_000_000,
+  base_url: "https://upstream.test",
+};
+
+function makeEnv(
+  options: {
+    adminPassword?: string;
+    storedSession?: unknown;
+    probe?: DurableObjectNamespace;
+  } = {},
+): Env {
   return {
-    KV: new EmptyKV() as unknown as KVNamespace,
-    PROBE: {} as unknown as DurableObjectNamespace,
+    KV: (options.storedSession === undefined
+      ? new EmptyKV()
+      : new SessionKV(options.storedSession)) as unknown as KVNamespace,
+    PROBE: options.probe ?? ({} as unknown as DurableObjectNamespace),
     // A bound SESSION_SECRET keeps `createAdminToken` off KV entirely.
     SESSION_SECRET: "test-secret",
     ...(options.adminPassword === undefined ? {} : { ADMIN_PASSWORD: options.adminPassword }),
   } as unknown as Env;
+}
+
+/** A coordinator stub whose probe RPC throws the given error. */
+function failingProbe(error: unknown): DurableObjectNamespace {
+  const stub = {
+    refresh: async (): Promise<never> => {
+      throw error;
+    },
+    probeOne: async (): Promise<never> => {
+      throw error;
+    },
+  };
+  return { getByName: () => stub } as unknown as DurableObjectNamespace;
+}
+
+/** A coordinator stub whose probe round answers with the given stats. */
+function reportingProbe(stats: Record<string, unknown>): DurableObjectNamespace {
+  const stub = {
+    refresh: async (): Promise<Record<string, unknown>> => stats,
+    probeOne: async (): Promise<Record<string, unknown>> => stats,
+  };
+  return { getByName: () => stub } as unknown as DurableObjectNamespace;
 }
 
 async function post(env: Env, path: string, body: unknown, authed = false): Promise<Response> {
@@ -198,3 +251,87 @@ function sessionJson(): string {
     base_url: "https://upstream.test",
   });
 }
+
+// --------------------------------------------------------------------------- //
+// Probe refresh: coordinator errors survive the DO RPC boundary
+// --------------------------------------------------------------------------- //
+
+/** The error the console saw as a raw "models_failed" string in production. */
+function roundUnavailableFromRpc(code: "session_missing" | "models_failed"): Error {
+  // A Durable Object RPC keeps only `name` and `message` when it re-throws: the class
+  // identity and the custom `code` field are gone by the time the caller catches it.
+  //
+  // Durable Object RPC 重新抛出时只保留 `name` 与 `message`：调用方 catch 到时，类的身份
+  // 与自定义的 `code` 字段都已不复存在。
+  return Object.assign(new Error(code), { name: "RoundUnavailable" });
+}
+
+test("an RPC-crossed RoundUnavailable keeps its localized 502", async () => {
+  const env = makeEnv({
+    adminPassword: "preset",
+    storedSession: STORED_SESSION,
+    probe: failingProbe(roundUnavailableFromRpc("models_failed")),
+  });
+  const response = await post(env, "/admin/api/probe/refresh", {}, true);
+  assert.equal(response.status, 502);
+  const payload = (await response.json()) as { error: string };
+  // The old code fell through to `err.message` + 500, so the console displayed the raw
+  // string "models_failed" instead of the translated message.
+  //
+  // 旧代码会落到 `err.message` + 500，控制台于是显示原始字符串 "models_failed" 而不是
+  // 翻译后的消息。
+  assert.equal(payload.error, "err.probe_models_failed");
+});
+
+test("a missing session inside the coordinator maps to its own message", async () => {
+  const env = makeEnv({
+    adminPassword: "preset",
+    storedSession: STORED_SESSION,
+    probe: failingProbe(roundUnavailableFromRpc("session_missing")),
+  });
+  const response = await post(env, "/admin/api/probe/refresh", {}, true);
+  assert.equal(response.status, 502);
+  assert.equal(((await response.json()) as { error: string }).error, "err.probe_session_missing");
+});
+
+test("an ordinary coordinator failure still answers with its own text", async () => {
+  const env = makeEnv({
+    adminPassword: "preset",
+    storedSession: STORED_SESSION,
+    probe: failingProbe(new Error("model 'x' is not in the upstream model list")),
+  });
+  const response = await post(env, "/admin/api/probe/refresh", { model: "x" }, true);
+  assert.equal(response.status, 500);
+  assert.equal(
+    ((await response.json()) as { error: string }).error,
+    "model 'x' is not in the upstream model list",
+  );
+});
+
+test("a round aborted by 401/403 reports authExpired to the console", async () => {
+  const env = makeEnv({
+    adminPassword: "preset",
+    storedSession: STORED_SESSION,
+    probe: reportingProbe({
+      ok: 2,
+      partial: 0,
+      unprobeable: 0,
+      failed: 0,
+      authExpired: true,
+      total: 7,
+      cached: 7,
+      budgetUsed: 21,
+      truncated: true,
+    }),
+  });
+  const response = await post(env, "/admin/api/probe/refresh", {}, true);
+  assert.equal(response.status, 200);
+  const payload = (await response.json()) as { authExpired: boolean; stats: { authExpired: boolean } };
+  // Without the top-level echo the console announced a green "probe finished" while
+  // the round had actually stopped on the first dead-credential answer.
+  //
+  // 缺少最外层的回传时，控制台会在整轮其实已因凭证失效而中止的情况下，宣布一条绿色的
+  // "探测完成"。
+  assert.equal(payload.authExpired, true);
+  assert.equal(payload.stats.authExpired, true);
+});

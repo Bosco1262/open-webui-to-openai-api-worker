@@ -544,16 +544,55 @@ async function handleProbeRefresh(env: Env, request: Request): Promise<Response>
   try {
     const requested = typeof body.model === "string" && body.model ? body.model : null;
     const stats = requested ? await coordinator.probeOne(requested) : await coordinator.refresh(true);
-    return json({ ok: true, model: requested, stats });
+    // `authExpired` is echoed at the top level for the console: the banner switches to
+    // the "credentials expired, re-import the session" wording on it. Without this the
+    // round stops on the first 401/403 yet the console still announced a green
+    // "probe finished" summary.
+    //
+    // `authExpired` 在最外层回传给控制台：横幅据此切换为"凭证已过期，请重新导入
+    // session"的措辞。没有它的话，整轮明明在首个 401/403 上中止，控制台却仍会宣布
+    // 一条绿色的"探测完成"。
+    return json({ ok: true, model: requested, stats, authExpired: stats.authExpired === true });
   } catch (err) {
-    if (err instanceof RoundUnavailable) {
+    const roundCode = roundUnavailableCode(err);
+    if (roundCode) {
       return fail(
-        err.code === "session_missing" ? "err.probe_session_missing" : "err.probe_models_failed",
+        roundCode === "session_missing" ? "err.probe_session_missing" : "err.probe_models_failed",
         502,
       );
     }
     return fail(err instanceof Error ? err.message : String(err), 500);
   }
+}
+
+/**
+ * Recognize `RoundUnavailable` raised on the far side of the Durable Object RPC.
+ *
+ * The coordinator throws the class from probeRuntime.ts, but error serialization
+ * across the RPC boundary keeps only `name` and `message`: what arrives here is a
+ * plain `Error`, so `instanceof` is false and the custom `code` field is gone.
+ * Missing that made the console display the raw string "models_failed" -- with HTTP
+ * 500 -- instead of the localized "cannot fetch the upstream model list" 502.
+ *
+ * The constructor passes the code as the message, so a surviving message identifies
+ * the case; anything else keeps the generic 500 path.
+ *
+ * 识别从 Durable Object RPC 另一侧抛来的 `RoundUnavailable`。
+ *
+ * 协调者抛出 probeRuntime.ts 里的类，但跨 RPC 边界的错误序列化只保留 `name` 与
+ * `message`：到达这里的是普通 `Error`，`instanceof` 为 false，自定义的 `code` 字段
+ * 也不复存在。此前正是漏掉了这一点，控制台才会显示原始字符串 "models_failed"（且
+ * HTTP 500），而不是本地化的"无法获取上游模型列表"（502）。
+ *
+ * 构造函数把 code 当作 message 传入，因此幸存的 message 足以判定；其余情况继续走
+ * 通用的 500 路径。
+ */
+function roundUnavailableCode(err: unknown): "session_missing" | "models_failed" | null {
+  if (err instanceof RoundUnavailable) return err.code;
+  if (err instanceof Error && err.name === "RoundUnavailable") {
+    return err.message.includes("session_missing") ? "session_missing" : "models_failed";
+  }
+  return null;
 }
 
 /** The coordinator stub, or null while no session has been imported (there is

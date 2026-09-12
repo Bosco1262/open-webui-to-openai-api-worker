@@ -23,6 +23,8 @@ import {
   WAKE_MIN_MS,
   canJoinRound,
   createTtlCache,
+  pendingRoundFromMeta,
+  pendingRoundMeta,
   prefixCandidates,
   refsFromCards,
   retryWakeAtSeconds,
@@ -229,4 +231,62 @@ test("a failing loader is never cached, so the next call retries", async () => {
   clock += 1; // far inside the window: a cached failure would be served from here
   assert.equal(await cached(), "ok");
   assert.equal(loads, 2);
+});
+
+// --------------------------------------------------------------------------- //
+// The request a truncated round hands to its alarm
+// --------------------------------------------------------------------------- //
+
+test("a forced whole-list round survives the round-trip through the meta table", () => {
+  const request = { force: true } as const;
+  const restored = pendingRoundFromMeta(pendingRoundMeta(request));
+  assert.deepEqual(restored, { force: true, only: undefined });
+  // Without the force flag the alarm's default selection skips every model that still
+  // holds an `ok` conclusion -- exactly what the second half of a "probe now" is.
+  //
+  // 没有 force 标记时，alarm 的默认选择会跳过所有仍持有 `ok` 结论的模型——而它们正是
+  // 「立即探测」后半程要处理的对象。
+  assert.equal(restored?.force, true);
+});
+
+test("a single-model forced round keeps its model list", () => {
+  const restored = pendingRoundFromMeta(
+    pendingRoundMeta({ force: true, only: ["gpt-oss-120b"] }),
+  );
+  assert.deepEqual(restored, { force: true, only: ["gpt-oss-120b"] });
+});
+
+test("an ordinary request round-trips as non-forced", () => {
+  assert.deepEqual(pendingRoundFromMeta(pendingRoundMeta({ force: false })), {
+    force: false,
+    only: undefined,
+  });
+});
+
+test("a missing, empty or corrupt pending value means 'no pending round'", () => {
+  // An unparseable value must degrade to the default alarm behaviour, never crash it.
+  //
+  // 解析不了的值必须退化为默认 alarm 行为，而绝不能让处理器崩溃。
+  for (const raw of [null, "", "  ", "not json", "[]", "42", '"text"', "{}"]) {
+    const restored = pendingRoundFromMeta(raw);
+    if (raw === "{}") {
+      assert.deepEqual(restored, { force: false, only: undefined });
+    } else {
+      assert.equal(restored, null, `raw=${JSON.stringify(raw)} must mean "nothing pending"`);
+    }
+  }
+});
+
+test("non-string ids in a hand-edited only-list are dropped, not trusted", () => {
+  const restored = pendingRoundFromMeta('{"force":true,"only":["a",7,null,"b"]}');
+  assert.deepEqual(restored, { force: true, only: ["a", "b"] });
+  // An only-list that loses every id must fall back to the whole list rather than to an
+  // empty selection, which would probe nothing at all.
+  //
+  // 若 only 列表里的 id 全部无效，必须回退为"整份列表"，而不是空选择——空选择一个模型
+  // 都不会探。
+  assert.deepEqual(pendingRoundFromMeta('{"force":true,"only":[7]}'), {
+    force: true,
+    only: undefined,
+  });
 });

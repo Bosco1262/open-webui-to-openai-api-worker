@@ -513,6 +513,13 @@ test("the budget truncates the round without recording a failure", async () => {
   // The model cut short by the budget is left untouched: this round proved
   // nothing about it, so it must not be recorded as a failure.
   assert.equal(store.snapshot().has("second"), false);
+  // Whatever the round did not finish travels with the stats so the alarm can start
+  // where it stopped. Resuming "from the top" would re-probe `first` and never reach
+  // `second`, burning the budget in a loop.
+  //
+  // 本轮没做完的部分随统计一起返回，使 alarm 能从停下的地方开始。若"从头再来"，就会
+  // 重复 `first` 而永远到不了 `second`，把预算烧在循环里。
+  assert.deepEqual(stats.remaining, ["second"]);
 });
 
 test("credentials dying mid-round stop it and keep what was already established", async () => {
@@ -624,6 +631,9 @@ test("each model is persisted as it lands, not once at the end", async () => {
   // One write for the reconciliation plus one per model.
   assert.equal(store.writes, 4);
   assert.equal(store.snapshot().size, 3);
+  // A completed round owes nothing: an empty list clears the alarm's pending work.
+  // 完成的轮次不欠任何工作：空列表会清掉 alarm 的待续工作。
+  assert.deepEqual(stats.remaining, []);
 });
 
 test("a changed fingerprint forces a re-probe, force overrides everything", async () => {

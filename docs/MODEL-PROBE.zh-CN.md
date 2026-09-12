@@ -185,6 +185,16 @@ Worker（薄）                                  Durable Object: ModelProbeCoord
 | C4 | 重复实现：`sessionIsUsable` ×3、`isPlainObject` ×3、前缀常量 ×3、前缀探测 ×2 | 抽成共享模块（`session.ts` / `json.ts` / `upstream.ts`） |
 | C5 | 过时注释（指向已删除的 `reasoning.ts`、KV 布局清单等） | 全部更新 |
 
+**部署验证阶段的新发现（2026-09-12，真实部署 + 本地 workerd 复核）**
+
+| 编号 | 问题 | 处置 |
+|---|---|---|
+| A1 | `RoundUnavailable` 跨 Durable Object RPC 边界后只剩 `name`/`message`：`instanceof` 恒为 false、`code` 字段丢失，控制台把原始字符串 `models_failed` 当错误文案显示（且 HTTP 500） | `roundUnavailableCode()` 按 `name`/`message` 识别，映射回 `err.probe_models_failed` / `err.probe_session_missing`（502） |
+| A2 | 刷新响应没有把 `stats.authExpired` 带到顶层，凭证失效中止整轮后控制台仍宣布绿色的"探测完成" | 顶层回传 `authExpired`；横幅改从轮次统计读取（新旧响应都兼容） |
+| A3 | 轮次横幅挂在「已缓存的模型及其探测结果」小节标题**上方**，与触发它的「立即探测」按钮脱节 | 横幅移到标题行之下、表格之上（紧邻按钮；DOM 顺序经浏览器实测） |
+| A4 | 被预算截断的轮次只把"还有活"交给 alarm，强制属性丢失：alarm 按 `force=false` 重启，会跳过所有仍持有 `ok` 结论的模型——免费层上「立即探测」只重探前 ~4 个，后半列表永远不会被重探，横幅那句"其余由后台继续"也就成了假话 | `runProbeRound` 统计未探完的 `stats.remaining`；截断时把它连同 force 标志写入协调者 meta 表，alarm 按原请求续跑（本地实测：强制重探按 `total` 6→5→4→3→2 逐跳排空）；横幅新增"探测进行中 / 本轮预算已用完 / 其余由后台自动继续"文案 |
+| A5 | 预算下拉框把非预设值显示成"免费层（40 子请求/轮）"，与"自定义预算"输入框的关系容易被误解为两个设置 | 下拉框为非预设值增加「自定义（N 子请求/轮）」条目；提示文字说明两者是**同一个** `budget` 值 |
+
 ## 9. 验收
 
 **静态检查与测试**
@@ -196,11 +206,11 @@ npm.cmd run typecheck        # tsc --noEmit，0 error（含 erasableSyntaxOnly �
 npm.cmd test                 # node --test --test-isolation=none --test-concurrency=1
 ```
 
-当前实测：`typecheck` 0 error；`npm test` **140 项全部通过**（12 个测试文件）：
+当前实测：`typecheck` 0 error；`npm test` **149 项全部通过**（12 个测试文件）：
 
 ```text
-ℹ tests 140
-ℹ pass 140
+ℹ tests 149
+ℹ pass 149
 ℹ fail 0
 ```
 
@@ -211,6 +221,8 @@ npm.cmd test                 # node --test --test-isolation=none --test-concurre
 覆盖面（摘要）：三种真实报错措辞（含 Qwen 缺 `none`）、"枚举 7 个实际只收 4 个"的两层校验、
 参数归因与 `tools`/`tool_choice` 联动剔除、不可归因 ⇒ `partial`、`blamedSet` 无交集 ⇒ 立即停止、
 `remaining` 非空 ⇒ 不报 `ok`、unprobeable 仍出能力、预算截断不记失败、401 中止保留已有结果、
+截断轮次上报 `stats.remaining`、待续轮次请求在 meta 表中的序列化/解析（含坏值退化、非字符串 id 剔除）、
+跨 RPC 边界的 `RoundUnavailable` 仍映射为本地化 502、刷新响应回传 `authExpired`、
 网络失败退避、单模型墙钟、逐模型落盘、指纹与 Python 逐字节一致且不含 `created`、
 `max_model_len: 0` 不丢、共享能力模板交集、缓存版本闸门、SQL 分片查询、子集对齐不裁剪其它模型、
 同 id 重复只探一次、TTL 缓存的命中/过期/在途共享/失败不缓存、`/api/config` 的 HTML 陷阱与
@@ -241,21 +253,34 @@ Worker 不再直接请求 `/api/config`、`/v1/models/{id}` 支持含斜杠的 i
 
 > 上述端到端用的是本机 mock 上游，因此它证明的是**管线**正确；真实引擎的数字仍需按下文核对。
 
-## 10. 后续待办（需要真实部署环境）
+## 10. 真实部署环境验证结果（2026-09-12）
 
-1. **真实上游 5 条硬断言**（`wrangler deploy` 后逐条 curl，或 `wrangler dev` + 真实 session）。
-   这 5 条已在 mock 上游上彩排通过（走真实 HTTP、真实探测代码），部署后只需确认真实引擎的数字相符：
-   - `Qwen3.8-27B` → `supported_efforts == [none, low, medium, xhigh]`、`default_effort == "xhigh"`
-   - `gpt-oss-120b` → `[low, medium, high]`、`mandatory == true`
-   - `DeepSeek-V4-Flash-0731` → `capabilities.vision == false`
-   - `gemma-4-31B-it` / `GLM-OCR` → `capabilities.function_calling == false`
-   - 任何模型的 `capabilities` 都不再出现 `web_search` / `terminal` / `builtin_tools`
-2. **免费层额度实测**：一轮全量探测的 DO 子请求数 / 行写入数 / alarm 内实际 CPU，以及每日 KV 读
-   是否如预期只剩"每次 `/v1/models` 一次"。对照阈值：Workers 请求 100,000/天、CPU 10ms/请求、
-   子请求 50/调用；KV 读 100,000/天、写 1,000/天；DO 无日请求配额、请求 CPU 30 秒、
-   alarm 墙钟 15 分钟。
-3. **首次唤醒行为确认**：部署后先请求一次 `/v1/models`，随后不再发任何请求，观察 Workers Logs
-   中的 alarm 是否把其余模型探完（`probe round finished`）。
-4. **实例信封的两次请求语义**：首个请求只应带 `default_model_capabilities`，第二个请求起才带
-   `name` / `version` / `features`——这是 `/api/config` 后台刷新（`waitUntil`）的预期表现，
-   不是字段缺失。
+以下结果实测自已部署的 Worker（免费层，上游为真实 Open WebUI 实例，7 个模型全部 `ok`），
+其中第 3 项另在本地 workerd（`npm run mock` + `wrangler dev`，budget=12）复核过逐跳排空。
+
+1. **真实上游 5 条硬断言 — 全部通过**：
+   - `Qwen3.8-27B` → `supported_efforts == [none, low, medium, xhigh]`、`default_effort == "xhigh"` ✓
+   - `gpt-oss-120b` → `[low, medium, high]`、`mandatory == true` ✓
+   - `DeepSeek-V4-Flash-0731` → `capabilities.vision == false` ✓
+   - `gemma-4-31B-it` / `GLM-OCR` → `capabilities.function_calling == false` ✓
+   - 任何模型的 `capabilities` 都没有 `web_search` / `terminal` / `builtin_tools`（它们只出现在
+     信封的 `default_model_capabilities` 模板里）✓
+   - 注：上游模型列表已从此前的 5 个变为 7 个（新增 `GLM-5.3-Flash`、`Qwen3.5-397B-A17B`），
+     两者同样被完整探测，`/v1/models/{id}` 与未知 id 的 404 结构均符合 §5。
+2. **免费层额度 — 部分实测**：一次强制全量重探（7 模型 ≈ 70 个子请求）在 `budget=40` 处截断，
+   返回 `budgetUsed=40, truncated=true`，与"单次调用最多 `settings.budget` 个子请求"一致；
+   本地 workerd（budget=12）逐跳观测到单轮 `budgetUsed=12`、`total` 6→5→4→3→2 递减。
+   DO 行写入数与 alarm 内 CPU、每日 KV 读的精确数字仍需 Cloudflare 分析面板，未直接测得。
+3. **首次唤醒 / alarm 自续 — 通过**：真实部署上一次「立即探测」在预算处截断（成功 4 个）后，
+   客户端不再发任何请求，其余 3 个模型由 alarm 在约 40 秒内探完（`probed_at` 更新、无新请求）；
+   本地 workerd 上冷启动与强制重探都以同样方式排空（`probe round finished` 从
+   `truncated:true` 走到 `truncated:false`）。
+4. **实例信封的两次请求语义 — 通过**：首个 `/v1/models` 请求的信封只含
+   `default_model_capabilities`，第二个请求起才带 `name` / `version` / `features`，
+   与 `/api/config` 后台刷新（`waitUntil`）的预期一致。
+
+**仍然待办**
+
+- §8 的 A1–A5 修复需要一次重新部署才会在线上生效（见 git 工作区改动）。
+- 免费层配额的精确读数（DO 子请求/行写入、alarm CPU、每日 KV 读写）建议在 Cloudflare
+  Dashboard → Workers → Metrics / Durable Objects 面板对照观察一轮全量探测。

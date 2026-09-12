@@ -91,6 +91,54 @@ export function canJoinRound(running: RoundRequest, request: RoundRequest): bool
   return runningOnly.every((modelId) => wanted.includes(modelId));
 }
 
+/**
+ * Serialize the request a truncated round must hand to its alarm.
+ *
+ * A round that runs out of budget persists what it was asked to do; the alarm then
+ * resumes THAT request instead of a default one. Without this, a forced re-probe
+ * ("probe now") silently loses its forcedness on the way to the alarm, which then
+ * skips every model that still holds an `ok` conclusion -- so the second half of the
+ * list is never re-probed and the console's "the rest continues in the background"
+ * would simply be untrue.
+ *
+ * 序列化被预算截断的轮次必须交给 alarm 的请求。
+ *
+ * 预算耗尽的轮次会把它被要求做的事落盘；alarm 随后**按原请求**继续，而不是按默认请求。
+ * 没有它时，一次强制重探（「立即探测」）会在交给 alarm 的路上悄悄丢掉"强制"属性，
+ * 于是 alarm 跳过所有仍持有 `ok` 结论的模型——列表的后半部分永远不会被重探，而控制台
+ * 那句"其余由后台继续"就成了假话。
+ */
+export function pendingRoundMeta(request: RoundRequest): string {
+  return JSON.stringify({ force: request.force, only: request.only ?? null });
+}
+
+/**
+ * Parse that bookkeeping value back.
+ *
+ * Anything missing, empty or unparseable means "no pending round": a corrupt value
+ * must degrade to the default alarm behaviour, never to a crash.
+ *
+ * 解析该记账值。
+ *
+ * 缺失、为空或解析不了一律表示"没有待续轮次"：坏值必须退化为默认的 alarm 行为，
+ * 绝不能变成崩溃。
+ */
+export function pendingRoundFromMeta(raw: string | null): RoundRequest | null {
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const record = parsed as { force?: unknown; only?: unknown };
+  const only = Array.isArray(record.only)
+    ? record.only.filter((id): id is string => typeof id === "string")
+    : [];
+  return { force: record.force === true, only: only.length > 0 ? only : undefined };
+}
+
 /** Never wake sooner than this (milliseconds): an alarm that fires immediately in a
  *  loop is worse than a slightly late probe. */
 /** 唤醒最快不早于这个间隔（毫秒）：立刻循环触发的 alarm 比稍晚一点的探测更糟。 */

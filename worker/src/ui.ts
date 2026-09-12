@@ -628,7 +628,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
                     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
                       <div class="setting-info" style="flex:1;">
                         <div class="setting-label" data-i18n="mp.budget_label">自定义预算</div>
-                        <div class="setting-hint" data-i18n="mp.budget_hint">直接填写预算数值（4–9000）。一个模型典型消耗约 10 个子请求，最坏约 20 个。</div>
+                        <div class="setting-hint" data-i18n="mp.budget_hint">与上方「每轮子请求预算」是同一个值：预设一键写入 40 / 2000，这里可填 4–9000 的任意数值，保存后上方显示为「自定义」。一个模型典型消耗约 10 个子请求，最坏约 20 个。</div>
                       </div>
                       <input id="mp-budget" type="number" min="4" max="9000" style="width:130px; flex:none;" placeholder="40" />
                     </div>
@@ -660,8 +660,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
                 </div>
               </div>
 
-              <div class="banner" id="mp-banner"></div>
-
               <div class="setting-row" style="display:block;">
                 <div style="display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; margin-bottom:12px;">
                   <div class="setting-info">
@@ -670,6 +668,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
                   </div>
                   <button class="btn btn-ghost" style="width:auto; flex:none;" onclick="refreshProbe()" data-i18n="mp.refresh">立即探测</button>
                 </div>
+                <!-- The round banner sits with the button that triggers it (and above the
+                     table it describes) instead of above the section heading, where it
+                     looked disconnected from "立即探测". -->
+                <!-- 轮次横幅与触发它的按钮同处一块（并在它所描述的表格上方），而不再挂在
+                     小节标题之上、看上去与「立即探测」无关。 -->
+                <div class="banner" id="mp-banner"></div>
                 <table class="table">
                   <thead><tr>
                     <th data-i18n="mp.th_model">模型</th>
@@ -980,7 +984,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'mp.cache_title': '已缓存的模型及其探测结果',
       'mp.cache_hint': '列出已探测的模型与状态：正常（结论完整）、部分结论（有请求未得出答案，会按退避重试）、不可探测（上游从不校验该字段）、失败待重试。能力与最后错误显示在挡位下方。',
       'mp.budget_label': '自定义预算',
-      'mp.budget_hint': '直接填写预算数值（4–9000）。一个模型典型消耗约 10 个子请求，最坏约 20 个。',
+      'mp.budget_hint': '与上方「每轮子请求预算」是同一个值：预设一键写入 40 / 2000，这里可填 4–9000 的任意数值，保存后上方显示为「自定义」。一个模型典型消耗约 10 个子请求，最坏约 20 个。',
       'mp.timeout_label': '单模型超时',
       'mp.timeout_hint': '每个模型探测请求的最长等待时间（1–120 秒）。',
       'mp.wait_label': '等待时长',
@@ -989,6 +993,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'mp.saved': '探测设置已保存',
       'mp.refresh': '立即探测',
       'mp.refresh_done': '探测完成：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个',
+      'mp.refresh_truncated': '探测进行中：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个。本轮子请求预算已用完（{used} 个），其余 {pending} 个模型由后台自动继续，无需再点「立即探测」。',
       'mp.refresh_auth': '探测中途凭证失效（HTTP 401/403），已中止：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个。请重新导入 Session',
       'mp.th_model': '模型',
       'mp.th_efforts': '支持挡位',
@@ -1004,6 +1009,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'mp.st_failed': '失败待重试',
       'mp.budget_free': '免费层（40 子请求/轮）',
       'mp.budget_paid': '付费层（2000 子请求/轮）',
+      'mp.budget_custom_value': '自定义（{value} 子请求/轮）',
       'mp.reprobe': '重探',
       'mp.expose_label': '实例元信息',
       'mp.expose_hint': '在 /v1/models 信封中输出上游部署的 name / version / features 与共享能力模板（x_open_webui）。关闭后该键完全不出现。',
@@ -1177,7 +1183,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'mp.cache_title': 'Cached Models & Probe Results',
       'mp.cache_hint': 'Lists each probed model with its status: OK (conclusive), Partial (some request left the answer open, retried with backoff), Unprobeable (the upstream never validates the field) or Failed. Capabilities and the last error appear under the levels.',
       'mp.budget_label': 'Custom Budget',
-      'mp.budget_hint': 'The budget itself (4–9000). One model typically costs about 10 subrequests, 20 in the worst case.',
+      'mp.budget_hint': 'The same value as "Per-round Subrequest Budget" above: the presets write 40 / 2000 in one click, while this input takes any value from 4 to 9000 — the preset then reads "Custom". One model typically costs about 10 subrequests, 20 in the worst case.',
       'mp.timeout_label': 'Per-model Timeout',
       'mp.timeout_hint': 'Maximum wait per probe request (1–120 seconds).',
       'mp.wait_label': 'Wait Time',
@@ -1186,6 +1192,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'mp.saved': 'Probe settings saved',
       'mp.refresh': 'Probe Now',
       'mp.refresh_done': 'Probe finished: {probed} probed, {unknown} unprobeable, {failed} failed',
+      'mp.refresh_truncated': 'Probe still running: {probed} probed, {unknown} unprobeable, {failed} failed. This round used up its subrequest budget ({used}); the remaining {pending} models continue in the background — no need to click again.',
       'mp.refresh_auth': 'Credentials expired mid-probe (HTTP 401/403); aborted: {probed} probed, {unknown} unprobeable, {failed} failed. Please re-import the session',
       'mp.th_model': 'Model',
       'mp.th_efforts': 'Supported Efforts',
@@ -1201,6 +1208,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'mp.st_failed': 'Failed, will retry',
       'mp.budget_free': 'Free plan (40 subrequests/round)',
       'mp.budget_paid': 'Paid plan (2000 subrequests/round)',
+      'mp.budget_custom_value': 'Custom ({value} subrequests/round)',
       'mp.reprobe': 'Re-probe',
       'mp.expose_label': 'Instance Metadata',
       'mp.expose_hint': 'Serves the upstream deployment name / version / features and the shared capability template as x_open_webui on the /v1/models envelope. When off, the key is absent entirely.',
@@ -1632,17 +1640,30 @@ export const ADMIN_UI = `<!DOCTYPE html>
   var MP_BUDGET_LABELS = { '40': 'mp.budget_free', '2000': 'mp.budget_paid' };
   var MP_BUDGET_VALUES = [40, 2000];
 
+  // The select and the custom input below are two views of ONE stored setting
+  // (budget): the presets write 40 / 2000 in one click, the input takes anything in
+  // 4-9000. A stored value that is neither preset gets its own entry, so the select
+  // never claims the free plan is active while a custom budget is in effect.
+  //
+  // 下拉框与下方的自定义输入框是同一个存储设置（budget）的两个视图：预设一键写入
+  // 40 / 2000，输入框接受 4–9000 的任意值。两个预设之外的值会获得独立条目，因此
+  // 存着自定义预算时，下拉框绝不会谎称免费层生效。
   function fillBudgetSelect(current) {
     var sel = $('mp-budget-select');
     if (!sel) return;
+    var budget = parseInt(current, 10);
+    var values = MP_BUDGET_VALUES.slice();
+    if (!isNaN(budget) && values.indexOf(budget) < 0) values.push(budget);
     sel.innerHTML = '';
-    for (var i = 0; i < MP_BUDGET_VALUES.length; i++) {
+    for (var i = 0; i < values.length; i++) {
+      var value = String(values[i]);
       var option = document.createElement('option');
-      option.value = String(MP_BUDGET_VALUES[i]);
-      option.textContent = t(MP_BUDGET_LABELS[String(MP_BUDGET_VALUES[i])]);
+      option.value = value;
+      var label = MP_BUDGET_LABELS[value];
+      option.textContent = label ? t(label) : tfmt('mp.budget_custom_value', { value: value });
       sel.appendChild(option);
     }
-    sel.value = Number(current) >= 1000 ? '2000' : '40';
+    if (!isNaN(budget)) sel.value = String(budget);
   }
 
   // Four states, because "the upstream never validates the field" (unprobeable) and
@@ -1838,15 +1859,24 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   // The round counters are four-way now, but the banner copy only has three slots;
   // "partial" is folded into "failed" so the message stays truthful and short.
+  // The pending count is what a truncated round still owes the queue: the free plan's
+  // 40 subrequests cover only ~4 models, so "4 probed" is the normal answer there and
+  // must not be announced as a finished round.
   //
   // 轮次计数现在是四态，而横幅文案只有三个占位；partial 折进 failed，既不撒谎也不
-  // 让文案变长。
+  // 让文案变长。pending 是被预算截断的轮次仍欠队列的模型数：免费层 40 个子请求只够
+  // 约 4 个模型，因此"探完 4 个"在那里是常态，绝不能被宣布成"整轮已完成"。
   function probeBannerParams(data) {
     var stats = data.stats || data;
+    var probed = stats.ok || 0;
+    var unknown = stats.unprobeable || 0;
+    var failed = (stats.failed || 0) + (stats.partial || 0);
     return {
-      probed: stats.ok || 0,
-      unknown: stats.unprobeable || 0,
-      failed: (stats.failed || 0) + (stats.partial || 0)
+      probed: probed,
+      unknown: unknown,
+      failed: failed,
+      used: stats.budgetUsed || 0,
+      pending: Math.max(0, (stats.total || 0) - probed - unknown - failed)
     };
   }
 
@@ -1856,10 +1886,22 @@ export const ADMIN_UI = `<!DOCTYPE html>
     clearBanner('mp-banner');
     api('/admin/api/probe/refresh', { method: 'POST', body: model ? { model: model } : {} })
       .then(function (data) {
+        // The auth-expired flag lives in the round stats; older builds also echoed it
+        // at the top level, so read both to stay compatible either way.
+        //
+        // 凭证失效标记在轮次统计里；旧构建也曾在最外层回传，因此两者都读以保持兼容。
+        var stats = data.stats || data;
         var params = probeBannerParams(data);
-        setBanner('mp-banner', data.authExpired ? 'warn' : 'ok', function () {
-          return data.authExpired ? tfmt('mp.refresh_auth', params) : tfmt('mp.refresh_done', params);
-        });
+        var authExpired = stats.authExpired === true || data.authExpired === true;
+        // A truncated round is not a finished one: the coordinator keeps probing with
+        // its own alarm, so the banner must say so instead of claiming "done".
+        //
+        // 被截断的轮次不等于已完成的轮次：协调者会用自身 alarm 继续探测，因此横幅必须
+        // 说明这一点，而不是宣布"完成"。
+        var truncated = stats.truncated === true;
+        var type = authExpired ? 'warn' : (truncated ? 'warn' : 'ok');
+        var key = authExpired ? 'mp.refresh_auth' : (truncated ? 'mp.refresh_truncated' : 'mp.refresh_done');
+        setBanner('mp-banner', type, function () { return tfmt(key, params); });
         loadProbe();
       })
       .catch(function (err) { setBanner('mp-banner', 'err', function () { return etext(err.message); }); })
