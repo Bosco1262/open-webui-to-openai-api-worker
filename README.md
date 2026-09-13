@@ -33,7 +33,7 @@ OpenAI clients ──▶ Bearer sk-xxx ──▶  /v1/*            │
 │   │   ├── index.ts                 # Entry point and routing (re-exports the DO class)
 │   │   ├── types.ts                 # Shared types
 │   │   ├── kv.ts                    # KV data layer (generic primitives + instance cache)
-│   │   ├── intervals.ts             # Shared granularity steps (daily … 30 min)
+│   │   ├── intervals.ts             # Shared granularity steps (daily … 30 min, plus 12 h and off)
 │   │   ├── touch.ts                 # API-key last_used write throttle
 │   │   ├── auth.ts                  # Admin / client authentication
 │   │   ├── session.ts               # Upstream credential headers + bounded upstream fetch
@@ -192,13 +192,13 @@ How it works (typically 10, at most 20 real `max_tokens=1` requests per model):
 - **Instance metadata**: the envelope carries `x_open_webui{name, version, features, default_model_capabilities}` read from the upstream `/api/config` (which exists under the legacy `/api` prefix only -- the modern prefix answers 200 with an HTML page, so the legacy prefix is hard-coded and the body is validated as JSON).
 - **Controls**: admin console -> **Upstream Server -> Model Probe** card -- feature switch, per-round subrequest budget (presets: free plan 40 / paid plan 2000), per-request timeout (30s) and the bounded `/v1/models` wait (5s, 0 = never wait).
 - **State machine**: `ok` (conclusive), `partial` (some request left the answer open; retried with backoff), `unprobeable` (the upstream never validates the field: permanent, no `reasoning` but capabilities are still served) and `failed` (retried with backoff). A failed re-probe **never** throws away facts that were already established.
-- **Re-probe triggers**: an engine fingerprint change (derived from the model list, zero requests, deliberately excluding the top-level `created` that changes on every fetch), backoff expiry, or an operator action. There is **no time-based TTL**. An id repeated in the upstream list is probed once (the first fingerprint wins).
+- **Re-probe triggers**: an engine fingerprint change (derived from the model list, zero requests, deliberately excluding the top-level `created` that changes on every fetch), backoff expiry, or an operator action. There is **no time-based TTL**. An id repeated in the upstream list is probed once (the first fingerprint wins). An optional **scheduled patrol** (off by default, one of the shared granularity steps from 30 minutes to daily -- the same table as the usage-tracking granularity) rides the DO alarm as a heartbeat: when due it re-aligns the model list and probes only on a fingerprint change, so an idle deployment notices model additions/removals and expired credentials sooner.
 - **Prefix detection**: a candidate prefix counts as correct only when the answer really is a model list, or when the upstream rejects the credentials (401/403) -- i.e. the route exists but the session died. A 404, a 5xx and the SPA's "200 + HTML" page all move on to the next candidate, so a broken modern prefix can no longer be cached as "working".
 - **Upstream timeouts**: every request this Worker sends upstream is bounded -- 15s for the model list and prefix probes, 300s for a body-producing call, and a streaming call bounds only the wait for the response headers (the SSE body is never cut off). An upstream that accepts the connection and never answers can therefore no longer pin a Worker request open.
 - **Concurrent rounds**: the coordinator joins a round only when it is at least as thorough and covers at least the same models; an admin "probe now" therefore queues behind an unrelated request-driven round instead of returning someone else's statistics.
 - **Scheduling**: a single Durable Object coordinator drains the queue with its own alarms, so **no client has to trigger it repeatedly**; `/v1/models` only waits (bounded) when a probe for those models is genuinely in flight -- a model in backoff, or one the upstream never validates, is answered immediately.
 - **400 self-heal**: a 400/422 on `chat/completions` whose text mentions `reasoning[_ ]effort` drops the level the client used from the cache and schedules a re-probe; **the client still receives the upstream error, re-wrapped exactly as before**.
-- **Single-model read**: `GET /v1/models/{id}` returns one normalized model (probe fields included); an unknown id answers 404 `model_not_found`. It carries no envelope and never triggers a probe.
+- **Single-model read**: `GET /v1/models/{id}` returns one normalized model (probe fields included); an unknown id answers 404 `model_not_found`. It carries no envelope and never waits — if that model's probe facts are missing, a background round fills them in for that model alone without blocking the response.
 
 Python (OpenAI SDK):
 
@@ -257,7 +257,7 @@ Storage is split in two, each half sitting next to how its data is used.
 
 - API key verification is O(1): the key plaintext is the KV key name, no iteration needed. The session is cached in the Worker instance for 60 seconds, so **each proxy request costs exactly one KV read** — the API key lookup, which cannot be cached because deleting a key must take effect immediately.
 - A corrupt, truncated or hand-edited KV value (a session that no longer parses, say) degrades to "absent" or to the defaults instead of failing the request that read it, so it stays repairable from the console.
-- `last_used` updates are throttled and written asynchronously via `ctx.waitUntil`: a never-used key is recorded immediately on its first call, afterwards at most once per configured interval (default: daily, adjustable in the admin console under API Management → Usage Tracking Granularity).
+- `last_used` updates are throttled and written asynchronously via `ctx.waitUntil`: a never-used key is recorded immediately on its first call, afterwards at most once per configured interval (default: daily, adjustable in the admin console under API Management → Usage Tracking Granularity). With the "Off" step, recording stops entirely: existing history stays in KV, but the "Last Used" column shows a disabled notice instead of timestamps.
 - **Write budget**: the free plan allows 1,000 writes per day, and "granularity × active API keys" decides the consumption. The 10-minute step wrote 144 times per key per day — seven keys would exhaust the whole daily quota — so it was removed; the finest remaining step (30 minutes) leaves room for roughly 20 keys.
 
 **Durable Object `ModelProbeCoordinator`** (SQLite, one row per model) carries the probe facts and the instance snapshot.
@@ -275,7 +275,7 @@ Model probing costs typically 10 and at most 20 real `max_tokens=1` requests per
 - With no password configured at all (`none`, e.g. `ADMIN_PASSWORD` was removed and a web password was never set), all admin endpoints return 403 except the ones required for first-time setup; the admin features are unavailable until a password is set in the web UI.
 - **Preset the `ADMIN_PASSWORD` secret before the domain is public.** The first-visit setup exists for the "nothing configured yet" state, and that state is claimable by anyone who reaches `/admin` first. With the secret bound, `POST /admin/api/setup` answers 403 (`err.setup_secret_exists`) and the web UI cannot replace it; clearing the secret (and deleting the KV hash) is the documented way back to setup.
 - "Change password" in the console immediately invalidates all logged-in admin sessions and requires re-login; a Secret-sourced password is not written to KV unless overridden in the console.
-- The login endpoint has failure lockout: 5 consecutive failures from the same client IP within 15 minutes return 429 and lock it out, which slows brute-force attempts.
+- The login endpoint has failure lockout: 5 consecutive failures from the same client IP within 15 minutes return 429 and lock it out, which slows brute-force attempts. The counter is kept **per Worker isolate**, so rotating across Cloudflare edge locations sidesteps it; for a hard guarantee, add a Cloudflare WAF Rate Limiting rule on `/admin/api/login`.
 - Keep client API keys safe; the full key is shown only once at creation.
 - Imported Open WebUI credentials are stored only in KV; the UI shows only a redacted summary.
 

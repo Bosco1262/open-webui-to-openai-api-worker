@@ -52,6 +52,8 @@ const lastTouched = new Map<string, number>();
 /**
  * Throttled asynchronous update of `last_used`, executed within `ctx.waitUntil`.
  *
+ * - A granularity of 0 switches the feature off: nothing is written, and whatever
+ *   history a key has stays in KV but is no longer refreshed or shown;
  * - For a never-used Key (last_used === 0), an immediate write is performed on the first call;
  * - Afterwards, each Key is written at most once per configured granularity (default: daily, adjustable in the management console).
  *
@@ -61,11 +63,23 @@ const lastTouched = new Map<string, number>();
 /**
  * 节流的 `last_used` 异步更新，在 `ctx.waitUntil` 内执行。
  *
+ * - 粒度为 0 表示关闭该功能：什么都不写，Key 既有的历史数据仍留在 KV 里，但不再
+ *   刷新、也不再显示；
  * - 从未使用的 Key（last_used === 0）首次调用立即写入一次；
  * - 之后每个 Key 至多按配置粒度写一次（默认每天，可在管理控制台调整）。
  * 写入时间取「实例内记录」与「KV 中 last_used」的较大者，isolate 重启后依然节流。
  */
 export async function touchApiKey(env: Env, key: string, meta: ApiKeyMeta): Promise<void> {
+  // One read serves the whole call; the second read this replaces was pure
+  // redundancy (the instance cache makes it cheap, but not free).
+  //
+  // 一次读取服务整个调用；被替换的第二次读取纯属冗余（实例缓存让它便宜，但不免费）。
+  const interval = await getTouchInterval(env);
+  // The off switch is checked before the first-use write: "off" must mean no write
+  // at all, not "one write and then never again".
+  //
+  // 关闭开关要在"首次使用写入"之前判断：关就是一次都不写，而不是"写一次以后再也不写"。
+  if (interval === 0) return;
   const now = Date.now();
   // A never-used key is recorded immediately on its first call.
   // 从未使用的 Key 在首次调用时立即记录。
@@ -74,7 +88,7 @@ export async function touchApiKey(env: Env, key: string, meta: ApiKeyMeta): Prom
     await env.KV.put(apiKeyKVKey(key), JSON.stringify({ ...meta, last_used: Math.floor(now / 1000) }));
     return;
   }
-  const intervalMs = (await getTouchInterval(env)) * 1000;
+  const intervalMs = interval * 1000;
   // Skip if the key was written within the throttle window; the persisted
   // last_used also counts so a fresh isolate does not rewrite early.
   //

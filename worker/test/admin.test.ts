@@ -183,6 +183,48 @@ test("with nothing configured, setup is still open (it is the only way in)", asy
 });
 
 // --------------------------------------------------------------------------- //
+// /admin/api/status: public by necessity, minimal by design
+// /admin/api/status：因必要而公开，按最小化设计
+// --------------------------------------------------------------------------- //
+
+test("status reveals only the password mode until the caller is signed in", async () => {
+  const env = makeEnv({ adminPassword: "preset", storedSession: STORED_SESSION });
+  const anonymous = await handleAdminApiRequest(
+    env,
+    new Request("https://worker.test/admin/api/status"),
+  );
+  assert.equal(anonymous.status, 200);
+  const anon = (await anonymous.json()) as Record<string, unknown>;
+  // Pre-login the console needs exactly one field: which login view to show.
+  // Everything else -- the upstream base_url, the credential summary, the key
+  // count, this Worker's /v1 address -- is deployment info an unauthenticated
+  // visitor has no need for.
+  //
+  // 登录前控制台只需要一个字段：该显示哪个登录视图。其余一切——上游 base_url、
+  // 凭证摘要、Key 数量、本 Worker 的 /v1 地址——都是未登录访问者无需知道的
+  // 部署信息。
+  assert.equal(anon.adminPasswordMode, "secret");
+  assert.deepEqual(Object.keys(anon).sort(), ["adminPasswordMode", "ok"]);
+
+  const authed = await handleAdminApiRequest(
+    env,
+    new Request("https://worker.test/admin/api/status", {
+      headers: { cookie: `ow2_admin=${await createAdminToken(env)}` },
+    }),
+  );
+  assert.equal(authed.status, 200);
+  const full = (await authed.json()) as Record<string, unknown>;
+  // The signed-in payload keeps its operator-facing shape.
+  // 已登录的负载保持面向运维的完整形状。
+  assert.equal(full.ok, true);
+  assert.equal(full.adminPasswordMode, "secret");
+  assert.ok("session" in full);
+  assert.ok("apiKeys" in full);
+  assert.ok("baseUrl" in full);
+  assert.ok("touchInterval" in full);
+});
+
+// --------------------------------------------------------------------------- //
 // Connectivity test: the same confirmation rule as the proxy (U1)
 // --------------------------------------------------------------------------- //
 
@@ -295,17 +337,40 @@ test("a missing session inside the coordinator maps to its own message", async (
 });
 
 test("an ordinary coordinator failure still answers with its own text", async () => {
+  // A deliberately UNRELATED message: the model-list message now travels with a
+  // dedicated error name and its own 404 (see the test below), so this test pins
+  // the generic fallback for everything else.
+  //
+  // 刻意选一条**无关**消息：模型列表的消息现在带着专用错误名与它自己的 404（见下面的
+  // 用例），因此本用例钉住的是其余错误的通用回退。
   const env = makeEnv({
     adminPassword: "preset",
     storedSession: STORED_SESSION,
-    probe: failingProbe(new Error("model 'x' is not in the upstream model list")),
+    probe: failingProbe(new Error("storage blew up")),
   });
   const response = await post(env, "/admin/api/probe/refresh", { model: "x" }, true);
   assert.equal(response.status, 500);
-  assert.equal(
-    ((await response.json()) as { error: string }).error,
-    "model 'x' is not in the upstream model list",
-  );
+  assert.equal(((await response.json()) as { error: string }).error, "storage blew up");
+});
+
+test("a per-model refresh naming an absent model answers its own localized 404", async () => {
+  // The coordinator throws with the dedicated NAME; only name + message survive the
+  // RPC boundary, and the name is what the admin API matches on.
+  //
+  // 协调者抛出带专用**名字**的错误；跨 RPC 边界只有名字与消息幸存，管理端匹配的
+  // 正是这个名字。
+  const env = makeEnv({
+    adminPassword: "preset",
+    storedSession: STORED_SESSION,
+    probe: failingProbe(
+      Object.assign(new Error("model 'x' is not in the upstream model list"), {
+        name: "ModelNotInList",
+      }),
+    ),
+  });
+  const response = await post(env, "/admin/api/probe/refresh", { model: "x" }, true);
+  assert.equal(response.status, 404);
+  assert.equal(((await response.json()) as { error: string }).error, "err.probe_model_missing");
 });
 
 test("a round aborted by 401/403 reports authExpired to the console", async () => {
@@ -334,4 +399,68 @@ test("a round aborted by 401/403 reports authExpired to the console", async () =
   // "探测完成"。
   assert.equal(payload.authExpired, true);
   assert.equal(payload.stats.authExpired, true);
+});
+
+// --------------------------------------------------------------------------- //
+// Probe settings: the heartbeat re-arm rides the save
+// 探测设置：心跳重排随保存发生
+// --------------------------------------------------------------------------- //
+
+/** A coordinator stub that only counts rescheduleHeartbeat calls. */
+/** 只统计 rescheduleHeartbeat 调用次数的协调者 stub。 */
+function reschedulingProbe(): { namespace: DurableObjectNamespace; calls: () => number } {
+  let calls = 0;
+  const stub = {
+    rescheduleHeartbeat: async (): Promise<void> => {
+      calls += 1;
+    },
+  };
+  return { namespace: { getByName: () => stub } as unknown as DurableObjectNamespace, calls: () => calls };
+}
+
+test("saving probe settings re-arms the coordinator's heartbeat immediately", async () => {
+  const probe = reschedulingProbe();
+  const env = makeEnv({
+    adminPassword: "preset",
+    storedSession: STORED_SESSION,
+    probe: probe.namespace,
+  });
+  const response = await post(env, "/admin/api/probe/settings", {
+    enabled: true,
+    timeout: 30,
+    wait: 5,
+    budget: 40,
+    expose_instance_meta: true,
+    heartbeat_interval: 43_200,
+  }, true);
+  assert.equal(response.status, 200);
+  // An idle deployment has no other occasion to notice the change: without this call
+  // the new patrol interval would only apply after some future round.
+  //
+  // 空闲部署没有别的时机感知改动：缺了这次调用，新的巡检间隔要到未来某一轮才生效。
+  assert.equal(probe.calls(), 1);
+});
+
+test("a heartbeat step outside the shared table is a rejected settings write", async () => {
+  const probe = reschedulingProbe();
+  const env = makeEnv({
+    adminPassword: "preset",
+    storedSession: STORED_SESSION,
+    probe: probe.namespace,
+  });
+  const response = await post(env, "/admin/api/probe/settings", {
+    enabled: true,
+    timeout: 30,
+    wait: 5,
+    budget: 40,
+    expose_instance_meta: true,
+    // 600s = 10 minutes: a step that was deliberately removed from the shared table.
+    // 600 秒 = 10 分钟：共享档位表中已被刻意移除的档位。
+    heartbeat_interval: 600,
+  }, true);
+  assert.equal(response.status, 400);
+  assert.equal(((await response.json()) as { error: string }).error, "err.settings_invalid");
+  // A rejected write must not touch the coordinator's schedule either.
+  // 被拒绝的写入同样绝不能碰协调者的排程。
+  assert.equal(probe.calls(), 0);
 });

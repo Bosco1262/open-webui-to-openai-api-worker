@@ -20,7 +20,7 @@ README 只描述最终行为，本文档记录"**为什么**是这样"。
 | 探测执行 | `app.py::_probe_model`（六步，每模型典型 10 / 最坏 20 次请求） | `worker/src/probeRound.ts` |
 | 缓存存放 | `model_probe_cache.json`（version 2） | DO `ModelProbeCoordinator` 的 SQLite（每模型一行），可导出为同样的 JSON 形状 |
 | 刷新编排 | `app.py::_refresh_model_probe`（并发 + Semaphore） | DO 串行 + 预算分片 + alarm 自续 |
-| 重探判据 | 指纹变化 / 退避到期 / 手动 | 同（**无时间型 TTL**） |
+| 重探判据 | 指纹变化 / 退避到期 / 手动 | 同（**无时间型 TTL**；另有可选「定时巡检」，默认关闭） |
 | 对外契约 | `/v1/models` 字段、`x_open_webui` 信封、`GET /v1/models/{id}`、400 自愈 | 同 |
 
 命名硬改名、不做兼容层（决策 D11），因此旧文件名 / 旧 KV 键 / 旧管理端点全部失效。
@@ -38,7 +38,7 @@ README 只描述最终行为，本文档记录"**为什么**是这样"。
 | D7 | 未确立的能力 | **省略**，不回落到 OWUI 模板 |
 | D8 | `reasoning.default_*` | 引擎没说就**省略** |
 | D9 | 错误体文案 | 保持 worker 原文案（结构与 Python 同构） |
-| D10 | `/v1/models/{id}` | 照抄：**不带信封、不触发探测** |
+| D10 | `/v1/models/{id}` | 照抄：**不带信封、不做有限等待**（该模型缺字段时仅在后台为它单独补探，不阻塞响应） |
 | D11 | 命名 | **硬改名**，无回落；操作者需重新部署 |
 | D12 | 日志 | 轮次级汇总 + 失败/异常逐条（Workers Logs 单请求上限 256 KB） |
 | D13 | 落盘粒度 | **每探完一个模型立即写**（DO SQLite 无 KV 的 1 写/秒/键限制） |
@@ -51,10 +51,10 @@ README 只描述最终行为，本文档记录"**为什么**是这样"。
 Worker（薄）                                  Durable Object: ModelProbeCoordinator（每个上游 base_url 一个实例）
 ├─ GET  /v1/models            ──────────────▶ present(refs, waitSeconds)      强一致读取 + 有界等待
 │    1 拉上游 /models                          ├─ SQLite: models 表（每模型一行 JSON，13 字段 + 指纹 + 状态机）
-│    2 算指纹 + 规范化（modelCatalog.ts）       │           meta 表（缓存版本、上游前缀、instance_meta）
+│    2 算指纹 + 规范化（modelCatalog.ts）       │           meta 表（缓存版本、上游前缀、instance_meta、heartbeat_next）
 │    3 1 次 RPC 取探测字段 + 实例信封            ├─ alarm: 自续排空队列（15 分钟墙钟/次，无需客户端流量）
 │    4 KV: settings:probe                      └─ RPC: refresh / probeOne / invalidate / view
-├─ GET  /v1/models/{id}       ──────────────▶ present([ref], 0)               不触发探测
+├─ GET  /v1/models/{id}       ──────────────▶ present([ref], 0)               只补该模型、不等待
 ├─ POST /v1/chat/completions  ── 400/422 命中挡位关键词 ─▶ invalidate(model, effort)
 └─ /admin/api/probe*          ──────────────▶ view / refresh / probeOne
 ```
@@ -69,6 +69,14 @@ Worker（薄）                                  Durable Object: ModelProbeCoord
 预算依然生效：单次调用最多花 `settings.budget` 个上游子请求；预算耗尽就落盘已有结果并
 安排 alarm 继续（`ALARM_CONTINUE_MS = 2s`），这也是冷启动能在几秒内收敛、而不是靠一次
 请求跑完的原因。
+
+**触发点清单**：管理端「立即探测」/ 行内「重探」（`POST /admin/api/probe/refresh`）、
+`/v1/models` 与 `/v1/models/{id}` 的按需补探、400 自愈重探、被预算截断轮次的 alarm 续跑
+（`pending_round`），以及**可选的定时巡检**（默认关闭）：复用同一个 DO alarm，唤醒时刻取
+`min(退避到期, 心跳刻度)`，刻度到期那次照常跑非强制轮次——无欠账时整轮成本只有拉模型
+列表的 1–2 个子请求，有指纹变化才探测，绝不是强制全量重探。间隔取共享刻度表的档位
+（每三十分钟到每天，0=关闭），控制台调整、保存后立即重排；刻度持久化在协调者 meta 表
+（键 `heartbeat_next`），跨驱逐可恢复。不使用 Cron Trigger，不改 `wrangler.jsonc`。
 
 ## 4. 探测算法（六步，全部 `max_tokens=1`）
 
@@ -93,7 +101,7 @@ Worker（薄）                                  Durable Object: ModelProbeCoord
 ## 5. 对外契约
 
 - **每模型**：`id/object/created/owned_by` + 可选 `name`、`max_model_len`/`max_context_length`/`context_length`、`quantization`、`description`、`x_open_webui.capabilities`（相对共享模板的**差异键**）+ 探测附加的 `capabilities`、`supported_parameters`、`reasoning`、`architecture`。
-  规则：**拿不准就省略，绝不填默认值**；挡位升序 `none → max`。
+  规则：**拿不准就省略，绝不填默认值**；挡位按 OpenRouter 的排列从大到小 `max → none`（未知挡位排在末尾）。
 - **信封**：`{object:"list", data:[…], x_open_webui:{name?, version?, features?, default_model_capabilities?}}`；
   `default_model_capabilities` = **所有上报模型都一致同意的键**（由 Worker 计算并随同一次 RPC 交给协调者）；
   `exposeInstanceMeta=false` 或 `/api/config` 读不到 ⇒ 该键整块不出现。
@@ -143,7 +151,7 @@ Worker（薄）                                  Durable Object: ModelProbeCoord
 | DO 单实例（按上游 base_url 分片） | 同一上游的全部 `/v1/models` 读都过它 | 单对象软限制 1,000 请求/秒，个人部署远低于此 |
 | 上游压力 ×10（每模型 10 次请求）+ Cloudflare 出口 IP | 可能触发上游限流 | 调小预算/并发、提高退避；属物理事实，无法消除 |
 | 无 CLI（Python 有 `--probe`） | 只能从管理端触发 | 管理端「立即探测」/ 行内「重探」 |
-| 首次唤醒依赖流量 | 冷部署后第一个请求才开始探测 | DO 被唤醒后自续；D4 选择不加 Cron Trigger |
+| 首次唤醒依赖流量 | 冷部署后第一个请求才开始探测 | DO 被唤醒后自续；D4 选择不加 Cron Trigger；空闲部署可开启「定时巡检」兜底（可选，默认关闭，DO alarm 心跳实现） |
 | 上游"接了连接却不答复" | 请求可能被永久挂住 | 全部上游请求都带上限：元信息（模型列表、前缀探测）15 秒、需要响应体 300 秒、流式只限"等待响应头"（`fetchUpstream`） |
 | 前缀"不是 404 就算对"（旧规则） | SPA 的 200 + HTML 或临时 5xx 会被缓存成"前缀可用" | 已改为**确认式判定**：只有可读的模型列表或 401/403 才算确认（`confirmUpstreamPrefix`），三个调用方共用同一规则 |
 | 盲目 join 在途轮次（旧行为） | 管理端「立即探测」可能什么都没强制、却拿到无关轮次的统计 | 已改为 `canJoinRound`：只有在途轮次至少同样彻底且覆盖同样模型时才加入，否则排队 |
@@ -195,6 +203,15 @@ Worker（薄）                                  Durable Object: ModelProbeCoord
 | A4 | 被预算截断的轮次只把"还有活"交给 alarm，强制属性丢失：alarm 按 `force=false` 重启，会跳过所有仍持有 `ok` 结论的模型——免费层上「立即探测」只重探前 ~4 个，后半列表永远不会被重探，横幅那句"其余由后台继续"也就成了假话 | `runProbeRound` 统计未探完的 `stats.remaining`；截断时把它连同 force 标志写入协调者 meta 表，alarm 按原请求续跑（本地实测：强制重探按 `total` 6→5→4→3→2 逐跳排空）；横幅新增"探测进行中 / 本轮预算已用完 / 其余由后台自动继续"文案 |
 | A5 | 预算下拉框把非预设值显示成"免费层（40 子请求/轮）"，与"自定义预算"输入框的关系容易被误解为两个设置 | 下拉框为非预设值增加「自定义（N 子请求/轮）」条目；提示文字说明两者是**同一个** `budget` 值 |
 
+**控制台第二轮调整（2026-09-12，应用户反馈）**
+
+| 编号 | 内容 | 处置 |
+|---|---|---|
+| A6 | 预算有两个控件（预设下拉框 + 自定义输入框），语义重复 | 删除预设下拉框与 `budgetPresets` API 字段；「每轮子请求预算」成为唯一入口（4–9000，按「保存」生效），提示写明免费层上限 50、建议 ≤40 |
+| A7 | 挡位按 `none → max` 升序输出 | 对齐 OpenRouter，改为从大到小 `max → none`（未知挡位仍排末尾）；`EFFORT_ORDER` 同时决定兜底候选的遍历顺序 |
+| A8 | 平台的"单次调用子请求上限"（Too many subrequests）被记成**该模型**的失败并进入退避，污染缓存语义 | `isPlatformSubrequestError()` 识别后按预算耗尽处理：整轮截断、该模型保持原样、alarm 在新一次调用中继续——错误绝不进入缓存，客户端不受影响 |
+| A9 | 挡位/能力/参数挤在一行，长报错把"支持参数"挤成一行一个字母 | 三列改为一行一条（`.mp-list`），报错独立成行可换行（`.mp-error`）；探测失败的红色报告**常驻**在轮次横幅框中（每次加载都会重新渲染），成功后自动消失 |
+
 ## 9. 验收
 
 **静态检查与测试**
@@ -206,11 +223,11 @@ npm.cmd run typecheck        # tsc --noEmit，0 error（含 erasableSyntaxOnly �
 npm.cmd test                 # node --test --test-isolation=none --test-concurrency=1
 ```
 
-当前实测：`typecheck` 0 error；`npm test` **149 项全部通过**（12 个测试文件）：
+当前实测：`typecheck` 0 error；`npm test` **162 项全部通过**（12 个测试文件）：
 
 ```text
-ℹ tests 149
-ℹ pass 149
+ℹ tests 162
+ℹ pass 162
 ℹ fail 0
 ```
 
@@ -227,7 +244,9 @@ npm.cmd test                 # node --test --test-isolation=none --test-concurre
 `max_model_len: 0` 不丢、共享能力模板交集、缓存版本闸门、SQL 分片查询、子集对齐不裁剪其它模型、
 同 id 重复只探一次、TTL 缓存的命中/过期/在途共享/失败不缓存、`/api/config` 的 HTML 陷阱与
 快照合并规则、前缀确认规则（500 / SPA 200+HTML 都不算确认，401/403 算确认）、
-`canJoinRound` 的六种组合、KV 坏值退化、`ADMIN_PASSWORD` 存在时 setup 403、连通性测试的三种结果。
+`canJoinRound` 的六种组合、KV 坏值退化、`ADMIN_PASSWORD` 存在时 setup 403、连通性测试的三种结果、
+心跳唤醒轴（两轴取更早 / 关闭不扰退避 / 不提前唤醒 / 坏刻度退化）、心跳间隔对共享档位
+全集的严格写校验、保存设置立即重排心跳。
 
 契约测试（`test/proxyContract.test.ts`，stub fetch + 假 KV + 假 DO）钉住 `/v1/models` 的字段集合与
 信封、上游能力模板不泄进 `capabilities`、`exposeInstanceMeta=false` 时信封整块消失、
@@ -259,7 +278,7 @@ Worker 不再直接请求 `/api/config`、`/v1/models/{id}` 支持含斜杠的 i
 其中第 3 项另在本地 workerd（`npm run mock` + `wrangler dev`，budget=12）复核过逐跳排空。
 
 1. **真实上游 5 条硬断言 — 全部通过**：
-   - `Qwen3.8-27B` → `supported_efforts == [none, low, medium, xhigh]`、`default_effort == "xhigh"` ✓
+   - `Qwen3.8-27B` → `supported_efforts == [xhigh, medium, low, none]`（OpenRouter 顺序）、`default_effort == "xhigh"` ✓
    - `gpt-oss-120b` → `[low, medium, high]`、`mandatory == true` ✓
    - `DeepSeek-V4-Flash-0731` → `capabilities.vision == false` ✓
    - `gemma-4-31B-it` / `GLM-OCR` → `capabilities.function_calling == false` ✓

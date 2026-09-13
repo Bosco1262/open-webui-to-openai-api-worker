@@ -58,8 +58,16 @@ export default {
       }
 
       // ---- OpenAI-compatible proxy ----
+      // Exact matching only: `startsWith("/v1")` also let `/v1models` through,
+      // and the passthrough then built `.../api/v1models` -- a route that does
+      // not exist, often answered by the SPA's "200 + HTML" page. Slash-less
+      // paths are an OpenAI-style 404 now.
+      //
       // ---- OpenAI 兼容代理 ----
-      if (path.startsWith("/v1")) {
+      // 只做精确匹配：`startsWith("/v1")` 会放行 `/v1models`，随后透传会拼出
+      // `.../api/v1models`——一个不存在的路由，常被 SPA 以 "200 + 一页 HTML" 应答。
+      // 缺斜杠的路径现在返回 OpenAI 风格的 404。
+      if (path === "/v1" || path.startsWith("/v1/")) {
         return await handleV1Request(env, request, ctx);
       }
 

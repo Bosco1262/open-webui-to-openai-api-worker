@@ -242,8 +242,17 @@ export async function getOrCreateSessionSecret(env: Env): Promise<string> {
   if (!secret) {
     // Generate once and persist; reused by every isolate afterwards.
     // 只生成一次并持久化，之后所有 isolate 复用。
-    secret = randomBase64Url(32);
-    await env.KV.put(K_SESSION_SECRET, secret);
+    const generated = randomBase64Url(32);
+    await env.KV.put(K_SESSION_SECRET, generated);
+    // Two isolates can reach the "no secret" branch in the same instant, and KV is
+    // last-write-wins: re-read and adopt the actual winner, or tokens signed with
+    // our value would fail verification on the next read -- an admin signed out for
+    // no visible reason.
+    //
+    // 两个 isolate 可能在同一瞬间走进"无 secret"分支，而 KV 是后写者胜：回读并采用
+    // 真正生效的那个值，否则用我们这份签发的令牌在下一次读取时就会验签失败——管理员
+    // 会莫名其妙地掉线。
+    secret = (await env.KV.get(K_SESSION_SECRET)) || generated;
   }
   sessionSecretCache = secret;
   return secret;
@@ -269,8 +278,21 @@ export async function getSessionEpoch(env: Env): Promise<number> {
   return Number.isFinite(epoch) && epoch >= 0 ? Math.floor(epoch) : 0;
 }
 
-/** Increment the epoch, invalidating every previously issued admin session. */
-/** 自增纪元，使所有此前签发的管理会话立即失效。 */
+/**
+ * Increment the epoch, invalidating every previously issued admin session.
+ *
+ * Known limitation: the read-modify-write is not atomic, so two password changes
+ * landing in the same instant can lose one increment. The consequence is bounded
+ * -- a handful of pre-change tokens stay valid for their remaining TTL -- and an
+ * atomic counter would put a Durable Object on the path of every epoch read,
+ * a cost this low-frequency operation does not justify.
+ *
+ * 自增纪元，使所有此前签发的管理会话立即失效。
+ *
+ * 已知限制：读改写不是原子的，同一瞬间落下的两次改密可能丢失一次自增。后果有限
+ * ——少数改密前的令牌在其剩余 TTL 内仍有效——而原子计数器会在每条纪元读取路径上
+ * 引入 Durable Object，对这个低频操作不值得。
+ */
 export async function bumpSessionEpoch(env: Env): Promise<void> {
   await env.KV.put(K_SESSION_EPOCH, String((await getSessionEpoch(env)) + 1));
 }

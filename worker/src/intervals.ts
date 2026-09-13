@@ -14,9 +14,20 @@
  * 校验也有唯一事实来源。各功能的*设置值*相互独立，共享的只是可选档位。
  */
 
-/** Allowed granularity steps in seconds (30 minutes to daily). */
-/** 允许的粒度档位（秒），从每三十分钟到每天。 */
-export const INTERVAL_OPTIONS: readonly number[] = [86_400, 21_600, 10_800, 3_600, 1_800];
+/** Allowed granularity steps in seconds (30 minutes to daily), plus 0 = the feature
+ *  is switched off. Every consumer interprets 0 the same way ("do nothing"), which
+ *  is why it lives in the shared table instead of in each feature's own settings. */
+/** 允许的粒度档位（秒），从每三十分钟到每天，另有 0 = 关闭该功能。所有使用方对 0 的
+ *  解释一致（"什么都不做"），因此它放进共享表，而不是散落在各功能的设置里。 */
+export const INTERVAL_OPTIONS: readonly number[] = [
+  86_400,
+  43_200,
+  21_600,
+  10_800,
+  3_600,
+  1_800,
+  0,
+];
 
 /** Default granularity (once per day). */
 /** 默认粒度（每天一次）。 */

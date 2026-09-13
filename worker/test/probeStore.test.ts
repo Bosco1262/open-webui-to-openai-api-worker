@@ -174,6 +174,21 @@ test("an older-version store is wiped so every model is re-probed", () => {
   assert.equal(store.count(), 0);
 });
 
+test("rows without a version key are wiped too (unknown provenance)", () => {
+  // No meta "version": the rows cannot be shown to match the current shape, so
+  // migrate() treats them exactly like an older version -- same rule as
+  // `parseProbeCacheFile` for a file whose version it cannot verify.
+  //
+  // meta 里没有 version：这些行无法证明与当前结构匹配，因此 migrate() 按旧版本
+  // 同样处理——与 `parseProbeCacheFile` 对无法验证版本的文件所用规则一致。
+  const sql = new FakeSql();
+  sql.models.set("a", JSON.stringify({ fingerprint: "fp-a", status: "ok" }));
+  const store = new SqliteProbeStore(sql);
+  store.migrate();
+  assert.equal(sql.meta.get("version"), "2");
+  assert.equal(store.count(), 0);
+});
+
 test("lookups are chunked to stay under the bound-parameter limit", () => {
   const sql = new FakeSql();
   const store = new SqliteProbeStore(sql);

@@ -22,12 +22,13 @@ import assert from "node:assert/strict";
 import {
   deleteSession,
   getApiKeyMeta,
+  getOrCreateSessionSecret,
   getPasswordHash,
   getSession,
   readKvJson,
   setSession,
 } from "../src/kv.ts";
-import { readProbeSettings } from "../src/probeSettings.ts";
+import { parseProbeSettingsInput, readProbeSettings } from "../src/probeSettings.ts";
 import type { Env } from "../src/types.ts";
 
 /**
@@ -138,4 +139,87 @@ test("corrupt probe settings fall back to the defaults", async () => {
   assert.equal(partial.enabled, false);
   assert.equal(partial.timeout, 120);
   assert.equal(partial.budget, 40);
+  // The heartbeat is off by default, and its fallback is OFF rather than a step.
+  // 心跳默认关闭，且其回退值是"关"而不是某个档位。
+  assert.equal(settings.heartbeatInterval, 0);
+});
+
+test("a stored heartbeat interval is kept when it hits the shared table and switched off when not", async () => {
+  const { env, kv } = makeEnv();
+  // Every step of the shared table is a legal stored value.
+  // 共享档位表的每一档都是合法的存储值。
+  for (const seconds of [86_400, 43_200, 21_600, 10_800, 3_600, 1_800, 0]) {
+    kv.raw("settings:probe", JSON.stringify({ heartbeatInterval: seconds }));
+    assert.equal(
+      (await readProbeSettings(env, { useCache: false })).heartbeatInterval,
+      seconds,
+      `heartbeatInterval=${String(seconds)} must be kept`,
+    );
+  }
+
+  // Anything outside the table degrades to off: a mangled interval must never silently
+  // become a patrol cadence nobody chose.
+  //
+  // 表外的值一律退化为关闭：被改坏的间隔绝不能悄悄变成没人选过的巡检节奏。
+  for (const bad of [600, 5, -1, 1800.5, true]) {
+    kv.raw("settings:probe", JSON.stringify({ heartbeatInterval: bad }));
+    const loaded = await readProbeSettings(env, { useCache: false });
+    assert.equal(loaded.heartbeatInterval, 0, `heartbeatInterval=${String(bad)} must mean off`);
+  }
+  // The numeric-string form is kept, mirroring how the loader coerces every knob.
+  // 数字字符串形态会被保留，与加载器对所有旋钮的强转方式一致。
+  kv.raw("settings:probe", JSON.stringify({ heartbeatInterval: "43200" }));
+  assert.equal((await readProbeSettings(env, { useCache: false })).heartbeatInterval, 43_200);
+});
+
+test("the console write path strictly rejects a heartbeat outside the shared table", () => {
+  const base = { enabled: true, expose_instance_meta: true, timeout: 30, wait: 5, budget: 40 };
+  for (const seconds of [86_400, 43_200, 21_600, 10_800, 3_600, 1_800, 0]) {
+    const parsed = parseProbeSettingsInput({ ...base, heartbeat_interval: seconds });
+    assert.notEqual(parsed, null, `heartbeat_interval=${String(seconds)} is valid`);
+    assert.equal(parsed?.heartbeatInterval, seconds);
+  }
+  for (const seconds of [600, 5, -1, 1800.5, "twelve", undefined]) {
+    assert.equal(
+      parseProbeSettingsInput({ ...base, heartbeat_interval: seconds }),
+      null,
+      `heartbeat_interval=${String(seconds)} must be rejected`,
+    );
+  }
+  // `Number(null)` is 0, and 0 is the shared "off" step, so null reads as "off" -- the
+  // same coercion the wait knob already accepts. A MISSING field, by contrast, is a
+  // rejected write: the console always sends the round-tripped seconds.
+  //
+  // `Number(null)` 为 0，而 0 是共享的"关闭"档，因此 null 按"关闭"读取——与 wait
+  // 旋钮早已接受的强转一致。而**缺失**字段按"拒绝写入"处理：控制台总会回传已载入的
+  // 秒数。
+  assert.equal(parseProbeSettingsInput({ ...base, heartbeat_interval: null })?.heartbeatInterval, 0);
+  assert.equal(parseProbeSettingsInput(base), null);
+});
+
+test("a concurrent secret writer wins the race and is adopted", async () => {
+  // Two isolates can hit the "no secret" branch together, and KV is
+  // last-write-wins. The one that generated first must adopt the actual winner,
+  // or tokens signed with its own value fail verification later -- an admin
+  // signed out for no visible reason.
+  //
+  // 两个 isolate 可能同时走进"无 secret"分支，而 KV 是后写者胜。先生成的一方必须
+  // 采用真正生效的值，否则用它自己那份签发的令牌之后会验签失败——管理员会莫名
+  // 其妙地掉线。
+  class RacyKV {
+    private winner: string | null = null;
+    async get(): Promise<string | null> {
+      // First read: nothing stored. After the put below: the other isolate's value.
+      // 第一次读：什么都没有。下面的 put 之后：另一个 isolate 的值。
+      return this.winner;
+    }
+    async put(_key: string, value: string): Promise<void> {
+      // Simulate the concurrent writer landing AFTER ours (last-write-wins).
+      // 模拟并发写入者在我们之后落盘（后写者胜）。
+      void value;
+      this.winner = "the-other-isolates-secret";
+    }
+  }
+  const env = { KV: new RacyKV() } as unknown as Env;
+  assert.equal(await getOrCreateSessionSecret(env), "the-other-isolates-secret");
 });

@@ -17,7 +17,10 @@
  * The budget still applies: one invocation may spend at most `settings.budget`
  * upstream subrequests. When a round runs out, it persists what it has and arms an
  * alarm to continue, which is why a cold deployment converges over a few seconds
- * instead of one request.
+ * instead of one request. The optional heartbeat patrol rides the SAME single alarm:
+ * its tick is the wake-at-latest bound (the wake is `min(backoff, tick)`), so an idle
+ * deployment can be aligned every few hours for the cost of one model-list pull --
+ * never a new trigger type, never a forced re-probe.
  *
  * ModelProbeCoordinator：本部署唯一的探测协调者。
  *
@@ -34,6 +37,9 @@
  *
  * 预算依然生效：单次调用最多花 `settings.budget` 个上游子请求。一轮用完就落盘已有
  * 结果并安排 alarm 继续，这也是冷启动能在几秒内收敛、而不是靠一次请求跑完的原因。
+ * 可选的心跳巡检复用**同一个** alarm：它的刻度是"最晚唤醒"的上界（唤醒时刻取
+ * `min(退避, 刻度)`），因此空闲部署可以每隔几小时花一次拉模型列表的代价完成对齐——
+ * 不新增触发器类型，也绝不是强制重探。
  */
 
 import { DurableObject } from "cloudflare:workers";
@@ -42,17 +48,29 @@ import { ModelProbeCache } from "./modelProbe.ts";
 import { extractModelList, isModelListPayload } from "./modelCatalog.ts";
 import {
   RoundUnavailable,
+  WAKE_MAX_MS,
+  WAKE_MIN_MS,
   canJoinRound,
   createTtlCache,
+  heartbeatDue,
+  heartbeatNextFromMeta,
+  nextWakeAtSeconds,
   pendingRoundFromMeta,
   pendingRoundMeta,
   prefixCandidates,
   refsFromCards,
+  retryWakeAtSeconds,
   retryWakeDelayMs,
 } from "./probeRuntime.ts";
 import type { RoundRequest } from "./probeRuntime.ts";
 import { SqliteProbeStore } from "./probeStore.ts";
-import { ProbeAuthExpired, ProbeBudgetExhausted, ProbeTransient, runProbeRound } from "./probeRound.ts";
+import {
+  ProbeAuthExpired,
+  ProbeBudgetExhausted,
+  ProbeTransient,
+  isPlatformSubrequestError,
+  runProbeRound,
+} from "./probeRound.ts";
 import type { ProbeAnswer, ProbeTransport } from "./probeRound.ts";
 import { readProbeSettings } from "./probeSettings.ts";
 import { getSession } from "./kv.ts";
@@ -85,6 +103,13 @@ const META_PREFIX_KEY = "upstream_prefix";
 /** Bookkeeping key for the round request a budget-truncated round hands to its alarm. */
 /** 被预算截断的轮次交给 alarm 的轮次请求的记账键。 */
 const META_PENDING_ROUND_KEY = "pending_round";
+
+/** Bookkeeping key for the next heartbeat tick (epoch seconds). Persisted in the meta
+ *  table so the patrol survives eviction: an in-memory-only tick would be re-derived
+ *  "a full interval out" on every wake and never actually fire. */
+/** 下一次心跳刻度（Unix 秒）的记账键。持久化在 meta 表使巡检跨驱逐存活：只放在内存
+ *  的刻度会在每次唤醒时被重新推导成"一个完整间隔之后"，永远不会真正触发。 */
+const META_HEARTBEAT_KEY = "heartbeat_next";
 
 /** How soon to continue when a round ran out of budget (milliseconds). */
 /** 预算耗尽后多久继续（毫秒）。 */
@@ -416,7 +441,17 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
     const models = await this.fetchModelRefs(settings);
     if (!models) throw new RoundUnavailable("models_failed");
     if (!models.some(([id]) => id === modelId)) {
-      throw new Error(`model '${modelId}' is not in the upstream model list`);
+      // A dedicated error NAME, not just a message: Durable Object RPC keeps only
+      // `name` and `message` across the boundary, so the admin API matches on the
+      // name to answer its own localized 404 (the same mechanism
+      // `roundUnavailableCode` uses for RoundUnavailable).
+      //
+      // 用专门的错误**名字**而不只是消息：Durable Object RPC 跨边界只保留 `name` 与
+      // `message`，管理端按名字识别并回它自己的本地化 404（与 roundUnavailableCode
+      // 对 RoundUnavailable 的机制相同）。
+      const err = new Error(`model '${modelId}' is not in the upstream model list`);
+      err.name = "ModelNotInList";
+      throw err;
     }
     return this.startRound(models, true, settings, { only: [modelId] });
   }
@@ -463,6 +498,16 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
    * Continue the queue without a client: fetch the current model list, probe what is
    * due, and arm the next alarm.
    *
+   * The single alarm serves TWO wake axes: the backoff (a failed model waiting out its
+   * retry) and the optional heartbeat patrol (the operator-chosen interval). The wake
+   * time is `min(backoff, tick)`, and a wake that is due on NEITHER axis re-arms the
+   * earlier one and returns WITHOUT touching the upstream -- that early exit is what
+   * keeps a quiet deployment at zero upstream requests between heartbeat ticks, and
+   * what keeps "heartbeat off" at exactly the old semantics. A due heartbeat runs the
+   * same NON-forced round as any other wake: with no debt its entire cost is the 1-2
+   * model-list requests, and probing still follows the fingerprint/backoff rules --
+   * the heartbeat is never a forced full re-probe.
+   *
    * When the previous round ran out of budget it left its request behind (see
    * `runRound`), and the continuation resumes THAT request: a forced re-probe must
    * stay forced, or the alarm's default selection would skip every model that still
@@ -470,6 +515,13 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
    *
    * 在没有客户端的情况下继续排空队列：拉取当前模型列表、探测到期项、并安排下一个
    * alarm。
+   *
+   * 这一个 alarm 承载两条唤醒轴：退避（失败模型等待重试）与可选的心跳巡检（运维选择
+   * 的间隔）。唤醒时刻取 `min(退避, 刻度)`，而两条轴**都不**到期的那次唤醒会按较早的
+   * 一轴重新排程并返回，完全不碰上游——这个提前返回让安静的部署在两次心跳之间保持
+   * 零上游请求，也让"关闭心跳"与旧语义完全一致。到期的心跳与其他唤醒一样跑同一轮
+   * **非强制**探测：无欠账时整轮成本只有拉模型列表的 1-2 个请求，是否探测仍按
+   * 指纹/退避规则——心跳绝不是强制全量重探。
    *
    * 上一轮预算耗尽时会把它的请求留下（见 `runRound`），续跑就按**那个**请求进行：
    * 强制重探必须保持强制，否则 alarm 的默认选择会跳过所有仍持有 `ok` 结论的模型，
@@ -489,16 +541,36 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
       const settings = await this.probeSettingsCache();
       if (!settings.enabled) return;
 
+      const now = Date.now() / 1000;
+      // All three gates are local reads (SQLite meta + the in-memory cache): deciding
+      // whether to wake costs no upstream request. The pending round is READ here but
+      // only ever written after the model list is in hand (inside runRound), so an
+      // unreachable upstream below cannot throw away what the next attempt has to
+      // finish.
+      //
+      // 三个门控全是本地读取（SQLite meta + 内存缓存）：判断"要不要干活"不花任何上游
+      // 请求。待续请求在这里**读取**，但只在拿到模型列表之后（runRound 内部）才会被
+      // 写入，因此下面遇到的上游不可达绝不会丢掉下一次尝试要完成的事。
+      const pending = pendingRoundFromMeta(this.store.readMeta(META_PENDING_ROUND_KEY));
+      const retryAt = retryWakeAtSeconds(this.cache.all(), now);
+      const heartbeatAt = this.heartbeatDeadline(settings, now);
+      const backoffDue = retryAt !== null && retryAt <= now;
+      if (!pending && !backoffDue && !heartbeatDue(heartbeatAt, now)) {
+        // A wake with nothing due on any axis: the heartbeat tick re-arming itself, or
+        // an alarm that fired slightly ahead of its deadline. Re-arm at the earlier
+        // axis and stay silent.
+        //
+        // 任何一条轴都没有到期任务的唤醒：心跳刻度给自己排的下一次唤醒，或略早于到期
+        // 时刻触发的 alarm。按较早的一轴重新排程，保持静默。
+        await this.armWake(now, retryAt, heartbeatAt);
+        return;
+      }
+
       const models = await this.fetchModelRefs(settings);
       if (!models) {
         await this.ctx.storage.setAlarm(Date.now() + ALARM_RETRY_MS);
         return;
       }
-      // The pending request is read only once the model list is in hand: an
-      // unreachable upstream must not throw away what the next attempt has to finish.
-      //
-      // 等到模型列表到手后才读取待续请求：上游不可达时绝不能丢掉下一次尝试要完成的事。
-      const pending = pendingRoundFromMeta(this.store.readMeta(META_PENDING_ROUND_KEY));
       await this.startRound(models, pending?.force ?? false, settings, {
         only: pending?.only,
       });
@@ -511,6 +583,42 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
       );
       await this.ctx.storage.setAlarm(Date.now() + ALARM_RETRY_MS);
     }
+  }
+
+  /**
+   * Re-arm (or cancel) the heartbeat from freshly persisted settings. Called by the
+   * admin API right after a settings save: an idle deployment has no other occasion
+   * to notice the change, and the coordinator's own 15s settings cache could still
+   * serve the previous window's copy.
+   *
+   * Turning the heartbeat off cancels ONLY the heartbeat wake: backoff retries and
+   * pending_round continuations keep whatever alarm they already have, and the next
+   * round still runs exactly as before.
+   *
+   * 按刚落盘的设置重排（或取消）心跳。由管理端在设置保存成功后立即调用：空闲部署
+   * 没有别的时机感知改动，而协调者自身 15 秒的设置缓存可能还在返回上一窗口的副本。
+   *
+   * 关闭心跳只取消"心跳维度的唤醒"：退避重试与 pending_round 续跑保留其已有的
+   * alarm，下一轮的行为与从前完全一致。
+   */
+  async rescheduleHeartbeat(): Promise<void> {
+    this.ensureLoaded();
+    // A fresh read on purpose -- see the docstring.
+    // 刻意绕过缓存直读 KV——理由见方法注释。
+    const settings = await readProbeSettings(this.env, { useCache: false });
+    const now = Date.now() / 1000;
+    if (!settings.enabled || settings.heartbeatInterval <= 0) {
+      // Drop the stored tick so a later re-enable starts counting from "now".
+      // 清掉已存的刻度，让之后重新开启时从"现在"起算。
+      this.store.writeMeta(META_HEARTBEAT_KEY, "");
+      const retryAt = retryWakeAtSeconds(this.cache.all(), now);
+      await this.armWake(now, retryAt, null);
+      return;
+    }
+    const heartbeatAt = now + settings.heartbeatInterval;
+    this.store.writeMeta(META_HEARTBEAT_KEY, String(heartbeatAt));
+    const retryAt = retryWakeAtSeconds(this.cache.all(), now);
+    await this.armWake(now, retryAt, heartbeatAt);
   }
 
   // ------------------------------------------------------------------ //
@@ -638,23 +746,117 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
       await this.ctx.storage.setAlarm(Date.now() + ALARM_CONTINUE_MS);
     } else {
       // The queue is drained: drop any request a previous truncated round left behind.
+      // The model list was just pulled, so this also advances the heartbeat tick a
+      // full interval out -- a drained round IS an alignment.
       //
-      // 队列已排空：清掉此前被截断的轮次留下的请求。
+      // 队列已排空：清掉此前被截断的轮次留下的请求。模型列表刚刚拉过，因此这里同时
+      // 把心跳刻度后移一个完整间隔——一轮排空的轮次本身就是一次对齐。
       this.store.writeMeta(META_PENDING_ROUND_KEY, "");
-      await this.scheduleRetryWake();
+      await this.scheduleNextWake();
     }
     return stats;
   }
 
-  /** Arm an alarm for the earliest model that is waiting out its backoff. */
-  /** 为最早一个退避到期的模型安排 alarm。 */
+  /**
+   * Arm an alarm for the earliest model that is waiting out its backoff.
+   *
+   * The empty case carries the SAME guard as `armWake`: a truncated round still
+   * owes the queue a continuation, which must survive a "nothing to wake for"
+   * decision. This path is reachable from a request-driven round whose SQLite
+   * write failed -- the present() caller swallows the rejection (`void
+   * running.catch`), so without the check the alarm, the heartbeat included,
+   * would be deleted here and never re-armed by anyone.
+   *
+   * 为最早一个退避到期的模型安排 alarm。
+   *
+   * 空情形带着与 `armWake` 相同的守卫：被截断的轮次仍欠队列一次续跑，它必须比
+   * "无事可唤醒"的判断活得更久。这条路径可由"SQLite 写入失败的请求驱动轮次"到达
+   * ——present() 的调用方会吞掉 rejection（`void running.catch`），若不加检查，
+   * alarm（连同心跳）会在这里被删掉且无人重设。
+   */
   private async scheduleRetryWake(): Promise<void> {
     const delayMs = retryWakeDelayMs(this.cache.all(), Date.now() / 1000);
     if (delayMs === null) {
-      await this.ctx.storage.deleteAlarm();
+      if (pendingRoundFromMeta(this.store.readMeta(META_PENDING_ROUND_KEY))) {
+        await this.ctx.storage.setAlarm(Date.now() + ALARM_CONTINUE_MS);
+      } else {
+        await this.ctx.storage.deleteAlarm();
+      }
       return;
     }
     await this.ctx.storage.setAlarm(Date.now() + delayMs);
+  }
+
+  /**
+   * Arm the next alarm after a round that actually pulled the model list: the list was
+   * just aligned, so the heartbeat tick moves a full interval out (any round -- client
+   * driven, admin, or the heartbeat itself -- counts as an alignment), and the wake
+   * lands on the earlier of (backoff, that tick).
+   *
+   * 在真正拉过模型列表的一轮之后安排下一个 alarm：对齐刚刚发生，心跳刻度整体后移一个
+   * 间隔（无论哪条来的轮次——客户端、管理端或心跳本身——都算对齐），唤醒落在
+   * （退避，刻度）中更早者上。
+   */
+  private async scheduleNextWake(): Promise<void> {
+    const settings = await this.probeSettingsCache();
+    if (!settings.enabled) return;
+    const now = Date.now() / 1000;
+    let heartbeatAt: number | null = null;
+    if (settings.heartbeatInterval > 0) {
+      heartbeatAt = now + settings.heartbeatInterval;
+      this.store.writeMeta(META_HEARTBEAT_KEY, String(heartbeatAt));
+    }
+    const retryAt = retryWakeAtSeconds(this.cache.all(), now);
+    await this.armWake(now, retryAt, heartbeatAt);
+  }
+
+  /**
+   * The stored heartbeat tick, anchoring and persisting one when none exists. Only
+   * meaningful while the heartbeat is on (`heartbeatInterval > 0`); a missing tick MUST
+   * be anchored and written, or the "not due yet" branch would keep re-deriving a
+   * perpetually future tick and the patrol would never actually fire.
+   *
+   * 已存储的心跳刻度；没有时锚定并落盘一个。仅在心跳开启（`heartbeatInterval > 0`）时
+   * 有意义；缺失的刻度**必须**锚定并写入，否则"尚未到期"分支会一直派生出一个永远
+   * 指向未来的刻度，巡检永远不会再真正触发。
+   */
+  private heartbeatDeadline(settings: ProbeSettings, now: number): number | null {
+    if (settings.heartbeatInterval <= 0) return null;
+    const stored = heartbeatNextFromMeta(this.store.readMeta(META_HEARTBEAT_KEY));
+    if (stored !== null) return stored;
+    const anchored = now + settings.heartbeatInterval;
+    this.store.writeMeta(META_HEARTBEAT_KEY, String(anchored));
+    return anchored;
+  }
+
+  /**
+   * Arm the single alarm at the earlier of the two wake axes; delete it when neither
+   * has anything -- unless a truncated round still owes the queue a continuation,
+   * which must survive even a "nothing to wake for" decision. Only a backoff-driven
+   * wake is capped at WAKE_MAX_MS: the backoff itself cannot exceed 6h, and the cap
+   * keeps a corrupt retry_after from arming an absurdly distant alarm. A heartbeat
+   * tick may legitimately sit further out (the shared table goes up to daily); alarms
+   * have no platform horizon, and capping one would only add a no-op wake every 6h.
+   *
+   * 在两条唤醒轴中较早者上安排唯一的 alarm；两者皆无时删除——除非被截断的轮次仍欠
+   * 队列一次续跑，它必须比"无事可唤醒"的判断活得更久。只有退避驱动的唤醒才受
+   * WAKE_MAX_MS 约束：退避本身不超过 6 小时，该上限还能防住损坏的 retry_after 安排
+   * 出荒诞遥远的 alarm。心跳刻度可以合法地更远（共享档位表最远到每天）；alarm 没有
+   * 平台层的时间上限，强行夹紧只会每 6 小时多一次空唤醒。
+   */
+  private async armWake(now: number, retryAt: number | null, heartbeatAt: number | null): Promise<void> {
+    const next = nextWakeAtSeconds(retryAt, heartbeatAt);
+    if (next === null) {
+      if (pendingRoundFromMeta(this.store.readMeta(META_PENDING_ROUND_KEY))) {
+        await this.ctx.storage.setAlarm(Date.now() + ALARM_CONTINUE_MS);
+      } else {
+        await this.ctx.storage.deleteAlarm();
+      }
+      return;
+    }
+    const delayMs = Math.max((next - now) * 1000, WAKE_MIN_MS);
+    const heartbeatBound = heartbeatAt !== null && next >= heartbeatAt;
+    await this.ctx.storage.setAlarm(Date.now() + (heartbeatBound ? delayMs : Math.min(delayMs, WAKE_MAX_MS)));
   }
 
   /** The transport the round talks through: one upstream POST per request, with the
@@ -683,6 +885,18 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
             { timeoutMs: Math.max(1, settings.timeout) * 1000 },
           );
         } catch (err) {
+          // The platform's per-invocation subrequest cap (the free plan allows 50)
+          // says nothing about the model being probed. Recording it as that model's
+          // failure would fill the cache with a configuration artifact and burn
+          // backoff cycles on it, so it is handled exactly like budget exhaustion:
+          // stop the round, leave the model untouched, and let the alarm continue in
+          // a FRESH invocation that starts with its own allowance.
+          //
+          // 平台的"单次调用子请求上限"（免费层 50 个）与被探测的模型毫无关系。把它记成
+          // 该模型的失败只会让缓存装满配置产物、并在退避上空转，因此处理方式与预算耗尽
+          // 完全一致：停止本轮、该模型保持原样，让 alarm 在拥有自己配额的新一次调用中
+          // 继续。
+          if (isPlatformSubrequestError(err)) throw new ProbeBudgetExhausted();
           throw new ProbeTransient(`probe request failed: ${String(err)}`);
         }
         try {
@@ -701,8 +915,22 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
     };
   }
 
-  /** (modelId, fingerprint) for every model upstream, or null when unreachable. */
-  /** 上游全部模型的 (模型 id, 指纹)；不可达时返回 null。 */
+  /**
+   * (modelId, fingerprint) for every model upstream, or null when unreachable.
+   *
+   * This is how refresh / probeOne / the alarm satisfy the freshness contract on
+   * `ProbeRoundInput.models` (see probeRound.ts): the list is fetched here, at
+   * the trigger site, immediately before `startRound` -- never inside the round.
+   * The single exception is the proxy's present() path, which passes the list it
+   * just read for the client response (prune:false), so no second fetch happens.
+   *
+   * 返回上游全部模型的 (模型 id, 指纹)；不可达时返回 null。
+   *
+   * 这正是 refresh / probeOne / alarm 满足 `ProbeRoundInput.models` 新鲜性契约的
+   * 方式（见 probeRound.ts）：列表在触发点、`startRound` 之前在此拉取，绝不放进
+   * 轮次内部。唯一的例外是代理的 present() 路径——它传入刚为客户端响应读取的列表
+   * （prune:false），因此不会发生第二次拉取。
+   */
   private async fetchModelRefs(settings: ProbeSettings): Promise<ModelRefs | null> {
     const session = await getSession(this.env);
     if (!session || !sessionIsUsable(session)) return null;

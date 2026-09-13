@@ -143,7 +143,9 @@ test("a full round over real HTTP reproduces every hard assertion made upstream"
     // ---- Qwen3.8-27B: advertises seven levels, really accepts four -------------
     const qwen = probeOf("Qwen3.8-27B");
     assert.equal(qwen.status, "ok");
-    assert.deepEqual(qwen.supported_efforts, ["none", "low", "medium", "xhigh"]);
+    // Largest effort first, the OpenRouter ordering.
+    // 最大挡位在前，OpenRouter 的排列。
+    assert.deepEqual(qwen.supported_efforts, ["xhigh", "medium", "low", "none"]);
     assert.equal(qwen.default_effort, "xhigh");
     assert.equal(qwen.efforts_verified, true);
     assert.deepEqual(qwen.capabilities, {
@@ -156,7 +158,7 @@ test("a full round over real HTTP reproduces every hard assertion made upstream"
 
     // ---- gpt-oss-120b: Harmony, and thinking cannot be turned off --------------
     const gptOss = probeOf("gpt-oss-120b");
-    assert.deepEqual(gptOss.supported_efforts, ["low", "medium", "high"]);
+    assert.deepEqual(gptOss.supported_efforts, ["high", "medium", "low"]);
     assert.equal(gptOss.default_effort, null);
     assert.equal(buildReasoningInfo(gptOss.supported_efforts)?.mandatory, true);
     assert.equal(gptOss.capabilities.vision, false);
@@ -378,7 +380,7 @@ test("a broken modern prefix (500) does not get confirmed; the legacy prefix doe
     assert.equal(stats.unprobeable, 1);
     const qwen = store.snapshot().get("Qwen3.8-27B");
     assert.ok(qwen);
-    assert.deepEqual(qwen.supported_efforts, ["none", "low", "medium", "xhigh"]);
+    assert.deepEqual(qwen.supported_efforts, ["xhigh", "medium", "low", "none"]);
   } finally {
     await mock.close();
   }

@@ -201,7 +201,6 @@ async function detectPrefix(request: Request, session: StoredSession): Promise<s
 
   const headers = buildUpstreamHeaders(request, session);
   let confirmed: ConfirmedPrefix | null = null;
-  let probingCompleted = true;
   try {
     confirmed = await confirmUpstreamPrefix(PREFIX_CANDIDATES, async (prefix) => {
       const resp = await fetchUpstream(`${base}${prefix}/models`, { method: "GET", headers }, { metadata: true });
@@ -214,41 +213,36 @@ async function detectPrefix(request: Request, session: StoredSession): Promise<s
   } catch {
     // Unreachable or timed out: fail fast on THIS request (the other candidate shares
     // the same host and would fail identically) and let the actual request report the
-    // real error. The fallback below is returned but NOT remembered in this case --
-    // remembering it would freeze a legacy deployment onto the wrong prefix for the
-    // isolate's whole lifetime after a single transient outage.
+    // real error.
     //
     // 连不上或超时：本次请求快速失败（另一个候选共用同一主机，必然同样失败），让真正的
-    // 那次请求去报告错误。这种情况下下面的兜底会返回但**不会**被记住——否则一次瞬时故障
-    // 就会让旧版部署在整个 isolate 生命周期内都锁在错误的前缀上。
-    probingCompleted = false;
+    // 那次请求去报告错误。
   }
   if (confirmed) {
     cachedPrefix = confirmed.prefix;
     cachedPrefixKey = base;
     return confirmed.prefix;
   }
-  if (probingCompleted) {
-    // Every candidate answered and none could be confirmed: the deployment's routes are
-    // not going to change between two requests, so the fallback IS remembered. This is
-    // still not a success and must not be reported as one (the warn is its only trace).
-    //
-    // 所有候选都作答了、且一个都确认不了：部署的路由不会在两次请求之间改变，因此兜底
-    // 值**会**被记住。这依然不是成功，也不得当成成功上报（warn 是它唯一的痕迹）。
-    console.warn(
-      JSON.stringify({
-        message: "upstream prefix not confirmed",
-        base_url: base,
-        candidates: PREFIX_CANDIDATES,
-      }),
-    );
-    cachedPrefix = PREFIX_CANDIDATES[0];
-    cachedPrefixKey = base;
-  }
-  // Fall back to the first candidate so the caller gets a real error from the actual
-  // request.
+  // Nothing was confirmed. ONLY a confirmed prefix is remembered: a transient 5xx can
+  // leave even the correct candidate unconfirmed for a few seconds, and remembering the
+  // fallback then would pin this isolate to the wrong prefix until it is evicted -- a
+  // legacy deployment's real answer would never be discovered again. Re-probing on the
+  // next request costs 1-2 subrequests ONLY while the upstream misbehaves, and the
+  // fallback below lets the actual request report the real error (the warn is its only
+  // trace; it is still not a success and must not be reported as one).
   //
-  // 回退到第一个候选，让调用方从真正的那次请求拿到真实错误。
+  // 没有任何候选被确认。**只有被确认的前缀才会被记住**：一次瞬时 5xx 会让哪怕正确的
+  // 候选在这几秒内都无法确认，此时记住兜底值就会把本 isolate 锁死在错误前缀上直到被
+  // 驱逐——旧版部署真正的答案永远不会再被发现。在上游表现异常期间，下次请求重新探测
+  // 只多花 1-2 个子请求，而下面的兜底让真正的那次请求报告真实错误（warn 是它唯一的
+  // 痕迹；它依然不是成功，也不得当成成功上报）。
+  console.warn(
+    JSON.stringify({
+      message: "upstream prefix not confirmed",
+      base_url: base,
+      candidates: PREFIX_CANDIDATES,
+    }),
+  );
   return PREFIX_CANDIDATES[0];
 }
 
@@ -256,6 +250,68 @@ async function detectPrefix(request: Request, session: StoredSession): Promise<s
 // Route handlers
 // 路由处理函数
 // --------------------------------------------------------------------------- //
+
+/**
+ * Fetch and parse the upstream model list, mapping every failure to its
+ * OpenAI-style error response. The list endpoint and the single-model read share
+ * this: they used to carry ~40 identical lines, which is exactly the kind of copy
+ * that drifts. Returns the RAW cards (normalization is the caller's business --
+ * only `handleModels` builds the served list, and the single-model read filters
+ * it) or the error response to send as-is.
+ *
+ * 拉取并解析上游模型列表，把每种失败映射成对应的 OpenAI 风格错误响应。列表端点与
+ * 单模型读取共用这里：两者此前各带约 40 行相同代码，而那正是会漂移的副本。返回
+ * **原始**模型卡（规范化是调用方的事——只有 handleModels 构建对外列表，单模型读取
+ * 还要过滤它），或原样发送的错误响应。
+ */
+async function fetchUpstreamModels(
+  request: Request,
+  session: StoredSession,
+): Promise<{ cards: unknown[] } | { error: Response }> {
+  const prefix = await detectPrefix(request, session);
+  const base = session.base_url;
+  const headers = buildUpstreamHeaders(request, session);
+
+  let resp: Response;
+  try {
+    resp = await fetchUpstream(`${base}${prefix}/models`, { method: "GET", headers }, { metadata: true });
+  } catch (err) {
+    return {
+      error: openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {
+        type: "server_error",
+        code: "upstream_unavailable",
+      }),
+    };
+  }
+
+  if (AUTH_FAILURE_CODES.includes(resp.status)) {
+    await resp.text().catch(() => {});
+    return { error: authFailureResponse(resp.status) };
+  }
+  if (resp.status !== 200) {
+    const text = (await resp.text()).slice(0, 500);
+    return {
+      error: openaiError(`Upstream /models returned HTTP ${resp.status}: ${text}`, 502, {
+        type: "server_error",
+        code: "upstream_error",
+      }),
+    };
+  }
+
+  const text = await resp.text();
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return {
+      error: openaiError(`Upstream /models returned invalid JSON: ${text.slice(0, 500)}`, 502, {
+        type: "server_error",
+        code: "upstream_error",
+      }),
+    };
+  }
+  return { cards: extractModelList(payload) };
+}
 
 // GET /v1/models — fetch and normalize the upstream model list.
 // GET /v1/models —— 获取并规范化上游模型列表。
@@ -265,43 +321,10 @@ async function handleModels(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const prefix = await detectPrefix(request, session);
-  const base = session.base_url;
-  const headers = buildUpstreamHeaders(request, session);
+  const fetched = await fetchUpstreamModels(request, session);
+  if ("error" in fetched) return fetched.error;
+  const rawModels = fetched.cards;
 
-  let resp: Response;
-  try {
-    resp = await fetchUpstream(`${base}${prefix}/models`, { method: "GET", headers }, { metadata: true });
-  } catch (err) {
-    return openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {
-      type: "server_error",
-      code: "upstream_unavailable",
-    });
-  }
-
-  if (AUTH_FAILURE_CODES.includes(resp.status)) {
-    await resp.text().catch(() => {});
-    return authFailureResponse(resp.status);
-  }
-  if (resp.status !== 200) {
-    const text = (await resp.text()).slice(0, 500);
-    return openaiError(`Upstream /models returned HTTP ${resp.status}: ${text}`, 502, {
-      type: "server_error",
-      code: "upstream_error",
-    });
-  }
-
-  const text = await resp.text();
-  let payload: unknown;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    return openaiError(`Upstream /models returned invalid JSON: ${text.slice(0, 500)}`, 502, {
-      type: "server_error",
-      code: "upstream_error",
-    });
-  }
-  const rawModels = extractModelList(payload);
   const { models, refs } = await normalizeCatalog(rawModels);
 
   // Probe-derived fields and the instance envelope are best-effort: neither may ever
@@ -434,48 +457,28 @@ function triggerProbeHeal(
 }
 
 // GET /v1/models/{id} -- one normalized model, or an OpenAI-style 404.
+//
+// The full upstream list is fetched ON PURPOSE, for a single-model read too: the
+// engine fingerprint can only be computed from the raw card, and the coordinator
+// holds no cards -- so there is no cheaper correct path. A single-model GET is a
+// rare operation; if it ever shows up in the metrics, the fix is a coordinator
+// side directory cache, not skipping the fingerprint.
+//
 // GET /v1/models/{id} —— 单个规范化模型，或 OpenAI 风格的 404。
+//
+// 单模型读取也**刻意**拉取完整上游列表：引擎指纹只能从原始模型卡算出，而协调者
+// 不持有模型卡——因此不存在更便宜的正确做法。单模型 GET 是低频操作；若它真在指标
+// 中显形，正确的修法是协调者侧的目录缓存，而不是跳过指纹。
 async function handleRetrieveModel(
   request: Request,
   session: StoredSession,
   env: Env,
   modelId: string,
 ): Promise<Response> {
-  const prefix = await detectPrefix(request, session);
-  const headers = buildUpstreamHeaders(request, session);
-  let resp: Response;
-  try {
-    resp = await fetchUpstream(`${session.base_url}${prefix}/models`, { method: "GET", headers }, { metadata: true });
-  } catch (err) {
-    return openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {
-      type: "server_error",
-      code: "upstream_unavailable",
-    });
-  }
-  if (AUTH_FAILURE_CODES.includes(resp.status)) {
-    await resp.text().catch(() => {});
-    return authFailureResponse(resp.status);
-  }
-  if (resp.status !== 200) {
-    const text = (await resp.text()).slice(0, 500);
-    return openaiError(`Upstream /models returned HTTP ${resp.status}: ${text}`, 502, {
-      type: "server_error",
-      code: "upstream_error",
-    });
-  }
+  const fetched = await fetchUpstreamModels(request, session);
+  if ("error" in fetched) return fetched.error;
+  const rawModels = fetched.cards;
 
-  const text = await resp.text();
-  let payload: unknown;
-  try {
-    payload = JSON.parse(text);
-  } catch {
-    return openaiError(`Upstream /models returned invalid JSON: ${text.slice(0, 500)}`, 502, {
-      type: "server_error",
-      code: "upstream_error",
-    });
-  }
-
-  const rawModels = extractModelList(payload);
   const { models, refs } = await normalizeCatalog(rawModels);
   const model = models.find((candidate) => candidate.id === modelId);
 
@@ -585,7 +588,13 @@ async function handleChat(
     return authFailureResponse(resp.status);
   }
   if (resp.status >= 400) {
-    const text = (await resp.text()).slice(0, 2000);
+    // The full body is read anyway; only the CLIENT-FACING copy is truncated. The
+    // self-heal check runs on the full text so a match far past the truncation
+    // point still triggers it.
+    //
+    // 响应体本来就要全文读取；被截断的只是**给客户端的**那份。自愈判定用全文，
+    // 关键词落在截断点之后也能触发。
+    const text = await resp.text();
     // Self-heal: a 400/422 that names the reasoning effort disproves the level the
     // client just used, so the cache drops it and the model is re-probed. The
     // upstream's own error is what the client receives either way -- the heal never
@@ -599,7 +608,7 @@ async function handleChat(
     // 4xx maps back to the client, 5xx is masked as 502 upstream_error.
     // 4xx 原样映射回客户端，5xx 统一掩蔽为 502 upstream_error。
     return openaiError(
-      `Upstream returned HTTP ${resp.status}: ${text}`,
+      `Upstream returned HTTP ${resp.status}: ${text.slice(0, 2000)}`,
       resp.status < 500 ? resp.status : 502,
       {
         type: resp.status < 500 ? "invalid_request_error" : "server_error",
@@ -753,6 +762,18 @@ export async function handleV1Request(
   const url = new URL(request.url);
   const subpath = url.pathname.slice("/v1".length) || "/";
 
+  // Defensive duplicate of the entry route's exact matching: a caller that skips
+  // index.ts (a future handler, a test harness) could hand over "/v1models", and
+  // the passthrough below would then build `.../api/v1models` -- a route that does
+  // not exist. The bare "/v1" keeps its "specify a path" 404 via the passthrough.
+  //
+  // 入口路由精确匹配的防御性副本：绕过 index.ts 的调用方（未来的 handler、测试
+  // 替身）可能递来 "/v1models"，下面的透传随后会拼出 `.../api/v1models`——一个
+  // 不存在的路由。裸的 "/v1" 仍由透传回"请指定路径"的 404。
+  if (subpath !== "/" && !subpath.startsWith("/")) {
+    return openaiError("Not found", 404, { code: "not_found" });
+  }
+
   // Credential verification and session loading run INSIDE the try: a KV read that
   // throws used to bubble up to the Worker entry point, which answers a plain 500
   // body that an OpenAI client cannot parse. Failure codes below are deliberately
@@ -791,7 +812,21 @@ export async function handleV1Request(
     // 必须注册在兜底透传之前：未知 id 要在这里返回 JSON 404，因为上游对未知路径会
     // 回 200 加一页 HTML。
     if (subpath.startsWith("/models/")) {
-      const modelId = decodeURIComponent(subpath.slice("/models/".length));
+      let modelId: string;
+      try {
+        modelId = decodeURIComponent(subpath.slice("/models/".length));
+      } catch {
+        // A malformed percent-escape is the client's mistake, not an internal
+        // failure: answer 400 instead of letting the URIError surface as a bare
+        // 500 an OpenAI client cannot interpret.
+        //
+        // 非法的百分号编码是客户端的错误，而非内部故障：回 400，而不是让 URIError
+        // 冒泡成 OpenAI 客户端无法解读的裸 500。
+        return openaiError("The model id in the URL is not properly percent-encoded.", 400, {
+          code: "invalid_model_id",
+          param: "model",
+        });
+      }
       return await handleRetrieveModel(request, session, env, modelId);
     }
     if (subpath === "/chat/completions" || subpath === "/chat/completions/") {

@@ -23,6 +23,9 @@ import {
   WAKE_MIN_MS,
   canJoinRound,
   createTtlCache,
+  heartbeatDue,
+  heartbeatNextFromMeta,
+  nextWakeAtSeconds,
   pendingRoundFromMeta,
   pendingRoundMeta,
   prefixCandidates,
@@ -87,6 +90,57 @@ test("bounds are overridable for tests and for a future quota guard", () => {
     }),
     2_000,
   );
+});
+
+// --------------------------------------------------------------------------- //
+// Heartbeat wake axis (the optional patrol)
+// 心跳唤醒轴（可选巡检）
+// --------------------------------------------------------------------------- //
+
+test("the wake lands on whichever axis comes first", () => {
+  const now = 1_000;
+  // Both axes pending: the earlier one wins regardless of argument order.
+  // 两条轴都有待办：无论参数顺序，较早者胜出。
+  assert.equal(nextWakeAtSeconds(now + 600, now + 7_200), now + 600);
+  assert.equal(nextWakeAtSeconds(now + 7_200, now + 600), now + 600);
+  assert.equal(nextWakeAtSeconds(now + 600, now + 600), now + 600, "a tie is the same instant");
+});
+
+test("with the heartbeat off, the backoff wake is untouched", () => {
+  const now = 1_000;
+  // A null tick must behave exactly like the pre-heartbeat scheduler.
+  // 刻度为 null 时必须与加入心跳之前的排程器行为完全一致。
+  assert.equal(nextWakeAtSeconds(now + 600, null), now + 600);
+  assert.equal(nextWakeAtSeconds(null, null), null);
+});
+
+test("a heartbeat-only wake arms at the tick, never earlier than the backoff", () => {
+  const now = 1_000;
+  assert.equal(nextWakeAtSeconds(null, now + 7_200), now + 7_200);
+  // The patrol must not pull a backoff wake in ahead of the backoff itself.
+  // 巡检绝不能把退避唤醒提前到退避本身之前。
+  assert.equal(nextWakeAtSeconds(now + 600, now + 7_200), now + 600);
+});
+
+test("heartbeatDue fires only when a stored tick has arrived", () => {
+  const now = 1_000;
+  assert.equal(heartbeatDue(null, now), false, "no tick is never due");
+  assert.equal(heartbeatDue(now - 1, now), true);
+  assert.equal(heartbeatDue(now, now), true, "the tick instant itself counts as due");
+  assert.equal(heartbeatDue(now + 1, now), false);
+});
+
+test("a missing or corrupt stored tick means 'no tick', not 'due now'", () => {
+  for (const raw of [null, "", "  ", "not a number", "NaN"]) {
+    assert.equal(heartbeatNextFromMeta(raw), null, `raw=${JSON.stringify(raw)}`);
+  }
+  // A parseable number is kept verbatim, INCLUDING one in the past: a passed tick is
+  // exactly "the patrol is due", and degrading it would postpone it a whole interval.
+  //
+  // 能解析的数字原样保留，包括过去的时刻：已过去的刻度恰恰意味着"巡检到期"，
+  // 把它退化掉会让巡检再推迟一个完整间隔。
+  assert.equal(heartbeatNextFromMeta("1700000000"), 1_700_000_000);
+  assert.equal(heartbeatNextFromMeta("0"), 0);
 });
 
 // --------------------------------------------------------------------------- //

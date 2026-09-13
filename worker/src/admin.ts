@@ -24,7 +24,6 @@ import {
 import { fetchUpstream, sessionHeaders, sessionIsUsable } from "./session.ts";
 import { PREFIX_CANDIDATES, confirmUpstreamPrefix } from "./upstream.ts";
 import {
-  PROBE_BUDGET_PRESETS,
   parseProbeSettingsInput,
   readProbeSettings,
   writeProbeSettings,
@@ -107,8 +106,25 @@ function generateApiKey(): string {
 // --------------------------------------------------------------------------- //
 
 // GET /admin/api/status — overview of session, keys and password mode.
+//
+// Public on purpose, but only partially: the console hits this endpoint BEFORE
+// logging in to pick the login vs first-run-setup view, so the password mode must
+// be readable unauthenticated. Everything else -- the upstream base_url, the
+// credential summary (token prefix, cookie length, credential age), the key
+// count, this Worker's own /v1 address -- is deployment info an unauthenticated
+// visitor has no need for, so the unauthenticated answer carries the mode and
+// nothing else.
+//
 // GET /admin/api/status —— session、Key 与密码模式的状态总览。
+//
+// 刻意公开，但只公开一部分：控制台在登录**前**就要访问本端点，用于选择登录还是
+// 首次设密视图，因此密码模式必须可以未鉴权读取。其余一切——上游 base_url、凭证
+// 摘要（token 前缀、Cookie 长度、凭证年龄）、Key 数量、本 Worker 的 /v1 接入地址
+// ——都是未登录访问者无需知道的部署信息，因此未鉴权的答复只带密码模式，别无其它。
 async function handleStatus(env: Env, request: Request): Promise<Response> {
+  if (!(await isAdminAuthed(env, request))) {
+    return json({ ok: true, adminPasswordMode: await adminPasswordSource(env) });
+  }
   const session = await getSession(env);
   const keys = await listApiKeys(env);
   const source = await adminPasswordSource(env);
@@ -509,11 +525,12 @@ async function handleProbeInfo(env: Env): Promise<Response> {
   return json({
     ok: true,
     settings,
-    // The presets carry their platform ceiling: the free plan allows 50 subrequests
-    // per invocation, the paid plan 10,000.
+    // The heartbeat steps are the shared granularity table itself (same source as the
+    // usage-tracking select), so the console never hardcodes its own cadences.
     //
-    // 预设带上各自的平台上限：免费层每次调用 50 个子请求，付费层 10,000。
-    budgetPresets: PROBE_BUDGET_PRESETS,
+    // 心跳档位就是共享刻度表本身（与「使用记录粒度」下拉框同源），控制台绝不自行
+    // 硬编码节奏。
+    heartbeatOptions: INTERVAL_OPTIONS,
     models: view.models,
     cached: view.cached,
     now: view.now,
@@ -527,6 +544,23 @@ async function handleProbeSettings(env: Env, request: Request): Promise<Response
   const settings = parseProbeSettingsInput(body);
   if (!settings) return fail("err.settings_invalid");
   await writeProbeSettings(env, settings);
+  // Re-arm (or cancel) the coordinator's heartbeat immediately: an idle deployment has
+  // no other occasion to notice the change. Best effort -- the settings ARE saved, and
+  // a hiccup here (no session, DO restart) must not turn into a failed console save.
+  //
+  // 立即重排（或取消）协调者的心跳：空闲部署没有别的时机感知改动。尽力而为——设置
+  // 已经落盘，这里的意外（无 session、DO 重启）绝不能变成控制台的一次保存失败。
+  try {
+    const coordinator = probeCoordinatorFor(env, await getSession(env));
+    if (coordinator) await coordinator.rescheduleHeartbeat();
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        message: "probe heartbeat reschedule failed",
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }
   return json({ ok: true, settings });
 }
 
@@ -560,6 +594,17 @@ async function handleProbeRefresh(env: Env, request: Request): Promise<Response>
         roundCode === "session_missing" ? "err.probe_session_missing" : "err.probe_models_failed",
         502,
       );
+    }
+    // A per-model refresh naming a model the upstream does not have is the caller's
+    // mistake, not a server failure: 404 with its own code instead of a raw English
+    // 500. The error NAME survives the RPC boundary (the message too), which is
+    // what makes the match possible.
+    //
+    // 单模型重探指名了上游不存在的模型，这是调用方的错误而非服务器故障：回 404 与
+    // 专用错误码，而不是原始英文 500。错误**名字**（连同消息）能穿过 RPC 边界，
+    // 这正是匹配可行的原因。
+    if (err instanceof Error && err.name === "ModelNotInList") {
+      return fail("err.probe_model_missing", 404);
     }
     return fail(err instanceof Error ? err.message : String(err), 500);
   }

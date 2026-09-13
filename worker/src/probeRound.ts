@@ -116,6 +116,27 @@ export class ProbeBudgetExhausted extends Error {
   }
 }
 
+/**
+ * Whether a transport failure is the platform's per-invocation subrequest cap
+ * ("Too many subrequests by single Worker invocation") rather than anything about
+ * the upstream or the model being probed.
+ *
+ * That cap is a property of THIS invocation, so it must not be recorded as the
+ * model's failure: the honest handling is the same as budget exhaustion -- stop the
+ * round, leave the model untouched, and let the alarm continue in a fresh
+ * invocation that starts with its own allowance.
+ *
+ * 判断一次传输失败是否是平台的"单次调用子请求上限"
+ * （"Too many subrequests by single Worker invocation"），而与上游或被探测的模型无关。
+ *
+ * 这个上限属于**本次调用**，因此绝不能记成该模型的失败：诚实的处理与预算耗尽相同——
+ * 停止本轮、该模型保持原样，让 alarm 在拥有自己配额的新一次调用中继续。
+ */
+export function isPlatformSubrequestError(err: unknown): boolean {
+  const text = err instanceof Error ? err.message : String(err);
+  return /too many subrequests/i.test(text);
+}
+
 /** One upstream answer, reduced to what the probe logic needs. */
 /** 一次上游答复，收敛为探测逻辑所需的字段。 */
 export interface ProbeAnswer {
@@ -350,8 +371,38 @@ async function probeModel(
 export interface ProbeRoundInput {
   cache: ModelProbeCache;
   store: ProbeStore;
-  /** (modelId, engine fingerprint) for every model currently upstream. */
-  /** 当前上游全部模型的 (模型 id, 引擎指纹)。 */
+  /**
+   * (modelId, engine fingerprint) for every model currently upstream.
+   *
+   * CONTRACT -- the caller must have fetched this list from the upstream /models
+   * endpoint immediately before starting the round; the round itself never
+   * fetches. Every trigger already does: the proxy passes the list it just read
+   * for the client response (prune:false), and the coordinator (refresh /
+   * probeOne / alarm) fetches its own. Freshness is what makes the engine
+   * fingerprint a valid admission check -- a stale fingerprint reads as "the
+   * engine was swapped" and forces a needless full re-probe -- and what makes
+   * `prune: true` safe -- a stale or hand-assembled full list deletes entries for
+   * models that are actually still upstream. A new trigger must satisfy this
+   * before calling, never inside the round.
+   *
+   * The alarm's gates (pending round, backoff, heartbeat) are evaluated BEFORE
+   * the fetch on purpose: a wake with nothing due costs zero upstream requests.
+   * Once a round is due, the fresh fetch is a prerequisite, not an optional
+   * extra. With `prune: false` freshness still matters for the fingerprint check;
+   * only the removal interpretation is switched off.
+   */
+  /** (模型 id, 引擎指纹)，对应上游当前的全部模型。
+   *
+   * 契约——调用方必须在启动轮次**之前**刚从上游 /models 拉取过这份列表；轮次自身
+   * 从不拉取。每个触发方都已如此：代理传入它刚为客户端响应拉取的列表（prune:false），
+   * 协调者（refresh / probeOne / alarm）自行拉取。新鲜度是引擎指纹作为准入检查的
+   * 前提——陈旧指纹会被读成"引擎被换过"，触发无谓的全量重探；也是 `prune: true`
+   * 安全的前提——一份陈旧或手工拼装的全量列表会删掉实际上游仍在的模型条目。新增
+   * 触发点必须在调用前满足本契约，绝不能挪进轮次内部。
+   *
+   * alarm 的三个门控（待续轮次、退避、心跳）刻意在拉取**之前**求值：无事可做的唤醒
+   * 保持零上游请求。轮次一旦到期，新鲜拉取就是前提，而非可选项。`prune: false` 时
+   * 新鲜度仍影响指纹判定，只是"缺失 = 已下架"的解读被关闭。 */
   models: ReadonlyArray<readonly [string, string]>;
   transport: ProbeTransport;
   /** Re-probe every model regardless of the cache (the admin "probe now"). */
@@ -477,7 +528,16 @@ export async function runProbeRound(input: ProbeRoundInput): Promise<ProbeRoundS
       }
       // Per-model isolation: one bad probe never kills the round.
       // 逐模型隔离：单个探测失败不影响整轮。
-      cache.recordFailure(modelId, fingerprint, errorMessage(err), input.now);
+      // The failure timestamp comes from the transport's clock, not the round's
+      // start: a round can run for many minutes, and a retry_after anchored to its
+      // start would let the backoff expire while the round is still working. The
+      // model-selection reconciliation above deliberately keeps using input.now --
+      // the selected set is decided once, when the round starts.
+      //
+      // 失败时间戳取传输层的时钟而不是轮次起点：一轮可能运行很久，锚在起点的
+      // retry_after 会在本轮还在工作时就把退避放行。上方的模型选择对齐刻意继续
+      // 用 input.now——选中的集合在轮次开始时一次性确定。
+      cache.recordFailure(modelId, fingerprint, errorMessage(err), transport.now());
       stats.failed += 1;
       const changes = cache.takeChanges();
       store.apply(changes);
@@ -485,7 +545,7 @@ export async function runProbeRound(input: ProbeRoundInput): Promise<ProbeRoundS
       continue;
     }
 
-    cache.recordResult(modelId, probe, input.now);
+    cache.recordResult(modelId, probe, transport.now());
     switch (probe.status) {
       case STATUS_OK:
         stats.ok += 1;

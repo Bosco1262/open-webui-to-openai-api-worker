@@ -22,8 +22,8 @@ import assert from "node:assert/strict";
 
 import { DEFAULT_INTERVAL, INTERVAL_OPTIONS, isIntervalOption } from "../src/intervals.ts";
 
-test("the offered steps stop at 30 minutes", () => {
-  assert.deepEqual([...INTERVAL_OPTIONS], [86_400, 21_600, 10_800, 3_600, 1_800]);
+test("the offered steps stop at 30 minutes, plus the off switch", () => {
+  assert.deepEqual([...INTERVAL_OPTIONS], [86_400, 43_200, 21_600, 10_800, 3_600, 1_800, 0]);
   assert.equal(isIntervalOption(600), false, "the 10-minute step must be gone");
 });
 
@@ -35,7 +35,12 @@ test("the steps are listed coarsest first, and the default is one of them", () =
 test("only offered steps are accepted", () => {
   assert.equal(isIntervalOption(1_800), true);
   assert.equal(isIntervalOption(300), false);
-  assert.equal(isIntervalOption(0), false);
+  // 0 is the shared "feature off" step: every consumer interprets it as "do
+  // nothing", so it is offered rather than rejected.
+  //
+  // 0 是共享的"关闭功能"档位：所有使用方都把它解释为"什么都不做"，因此它是可选
+  // 档位而不是被拒绝的值。
+  assert.equal(isIntervalOption(0), true);
   assert.equal(isIntervalOption(-1_800), false);
   assert.equal(isIntervalOption(Number.NaN), false);
 });
@@ -48,6 +53,7 @@ test("the finest step still leaves room for a realistic number of keys", () => {
   const maxKeys = (seconds: number): number => 1_000 / (86_400 / seconds);
 
   assert.ok(maxKeys(86_400) >= 1_000, "daily must tolerate any fleet");
+  assert.ok(maxKeys(43_200) >= 500, "12h must tolerate a large fleet");
   assert.ok(maxKeys(21_600) >= 200, "6h must tolerate a large fleet");
   assert.ok(maxKeys(1_800) >= 20, "30m is the floor and must tolerate ~20 keys");
 });

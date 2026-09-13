@@ -28,6 +28,7 @@ import {
   ProbeAuthExpired,
   ProbeBudgetExhausted,
   ProbeTransient,
+  isPlatformSubrequestError,
   runProbeRound,
 } from "../src/probeRound.ts";
 import type { ProbeAnswer, ProbeTransport } from "../src/probeRound.ts";
@@ -300,7 +301,9 @@ test("a level the outer schema advertises but the model rejects is never claimed
   const probe = store.snapshot().get("Qwen3.8-27B");
   assert.ok(probe);
   assert.equal(probe.status, "ok");
-  assert.deepEqual(probe.supported_efforts, ["none", "low", "medium", "xhigh"]);
+  // Largest effort first, aligned with how OpenRouter lists levels.
+  // 最大挡位在前，与 OpenRouter 的排列一致。
+  assert.deepEqual(probe.supported_efforts, ["xhigh", "medium", "low", "none"]);
   assert.equal(probe.default_effort, "xhigh");
   assert.equal(probe.efforts_verified, true);
   assert.deepEqual(probe.capabilities, {
@@ -348,7 +351,7 @@ test("Harmony wording is understood and a mandatory model is flagged", async () 
 
   const probe = store.snapshot().get("gpt-oss-120b");
   assert.ok(probe);
-  assert.deepEqual(probe.supported_efforts, ["low", "medium", "high"]);
+  assert.deepEqual(probe.supported_efforts, ["high", "medium", "low"]);
   // "none" was never accepted, and Harmony named no default.
   assert.equal(probe.default_effort, null);
   assert.equal(probe.capabilities.vision, false);
@@ -472,6 +475,27 @@ test("an upstream that ignores the field is unprobeable but still yields capabil
   // A second round is a no-op: the result is conclusive until the fingerprint moves.
   const second = await roundWith(fake, new CountingStore(store.snapshot()), [["legacy", "fp-1"]]);
   assert.equal(second.stats.total, 0);
+});
+
+// --------------------------------------------------------------------------- //
+// Platform subrequest cap
+// 平台子请求上限
+// --------------------------------------------------------------------------- //
+
+test("the platform's per-invocation subrequest cap is recognised", () => {
+  // The exact wording workerd answers with on the free plan.
+  // 免费层上 workerd 的原始报错原文。
+  const platform = new Error(
+    "Too many subrequests by single Worker invocation. To configure this limit, " +
+      "refer to https://developers.cloudflare.com/workers/wrangler/configuration/#limits",
+  );
+  assert.equal(isPlatformSubrequestError(platform), true);
+  assert.equal(isPlatformSubrequestError("Error: too many subrequests"), true);
+  // Anything about the upstream or the model stays a per-model failure.
+  // 与上游或模型相关的失败仍然按逐模型失败处理。
+  assert.equal(isPlatformSubrequestError(new Error("probe request failed: TypeError: x")), false);
+  assert.equal(isPlatformSubrequestError(null), false);
+  assert.equal(isPlatformSubrequestError(new Error("upstream did not answer within the header timeout")), false);
 });
 
 test("the budget truncates the round without recording a failure", async () => {

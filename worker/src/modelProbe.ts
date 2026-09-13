@@ -64,18 +64,19 @@ import type {
 /** 哨兵值，绝不可能是真实挡位；上游的 schema 校验会拒绝它，并在错误文本里点名可接受的值。 */
 export const PROBE_SENTINEL = "__probe__";
 
-/** Canonical effort order, from fully off to maximum thinking. Used to sort the
- *  emitted list and to run the fallback candidate sweep. Values unknown to this
- *  list (other upstreams may invent their own) still pass through, sorted last. */
-/** 规范挡位顺序：从全关到最大思考。用于输出排序与兜底候选遍历。不在该列表中的未知挡位照样透传，只是排在末尾。 */
+/** Canonical effort order, aligned with OpenRouter: from the largest effort down to
+ *  fully off. Used to sort the emitted list and to run the fallback candidate sweep.
+ *  Values unknown to this list (other upstreams may invent their own) still pass
+ *  through, sorted last. */
+/** 规范挡位顺序：对齐 OpenRouter——从最大思考到全关。用于输出排序与兜底候选遍历。不在该列表中的未知挡位照样透传，只是排在末尾。 */
 export const EFFORT_ORDER: readonly string[] = [
-  "none",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
   "max",
+  "xhigh",
+  "high",
+  "medium",
+  "low",
+  "minimal",
+  "none",
 ];
 
 const KNOWN_EFFORTS = new Set(EFFORT_ORDER);
@@ -501,9 +502,9 @@ export function engineBuild(body: string): string {
   return value ? String(value) : "";
 }
 
-/** Sort effort levels into canonical order (none -> max); unknown values keep
+/** Sort effort levels into canonical order (max -> none); unknown values keep
  *  their original relative order at the end. */
-/** 把挡位按规范顺序（none -> max）排序；未知值按原相对顺序排在末尾。 */
+/** 把挡位按规范顺序（max -> none）排序；未知值按原相对顺序排在末尾。 */
 export function sortEfforts(efforts: readonly string[]): string[] {
   const known = EFFORT_ORDER.filter((level) => efforts.includes(level));
   const seen = new Set(known);

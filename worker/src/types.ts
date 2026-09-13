@@ -169,6 +169,17 @@ export interface ProbeSettings {
   /** Whether the /v1/models envelope carries x_open_webui (default true). */
   /** /v1/models 信封是否携带 x_open_webui（默认 true）。 */
   exposeInstanceMeta: boolean;
+  /**
+   * Heartbeat-patrol interval in SECONDS, one of the shared granularity table's steps
+   * (30 minutes to daily, plus 0 = off, the default). A heartbeat tick only RE-ALIGNS
+   * the model list (1-2 upstream subrequests); whether anything is probed still
+   * follows the fingerprint/backoff rules, never the clock.
+   *
+   * 心跳巡检间隔（秒），取共享档位表中的某一档（每三十分钟到每天，另有 0 = 关闭，
+   * 默认 0）。心跳刻度只负责重新对齐模型列表（1-2 个上游子请求）；是否探测仍按
+   * 指纹/退避规则，绝不按钟表。
+   */
+  heartbeatInterval: number;
 }
 
 /**
@@ -203,8 +214,18 @@ export interface ModelProbe {
   /** Accepted effort levels, only ever filled from a real 200. */
   /** 接受的挡位，只由真实的 200 填出。 */
   supported_efforts: string[];
-  /** True when every candidate was conclusively verified. */
-  /** 每个候选都得到了确定结论时为 true。 */
+  /**
+   * True when the probe left NOTHING undecided. Despite the name, this covers the
+   * whole probe (efforts, request parameters, vision, the baseline request), not
+   * only the efforts: any unresolved request makes it false. The name reflects
+   * what the field mostly measures; splitting the counters would change the stored
+   * shape (and with it CACHE_VERSION and a full re-probe) for a naming nuance.
+   *
+   * 探测没有留下**任何**未决项时为 true。尽管名字如此，它覆盖整个探测过程（挡位、
+   * 请求参数、视觉、基线请求）而不只是挡位：任何一个未定性的请求都会让它为 false。
+   * 名字反映的是它主要测定的对象；拆分计数会改变存储结构（连带 CACHE_VERSION 与
+   * 全量重探），只为一个命名细节不值得。
+   */
   efforts_verified: boolean;
   /** Engine-declared default level, when it names one. */
   /** 引擎自己声明的默认挡位（说了才有）。 */

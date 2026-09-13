@@ -294,12 +294,16 @@ export const ADMIN_UI = `<!DOCTYPE html>
   .table tr:last-child td { border-bottom: none; }
   .table .mono { font-family: var(--mono); font-size: 12px; }
   .table .empty { text-align: center; color: var(--text-1); padding: 22px !important; }
-  /* Probe facts: one chip per capability, plus the parameters the engine accepted. */
-  /* 探测事实：每个能力一个 chip，以及引擎未拒绝的请求参数。 */
-  .mp-cap { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; margin: 0 4px 3px 0; white-space: nowrap; }
+  /* Probe facts: one entry per line, so a long list (max, xhigh, high, ...) or a
+     long error can never squeeze the neighbouring columns into one letter each. */
+  /* 探测事实：每行一条，使很长的挡位列表或报错永远不会把旁边的列挤成一行一个字母。 */
+  .mp-list { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+  .mp-list > * { max-width: 100%; }
+  .mp-cap { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; }
   .mp-cap.on { background: rgba(34, 197, 94, 0.14); color: #86efac; }
   .mp-cap.off { background: rgba(239, 68, 68, 0.14); color: #fca5a5; }
-  .mp-params { font-family: var(--mono); font-size: 11.5px; color: var(--text-1); line-height: 1.65; word-break: break-word; max-width: 260px; }
+  .mp-params { font-family: var(--mono); font-size: 11.5px; color: var(--text-1); line-height: 1.65; word-break: break-word; }
+  .mp-error { color: var(--err); font-size: 12px; line-height: 1.5; word-break: break-word; margin-top: 6px; }
 
   .banner { border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-top: 14px; line-height: 1.5; display: none; }
   .banner.ok { display: block; background: rgba(34, 197, 94, 0.12); border: 1px solid rgba(34, 197, 94, 0.25); color: #86efac; }
@@ -559,7 +563,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
                 <h3><span class="ic">▸</span> <span data-i18n="up.status_title">当前凭证状态</span></h3>
                 <div class="desc" style="margin-bottom:0;" data-i18n="up.status_desc">最近一次导入的凭证摘要，凭证过期后请重新登录上游并再次导入。</div>
               </div>
-              <button class="btn btn-ghost" style="width:auto; flex:none; margin:12px 0;" onclick="checkSession()" data-i18n="up.check_session">检测 Session 连通性</button>
+              <button class="btn btn-ghost" style="width:auto; flex:none; margin:12px 0;" onclick="checkSession(this)" data-i18n="up.check_session">检测 Session 连通性</button>
               <button class="btn btn-danger" style="width:auto; flex:none; margin:12px 0;" onclick="deleteSession()" data-i18n="up.delete_session">删除 Session</button>
             </div>
             <div class="stats" style="grid-template-columns:1fr 1fr; margin-top:16px;">
@@ -585,8 +589,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
               <textarea id="session-json" placeholder='{\n  "authorization": "Bearer eyJ...",\n  "cookie": "...",\n  "base_url": "https://..."\n}'></textarea>
             </div>
             <div class="btn-row">
-              <button class="btn btn-ghost" onclick="testSession()" data-i18n="up.test">校验并测试连通</button>
-              <button class="btn btn-primary" style="width:auto;" onclick="importSession()" data-i18n="up.import">导入 Session</button>
+              <button class="btn btn-ghost" onclick="testSession(this)" data-i18n="up.test">校验并测试连通</button>
+              <button class="btn btn-primary" style="width:auto;" onclick="importSession(this)" data-i18n="up.import">导入 Session</button>
             </div>
             <div class="banner" id="session-banner"></div>
           </div>
@@ -609,10 +613,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
             <div id="mp-detail" class="collapse"><div>
               <div class="setting-row" style="margin-bottom:12px;">
                 <div class="setting-info">
-                  <div class="setting-label" data-i18n="mp.refresh_label">每轮子请求预算</div>
-                  <div class="setting-hint" data-i18n="mp.refresh_hint">单轮探测最多消耗的上游子请求数。免费层每次调用上限 50，付费层 10,000；预算用完时协调者会用自身 alarm 继续，不需要客户端再触发。</div>
+                  <div class="setting-label" data-i18n="mp.hb_label">定时巡检</div>
+                  <div class="setting-hint" data-i18n="mp.hb_hint">开启后，空闲部署也会每隔所选时长自动对齐一次上游模型列表（每次巡检约 1–2 个上游子请求）；有指纹变化才探测，仍受「每轮子请求预算」约束并由 alarm 自动继续；上游模型的增减与凭证过期会被更早发现。默认关闭。</div>
                 </div>
-                <select id="mp-budget-select" style="width:180px;" onchange="saveProbeBudget(this.value)"></select>
+                <select id="mp-heartbeat-select" style="width:180px;" onchange="saveProbeHeartbeat(this.value)"></select>
               </div>
 
               <div class="setting-row" style="margin-bottom:12px;">
@@ -622,20 +626,20 @@ export const ADMIN_UI = `<!DOCTYPE html>
                       <div class="setting-label" data-i18n="mp.params_title">探测参数</div>
                       <div class="setting-hint" data-i18n="mp.params_hint">此参数设置作用于所有探测。</div>
                     </div>
-                    <button class="btn btn-primary" style="width:auto; flex:none;" onclick="saveProbeSettings()" data-i18n="mp.save">保存</button>
+                    <button class="btn btn-primary" style="width:auto; flex:none;" onclick="saveProbeSettings(this)" data-i18n="mp.save">保存</button>
                   </div>
                   <div style="display:flex; flex-direction:column; gap:12px; margin-top:14px;">
                     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
                       <div class="setting-info" style="flex:1;">
-                        <div class="setting-label" data-i18n="mp.budget_label">自定义预算</div>
-                        <div class="setting-hint" data-i18n="mp.budget_hint">与上方「每轮子请求预算」是同一个值：预设一键写入 40 / 2000，这里可填 4–9000 的任意数值，保存后上方显示为「自定义」。一个模型典型消耗约 10 个子请求，最坏约 20 个。</div>
+                        <div class="setting-label" data-i18n="mp.budget_label">每轮子请求预算</div>
+                        <div class="setting-hint" data-i18n="mp.budget_hint">单轮探测（一次调用）最多向上游发送的子请求数，4–9000，按「保存」生效。一个模型典型消耗约 10 个、最坏约 20 个；免费层单次调用上限 50 个（含模型列表与前缀探测的开销），建议不超过 40。预算用完时协调者用自身 alarm 继续，无需再点「立即探测」。</div>
                       </div>
                       <input id="mp-budget" type="number" min="4" max="9000" style="width:130px; flex:none;" placeholder="40" />
                     </div>
                     <div style="display:flex; align-items:center; justify-content:space-between; gap:12px;">
                       <div class="setting-info" style="flex:1;">
                         <div class="setting-label" data-i18n="mp.timeout_label">单模型超时</div>
-                        <div class="setting-hint" data-i18n="mp.timeout_hint">每个模型探测请求的最长等待时间（1–120 秒）。</div>
+                        <div class="setting-hint" data-i18n="mp.timeout_hint">每个模型探测请求的最长等待时间（1–120 秒）。另有单模型总墙钟 45 秒的保险（不可调），调大本值不会突破它。</div>
                       </div>
                       <input id="mp-timeout" type="number" min="1" max="120" style="width:130px; flex:none;" placeholder="30" />
                     </div>
@@ -666,7 +670,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
                     <div class="setting-label" data-i18n="mp.cache_title">已缓存的模型及其探测结果</div>
                     <div class="setting-hint" data-i18n="mp.cache_hint">列出已探测的模型与状态：正常（结论完整）、部分结论（有请求未得出答案，会按退避重试）、不可探测（上游从不校验该字段）、失败待重试。能力与最后错误显示在挡位下方。</div>
                   </div>
-                  <button class="btn btn-ghost" style="width:auto; flex:none;" onclick="refreshProbe()" data-i18n="mp.refresh">立即探测</button>
+                  <button class="btn btn-ghost" style="width:auto; flex:none;" onclick="refreshProbe(this)" data-i18n="mp.refresh">立即探测</button>
                 </div>
                 <!-- The round banner sits with the button that triggers it (and above the
                      table it describes) instead of above the section heading, where it
@@ -937,6 +941,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'keys.th_created': '创建时间',
       'keys.th_used': '最近使用',
       'keys.never_used': '从未使用',
+      'keys.tracking_disabled': '已关闭此功能',
       'keys.empty': '暂无 API Key',
       'keys.del_confirm': '确认删除 Key ',
       'keys.del_confirm_end': '？',
@@ -961,10 +966,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.lang_en': 'English',
       'set.lang_saved': '语言偏好已保存',
       'set.touch_title': '使用记录粒度',
-      'set.touch_desc': '控制 API Key「最近使用」时间的 KV 写入频率。从未使用的 Key 首次调用会立即记录一次，之后按所选粒度更新；粒度越粗，KV 写入次数越少（免费层每日写入上限 1000 次）。',
+      'set.touch_desc': '控制 API Key「最近使用」时间的 KV 写入频率。从未使用的 Key 首次调用会立即记录一次，之后按所选粒度更新；粒度越粗，KV 写入次数越少（免费层每日写入上限 1000 次）。选择「关闭」后不再记录，历史数据仍保留在 KV 中，但「最近使用」列不再显示。',
       'set.touch_label': '记录间隔',
       'set.touch_hint': '更改立即生效，无需重新部署。',
+      'set.touch_off': '关闭（不记录）',
       'set.touch_daily': '每天（默认）',
+      'set.touch_12h': '每十二小时',
       'set.touch_6h': '每六小时',
       'set.touch_3h': '每三小时',
       'set.touch_hourly': '每小时',
@@ -977,16 +984,23 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'mp.enabled_hint': '关闭后不发起任何探测，/v1/models 也不再输出探测得出的字段（capabilities、supported_parameters、reasoning、architecture）。',
       'mp.on': '开启',
       'mp.off': '关闭',
-      'mp.refresh_label': '每轮子请求预算',
-      'mp.refresh_hint': '单轮探测最多消耗的上游子请求数。免费层每次调用上限 50，付费层 10,000；预算用完时协调者会用自身 alarm 继续，不需要客户端再触发。',
+      'mp.hb_label': '定时巡检',
+      'mp.hb_hint': '开启后，空闲部署也会每隔所选时长自动对齐一次上游模型列表（每次巡检约 1–2 个上游子请求）；有指纹变化才探测，仍受「每轮子请求预算」约束并由 alarm 自动继续；上游模型的增减与凭证过期会被更早发现。默认关闭。',
+      'mp.hb_off': '关闭',
+      'mp.hb_30m': '每三十分钟',
+      'mp.hb_hourly': '每小时',
+      'mp.hb_3h': '每三小时',
+      'mp.hb_6h': '每六小时',
+      'mp.hb_12h': '每十二小时',
+      'mp.hb_daily': '每天',
       'mp.params_title': '探测参数',
       'mp.params_hint': '此参数设置作用于所有探测。',
       'mp.cache_title': '已缓存的模型及其探测结果',
       'mp.cache_hint': '列出已探测的模型与状态：正常（结论完整）、部分结论（有请求未得出答案，会按退避重试）、不可探测（上游从不校验该字段）、失败待重试。能力与最后错误显示在挡位下方。',
-      'mp.budget_label': '自定义预算',
-      'mp.budget_hint': '与上方「每轮子请求预算」是同一个值：预设一键写入 40 / 2000，这里可填 4–9000 的任意数值，保存后上方显示为「自定义」。一个模型典型消耗约 10 个子请求，最坏约 20 个。',
+      'mp.budget_label': '每轮子请求预算',
+      'mp.budget_hint': '单轮探测（一次调用）最多向上游发送的子请求数，4–9000，按「保存」生效。一个模型典型消耗约 10 个、最坏约 20 个；免费层单次调用上限 50 个（含模型列表与前缀探测的开销），建议不超过 40。预算用完时协调者用自身 alarm 继续，无需再点「立即探测」。',
       'mp.timeout_label': '单模型超时',
-      'mp.timeout_hint': '每个模型探测请求的最长等待时间（1–120 秒）。',
+      'mp.timeout_hint': '每个模型探测请求的最长等待时间（1–120 秒）。另有单模型总墙钟 45 秒的保险（不可调），调大本值不会突破它。',
       'mp.wait_label': '等待时长',
       'mp.wait_hint': '/v1/models 最多等待缺失模型探测完成的时长（0–30 秒，0 为不等待）。',
       'mp.save': '保存',
@@ -1007,14 +1021,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'mp.st_ok': '正常',
       'mp.st_partial': '部分结论',
       'mp.st_failed': '失败待重试',
-      'mp.budget_free': '免费层（40 子请求/轮）',
-      'mp.budget_paid': '付费层（2000 子请求/轮）',
-      'mp.budget_custom_value': '自定义（{value} 子请求/轮）',
+      'mp.failed_banner': '有 {count} 个模型探测失败，将按退避自动重试（不会影响已确立的结论，也不影响客户端）。最近错误：{error}',
       'mp.reprobe': '重探',
       'mp.expose_label': '实例元信息',
       'mp.expose_hint': '在 /v1/models 信封中输出上游部署的 name / version / features 与共享能力模板（x_open_webui）。关闭后该键完全不出现。',
       'err.probe_session_missing': '尚未导入 Session，无法探测。',
       'err.probe_models_failed': '无法获取上游模型列表，请检查凭证或稍后重试。',
+      'err.probe_model_missing': '该模型不在上游的模型列表中，可能已被移除或更名。',
       'km.title': 'API Key 已生成',
       'km.note': '请立即复制保存，关闭后将无法再次查看完整 Key。',
       'pm.title': '修改管理密码',
@@ -1136,6 +1149,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'keys.th_created': 'Created',
       'keys.th_used': 'Last Used',
       'keys.never_used': 'Never Used',
+      'keys.tracking_disabled': 'Tracking is off',
       'keys.empty': 'No API Keys Yet',
       'keys.del_confirm': 'Delete key ',
       'keys.del_confirm_end': '?',
@@ -1160,10 +1174,12 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'set.lang_en': 'English',
       'set.lang_saved': 'Language preference saved',
       'set.touch_title': 'Usage Tracking Granularity',
-      'set.touch_desc': 'Controls how often the "Last Used" timestamp of API keys is written to KV. A never-used key is recorded immediately on its first call; afterwards it refreshes at the chosen granularity. Coarser granularity means fewer KV writes (free tier: 1,000 writes/day).',
+      'set.touch_desc': 'Controls how often the "Last Used" timestamp of API keys is written to KV. A never-used key is recorded immediately on its first call; afterwards it refreshes at the chosen granularity. Coarser granularity means fewer KV writes (free tier: 1,000 writes/day). With "Off", recording stops entirely; existing history stays in KV but the column is no longer shown.',
       'set.touch_label': 'Record Interval',
       'set.touch_hint': 'Changes take effect immediately; no redeploy needed.',
+      'set.touch_off': 'Off (do not record)',
       'set.touch_daily': 'Daily (default)',
+      'set.touch_12h': 'Every 12 hours',
       'set.touch_6h': 'Every 6 hours',
       'set.touch_3h': 'Every 3 hours',
       'set.touch_hourly': 'Hourly',
@@ -1176,16 +1192,23 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'mp.enabled_hint': 'When off, no probes are sent and /v1/models carries no probe-derived fields (capabilities, supported_parameters, reasoning, architecture).',
       'mp.on': 'On',
       'mp.off': 'Off',
-      'mp.refresh_label': 'Subrequest Budget Per Round',
-      'mp.refresh_hint': 'Upstream subrequests one round may spend. The free plan allows 50 per invocation, the paid plan 10,000; when the budget runs out the coordinator continues with its own alarm, so no client has to trigger it again.',
+      'mp.hb_label': 'Scheduled Patrol',
+      'mp.hb_hint': 'When on, an idle deployment also re-aligns the upstream model list at the chosen interval (about 1-2 upstream subrequests per patrol); probing happens only on a fingerprint change, still bounded by the per-round subrequest budget and continued by the alarm; upstream model additions/removals and expired credentials surface sooner. Off by default.',
+      'mp.hb_off': 'Off',
+      'mp.hb_30m': 'Every 30 minutes',
+      'mp.hb_hourly': 'Hourly',
+      'mp.hb_3h': 'Every 3 hours',
+      'mp.hb_6h': 'Every 6 hours',
+      'mp.hb_12h': 'Every 12 hours',
+      'mp.hb_daily': 'Daily',
       'mp.params_title': 'Probe Parameters',
       'mp.params_hint': 'These parameters apply to all probes.',
       'mp.cache_title': 'Cached Models & Probe Results',
       'mp.cache_hint': 'Lists each probed model with its status: OK (conclusive), Partial (some request left the answer open, retried with backoff), Unprobeable (the upstream never validates the field) or Failed. Capabilities and the last error appear under the levels.',
-      'mp.budget_label': 'Custom Budget',
-      'mp.budget_hint': 'The same value as "Per-round Subrequest Budget" above: the presets write 40 / 2000 in one click, while this input takes any value from 4 to 9000 — the preset then reads "Custom". One model typically costs about 10 subrequests, 20 in the worst case.',
+      'mp.budget_label': 'Subrequest Budget Per Round',
+      'mp.budget_hint': 'The maximum number of upstream subrequests one probe round (one invocation) may spend; 4–9000, applied on Save. One model typically costs about 10 (worst case ~20). The free plan caps a single invocation at 50 subrequests including the model list and prefix probes, so keep it at or below 40. When the budget runs out the coordinator continues with its own alarm — no need to click again.',
       'mp.timeout_label': 'Per-model Timeout',
-      'mp.timeout_hint': 'Maximum wait per probe request (1–120 seconds).',
+      'mp.timeout_hint': 'Maximum wait per probe request (1–120 seconds). A fixed per-model wall clock of 45 seconds (not configurable) also applies; raising this value cannot exceed it.',
       'mp.wait_label': 'Wait Time',
       'mp.wait_hint': 'How long /v1/models may wait for a missing-models probe (0–30 seconds; 0 = never wait).',
       'mp.save': 'Save',
@@ -1206,14 +1229,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
       'mp.st_ok': 'OK',
       'mp.st_partial': 'Partial',
       'mp.st_failed': 'Failed, will retry',
-      'mp.budget_free': 'Free plan (40 subrequests/round)',
-      'mp.budget_paid': 'Paid plan (2000 subrequests/round)',
-      'mp.budget_custom_value': 'Custom ({value} subrequests/round)',
+      'mp.failed_banner': '{count} model(s) failed to probe; they retry with backoff automatically (established facts and client access are unaffected). Last error: {error}',
       'mp.reprobe': 'Re-probe',
       'mp.expose_label': 'Instance Metadata',
       'mp.expose_hint': 'Serves the upstream deployment name / version / features and the shared capability template as x_open_webui on the /v1/models envelope. When off, the key is absent entirely.',
       'err.probe_session_missing': 'No session imported; cannot probe.',
       'err.probe_models_failed': 'Cannot fetch the upstream model list. Check credentials or retry later.',
+      'err.probe_model_missing': "That model is not in the upstream model list; it may have been removed or renamed.",
       'km.title': 'API Key Generated',
       'km.note': 'Copy and store it now — the full key cannot be viewed again after closing.',
       'pm.title': 'Change Admin Password',
@@ -1599,17 +1621,19 @@ export const ADMIN_UI = `<!DOCTYPE html>
   // 档位值来自服务端（touchIntervalOptions），仅展示文案保留在本端。
   var TOUCH_LABELS = {
     '86400': 'set.touch_daily',
+    '43200': 'set.touch_12h',
     '21600': 'set.touch_6h',
     '10800': 'set.touch_3h',
     '3600': 'set.touch_hourly',
-    '1800': 'set.touch_30m'
+    '1800': 'set.touch_30m',
+    '0': 'set.touch_off'
   };
 
   function fillTouchSelect(current, options) {
     var sel = $('touch-interval-select');
     if (!sel) return;
     sel.innerHTML = '';
-    var opts = options && options.length ? options : [86400, 21600, 10800, 3600, 1800, 600];
+    var opts = options && options.length ? options : [86400, 43200, 21600, 10800, 3600, 1800, 0];
     for (var i = 0; i < opts.length; i++) {
       var value = String(opts[i]);
       var option = document.createElement('option');
@@ -1617,12 +1641,19 @@ export const ADMIN_UI = `<!DOCTYPE html>
       option.textContent = t(TOUCH_LABELS[value] || value);
       sel.appendChild(option);
     }
-    if (current) sel.value = String(current);
+    // 0 (off) is a legitimate selection, so the usual truthiness check would drop it.
+    // 0（关闭）是合法选择，常规的真值判断会把它丢掉。
+    if (current !== null && current !== undefined) sel.value = String(current);
   }
 
   function saveTouchInterval(v) {
     api('/admin/api/settings', { method: 'POST', body: { touch_interval: parseInt(v, 10) } })
-      .then(function () { toast(t('msg.touch_saved'), 'ok'); })
+      .then(function () {
+        toast(t('msg.touch_saved'), 'ok');
+        // Switching tracking off/on changes every row of the "Last Used" column.
+        // 切换记录开关会改变「最近使用」整列的显示。
+        renderKeys();
+      })
       .catch(function (err) {
         toast(etext(err.message), 'err');
         loadStatus(); // revert the select to the persisted value / 恢复为已保存的值
@@ -1637,35 +1668,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
   //
   // 开关旁的下拉框选择「每轮子请求预算」；预设写明各自的平台上限（免费层单次调用
   // 上限 50 个子请求，而一个模型典型消耗约 10 个）。
-  var MP_BUDGET_LABELS = { '40': 'mp.budget_free', '2000': 'mp.budget_paid' };
-  var MP_BUDGET_VALUES = [40, 2000];
-
-  // The select and the custom input below are two views of ONE stored setting
-  // (budget): the presets write 40 / 2000 in one click, the input takes anything in
-  // 4-9000. A stored value that is neither preset gets its own entry, so the select
-  // never claims the free plan is active while a custom budget is in effect.
-  //
-  // 下拉框与下方的自定义输入框是同一个存储设置（budget）的两个视图：预设一键写入
-  // 40 / 2000，输入框接受 4–9000 的任意值。两个预设之外的值会获得独立条目，因此
-  // 存着自定义预算时，下拉框绝不会谎称免费层生效。
-  function fillBudgetSelect(current) {
-    var sel = $('mp-budget-select');
-    if (!sel) return;
-    var budget = parseInt(current, 10);
-    var values = MP_BUDGET_VALUES.slice();
-    if (!isNaN(budget) && values.indexOf(budget) < 0) values.push(budget);
-    sel.innerHTML = '';
-    for (var i = 0; i < values.length; i++) {
-      var value = String(values[i]);
-      var option = document.createElement('option');
-      option.value = value;
-      var label = MP_BUDGET_LABELS[value];
-      option.textContent = label ? t(label) : tfmt('mp.budget_custom_value', { value: value });
-      sel.appendChild(option);
-    }
-    if (!isNaN(budget)) sel.value = String(budget);
-  }
-
   // Four states, because "the upstream never validates the field" (unprobeable) and
   // "the probe could not finish" (partial/failed) mean very different things.
   //
@@ -1689,11 +1691,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
   function renderCaps(caps) {
     var keys = caps ? Object.keys(caps) : [];
     if (!keys.length) return '<span style="color:var(--text-1)">—</span>';
-    return keys.map(function (k) {
+    return '<div class="mp-list">' + keys.map(function (k) {
       var on = !!caps[k];
       return '<span class="mp-cap ' + (on ? 'on' : 'off') + '">' +
         (on ? '✓' : '✗') + ' ' + esc(k) + '</span>';
-    }).join('');
+    }).join('') + '</div>';
   }
 
   // The request parameters the engine did not reject. Rendered verbatim: this list is
@@ -1702,7 +1704,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
   // 引擎未拒绝的请求参数。原样渲染：它正是"为什么某能力或挡位不在其它列里"的解释。
   function renderParams(params) {
     if (!params || !params.length) return '<span style="color:var(--text-1)">—</span>';
-    return '<div class="mp-params">' + esc(params.join(', ')) + '</div>';
+    return '<div class="mp-list">' + params.map(function (p) {
+      return '<div class="mp-params">' + esc(p) + '</div>';
+    }).join('') + '</div>';
   }
 
   function renderProbeTable(models) {
@@ -1713,11 +1717,20 @@ export const ADMIN_UI = `<!DOCTYPE html>
       return;
     }
     tbody.innerHTML = models.map(function (m) {
+      // One entry per line: a seven-level list or a long error must stay readable
+      // instead of squeezing the neighbouring columns into one letter per line.
+      //
+      // 每行一条：七级挡位或很长的报错必须保持可读，而不是把旁边的列挤成一行一个字母。
       var efforts = m.status === 'unprobeable'
         ? '<span style="color:var(--text-1)">' + t('mp.unprobeable') + '</span>'
-        : esc((m.supported_efforts || []).join(', ') || '—');
+        : '<div class="mp-list">' + (m.supported_efforts || []).map(function (level) {
+            return '<div class="mp-params">' + esc(level) + '</div>';
+          }).join('') + '</div>';
+      if (!m.supported_efforts || !m.supported_efforts.length) {
+        if (m.status !== 'unprobeable') efforts = '<span style="color:var(--text-1)">—</span>';
+      }
       if (m.last_error) {
-        efforts += '<div style="color:var(--text-1);font-size:12px;">' + esc(m.last_error) + '</div>';
+        efforts += '<div class="mp-error">' + esc(m.last_error) + '</div>';
       }
       var probed = m.probed_at ? new Date(m.probed_at * 1000).toLocaleString() : '—';
       var reprobe = '<button class="btn btn-ghost" style="width:auto;flex:none;margin-left:8px;"' +
@@ -1728,7 +1741,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
         '<td>' + renderCaps(m.capabilities) + '</td>' +
         '<td>' + renderParams(m.supported_parameters) + '</td>' +
         '<td>' + probed + '</td>' +
-        '<td>' + probeStatusBadge(m.status) + reprobe + '</td>' +
+        '<td style="white-space:nowrap;">' + probeStatusBadge(m.status) + reprobe + '</td>' +
         '</tr>';
     }).join('');
   }
@@ -1740,8 +1753,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
   // 尚未保存完毕的探测参数。
   var _probeSettings = null;
 
-  function buildProbeBody(enabled, budgetOverride, exposeOverride) {
-    var base = _probeSettings || { enabled: true, timeout: 30, wait: 5, budget: 40, exposeInstanceMeta: true };
+  function buildProbeBody(enabled, budgetOverride, exposeOverride, heartbeatOverride) {
+    var base = _probeSettings || { enabled: true, timeout: 30, wait: 5, budget: 40, heartbeatInterval: 0, exposeInstanceMeta: true };
     var numOr = function (id, fallback) {
       var el = $(id);
       var parsed = el ? parseInt(el.value, 10) : NaN;
@@ -1756,7 +1769,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
       // value is round-tripped so saving a parameter never resets it.
       //
       // 显式覆盖值优先（开关立即保存）；否则把读到的值原样回传，避免保存参数时把它重置。
-      expose_instance_meta: exposeOverride !== undefined ? exposeOverride : base.exposeInstanceMeta !== false
+      expose_instance_meta: exposeOverride !== undefined ? exposeOverride : base.exposeInstanceMeta !== false,
+      // Same override pattern for the patrol interval: the select saves immediately,
+      // while the explicit Save round-trips the loaded seconds untouched.
+      //
+      // 巡检间隔沿用同样的覆盖模式：下拉框立即保存，显式「保存」则把已载入的秒数
+      // 原样回传。
+      heartbeat_interval: heartbeatOverride !== undefined ? heartbeatOverride : (base.heartbeatInterval === undefined ? 0 : base.heartbeatInterval)
     };
   }
 
@@ -1779,19 +1798,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
       });
   }
 
-  // The budget preset also saves immediately, and mirrors into the custom input.
-  // 预算预设同样立即保存，并同步到自定义输入框。
-  function saveProbeBudget(value) {
-    var budget = parseInt(value, 10);
-    if ($('mp-budget') && !isNaN(budget)) $('mp-budget').value = String(budget);
-    api('/admin/api/probe/settings', { method: 'POST', body: buildProbeBody(undefined, budget) })
-      .then(function (data) { _probeSettings = data.settings; toast(t('mp.saved'), 'ok'); })
-      .catch(function (err) {
-        toast(etext(err.message), 'err');
-        loadProbe(); // revert the select to the persisted value / 恢复为已保存的值
-      });
-  }
-
   // The instance-metadata switch saves immediately, like the others.
   // 实例元信息开关同样立即保存。
   function saveProbeExpose(value) {
@@ -1803,18 +1809,74 @@ export const ADMIN_UI = `<!DOCTYPE html>
         loadProbe(); // revert the select to the persisted value / 恢复为已保存的值
       });
   }
+
+  // The heartbeat select saves immediately, like the probe switch: the patrol interval
+  // is not one of the "Save"-gated parameters, and the coordinator re-arms on this save.
+  //
+  // 心跳下拉框与探测开关一样立即保存：巡检间隔不属于按「保存」生效的参数，协调者会在
+  // 这次保存后立即重排。
+  function saveProbeHeartbeat(value) {
+    // The select's values are SECONDS from the shared granularity table (0 = off);
+    // the historical name of this variable wrongly suggested hours.
+    //
+    // 下拉框的取值是共享档位表的**秒数**（0 = 关闭）；这个变量的旧名字误作 hours。
+    var seconds = parseInt(value, 10);
+    if (isNaN(seconds)) return;
+    api('/admin/api/probe/settings', { method: 'POST', body: buildProbeBody(undefined, undefined, undefined, seconds) })
+      .then(function (data) { _probeSettings = data.settings; toast(t('mp.saved'), 'ok'); })
+      .catch(function (err) {
+        toast(etext(err.message), 'err');
+        loadProbe(); // revert the select to the persisted value / 恢复为已保存的值
+      });
+  }
+
+  // Heartbeat steps arrive from the server in SECONDS (the shared granularity table,
+  // same source as the usage-tracking select); only the display labels live here.
+  //
+  // 心跳档位由服务端以秒下发（共享刻度表，与「使用记录粒度」下拉框同源）；展示文案
+  // 保留在本端。
+  var HEARTBEAT_LABELS = {
+    '86400': 'mp.hb_daily',
+    '43200': 'mp.hb_12h',
+    '21600': 'mp.hb_6h',
+    '10800': 'mp.hb_3h',
+    '3600': 'mp.hb_hourly',
+    '1800': 'mp.hb_30m',
+    '0': 'mp.hb_off'
+  };
+
+  function fillHeartbeatSelect(current, options) {
+    var sel = $('mp-heartbeat-select');
+    if (!sel) return;
+    sel.innerHTML = '';
+    var opts = options && options.length ? options : [86400, 43200, 21600, 10800, 3600, 1800, 0];
+    for (var i = 0; i < opts.length; i++) {
+      var value = String(opts[i]);
+      var option = document.createElement('option');
+      option.value = value;
+      option.textContent = t(HEARTBEAT_LABELS[value] || value);
+      sel.appendChild(option);
+    }
+    // 0 (off) is a legitimate selection, so the usual truthiness check would drop it.
+    // 0（关闭）是合法选择，常规的真值判断会把它丢掉。
+    if (current !== null && current !== undefined) sel.value = String(current);
+  }
+
   function loadProbe() {
     api('/admin/api/probe').then(function (data) {
       if (!$('mp-enabled-select')) return;
       _probeSettings = data.settings;
       $('mp-enabled-select').value = data.settings.enabled ? 'on' : 'off';
       toggleProbeDetail(data.settings.enabled);
-      fillBudgetSelect(data.settings.budget);
       $('mp-budget').value = String(data.settings.budget);
       if ($('mp-expose-select')) $('mp-expose-select').value = data.settings.exposeInstanceMeta === false ? 'off' : 'on';
       $('mp-timeout').value = String(data.settings.timeout);
       $('mp-wait').value = String(data.settings.wait);
+      // An old payload without the field must read as "off", not as a bogus selection.
+      // 缺字段的旧响应必须按"关闭"处理，而不是变成一个错误的选中项。
+      fillHeartbeatSelect(data.settings.heartbeatInterval === undefined ? 0 : data.settings.heartbeatInterval, data.heartbeatOptions);
       renderProbeTable(data.models);
+      reportProbeFailures(data.models);
     }).catch(function (err) {
       // 401 is already handled by api(); skip to avoid duplicate toasts
       // 401 已由 api() 统一提示（仅会话过期时），此处跳过避免重复弹窗
@@ -1823,7 +1885,39 @@ export const ADMIN_UI = `<!DOCTYPE html>
     });
   }
 
-  function saveProbeSettings() {
+  // Whether the round banner (set by a "Probe Now" click) is still the current message.
+  // Once it is, a failure report may replace it; while it is fresh, a clean load must
+  // not wipe it.
+  //
+  // 「立即探测」设置的轮次横幅是否仍是当前消息。是的话，失败报告可以取代它；而一次
+  // 干净的加载不能把它抹掉。
+  var _probeRoundBanner = false;
+
+  // A failed probe is a persistent condition, not a toast: as long as any model sits
+  // in the failed state with an error, the round banner box shows it in red on every
+  // load, so the operator cannot scroll past it. A partial model keeps its quieter
+  // in-table treatment (its copy is a counter, not an error message).
+  //
+  // 探测失败是持续状态，而不是一条弹窗：只要有模型停在 failed 且带错误，这个轮次横幅
+  // 框就在每次加载时以红色显示它，运维不可能看漏。partial 保持表格内较轻的呈现（它的
+  // 文案是计数，不是错误消息）。
+  function reportProbeFailures(models) {
+    var failed = (models || []).filter(function (m) {
+      return m.status === 'failed' && m.last_error;
+    });
+    if (failed.length > 0) {
+      _probeRoundBanner = false;
+      var error = String(failed[0].last_error || '');
+      if (error.length > 220) error = error.slice(0, 220) + '…';
+      setBanner('mp-banner', 'err', function () {
+        return tfmt('mp.failed_banner', { count: failed.length, error: error });
+      });
+    } else if (!_probeRoundBanner) {
+      clearBanner('mp-banner');
+    }
+  }
+
+  function saveProbeSettings(btn) {
     var budget = parseInt($('mp-budget').value, 10);
     // NB: do NOT name this "t" — it would shadow the global i18n function t().
     // 注意：不要命名为 "t"，否则会遮蔽全局的 i18n 翻译函数 t()。
@@ -1836,7 +1930,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
       setBanner('mp-banner', 'err', function () { return etext('err.settings_invalid'); });
       return;
     }
-    var btn = event.target;
     setLoading(btn, true);
     api('/admin/api/probe/settings', {
       method: 'POST',
@@ -1845,6 +1938,9 @@ export const ADMIN_UI = `<!DOCTYPE html>
         timeout: timeoutSec,
         wait: waitSec,
         budget: budget,
+        // Round-tripped untouched: the patrol interval is not edited by this form.
+        // 原样回传：巡检间隔不由本表单编辑。
+        heartbeat_interval: _probeSettings.heartbeatInterval === undefined ? 0 : _probeSettings.heartbeatInterval,
         expose_instance_meta: _probeSettings.exposeInstanceMeta !== false
       }
     })
@@ -1880,8 +1976,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     };
   }
 
-  function refreshProbe(model) {
-    var btn = event.target;
+  function refreshProbe(btn, model) {
     setLoading(btn, true);
     clearBanner('mp-banner');
     api('/admin/api/probe/refresh', { method: 'POST', body: model ? { model: model } : {} })
@@ -1902,9 +1997,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
         var type = authExpired ? 'warn' : (truncated ? 'warn' : 'ok');
         var key = authExpired ? 'mp.refresh_auth' : (truncated ? 'mp.refresh_truncated' : 'mp.refresh_done');
         setBanner('mp-banner', type, function () { return tfmt(key, params); });
+        _probeRoundBanner = true;
         loadProbe();
       })
-      .catch(function (err) { setBanner('mp-banner', 'err', function () { return etext(err.message); }); })
+      .catch(function (err) {
+        _probeRoundBanner = false;
+        setBanner('mp-banner', 'err', function () { return etext(err.message); });
+      })
       .finally(function () { setLoading(btn, false); });
   }
 
@@ -1914,7 +2013,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   // 单模型重探（行内按钮）；id 走 data 属性，因此引号永远不会破坏标记。
   function probeOneModel(btn) {
     var model = btn && btn.getAttribute ? btn.getAttribute('data-probe-model') : '';
-    if (model) refreshProbe(model);
+    if (model) refreshProbe(btn, model);
   }
   // ---------- status ----------
   // ---------- 状态 ----------
@@ -1964,6 +2063,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
       // usage tracking granularity select
       // 使用记录粒度选择器
+      _touchInterval = status.touchInterval;
       fillTouchSelect(status.touchInterval, status.touchIntervalOptions);
     }).catch(function (err) {
     // 401 is already handled by api(); skip to avoid duplicate toasts
@@ -1975,8 +2075,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   // ---------- session ----------
   // ---------- 会话凭证 ----------
-  function testSession() {
-    var btn = event.target;
+  function testSession(btn) {
     setLoading(btn, true);
     clearBanner('session-banner');
     api('/admin/api/session', { method: 'POST', body: { json: $('session-json').value, test: true, save: false } })
@@ -1992,8 +2091,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
   //
   // 针对已导入 KV 的 session 的连通性检测（无需粘贴内容）。
   // 结果显示在「当前凭证状态」卡片内部。
-  function checkSession() {
-    var btn = event.target;
+  function checkSession(btn) {
     setLoading(btn, true);
     clearBanner('status-banner');
     api('/admin/api/session/check', { method: 'POST' })
@@ -2004,8 +2102,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
       .finally(function () { setLoading(btn, false); });
   }
 
-  function importSession() {
-    var btn = event.target;
+  function importSession(btn) {
     setLoading(btn, true);
     clearBanner('session-banner');
     api('/admin/api/session', { method: 'POST', body: { json: $('session-json').value, test: true, save: true } })
@@ -2080,6 +2177,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   var _keys = [];
 
+  // Last known usage-tracking interval; 0 means the feature is off and the
+  // "Last Used" column shows a disabled notice instead of (stale) timestamps.
+  //
+  // 最近一次已知的记录粒度；0 表示功能已关闭，「最近使用」列显示停用提示，
+  // 而不是（可能过时的）时间戳。
+  var _touchInterval = null;
+
   // Render the key table from the local _keys snapshot. The dashboard key
   // count reads the same local snapshot, so it updates immediately on
   // create/delete — including consecutive adds — without waiting for the
@@ -2096,17 +2200,31 @@ export const ADMIN_UI = `<!DOCTYPE html>
       tbody.innerHTML = '<tr><td colspan="5" class="empty">' + t('keys.empty') + '</td></tr>';
       return;
     }
-    tbody.innerHTML = _keys.map(function (k, i) {
+    // Buttons bind to the key VALUE via a data attribute instead of the array
+    // index: a second tab mutating _keys between render and click would otherwise
+    // make "row 2" point at a different key. esc() escapes quotes too, so the
+    // value cannot break out of the attribute.
+    //
+    // 按钮经 data 属性绑定**键值**而不是数组下标：否则另一个标签页在渲染与点击之间
+    // 改动 _keys 时，"第 2 行"会指向另一把 Key。esc() 连引号也转义，取值逃不出属性。
+    tbody.innerHTML = _keys.map(function (k) {
       var created = new Date(k.created_at * 1000).toLocaleString();
-      var used = k.last_used ? new Date(k.last_used * 1000).toLocaleString() : t('keys.never_used');
+      // Tracking off hides even historical timestamps: the column must never
+      // suggest "this key was used recently" from data that can no longer update.
+      //
+      // 关闭记录后连历史时间戳也一并隐藏：这一列绝不能再用已经不再更新的数据，
+      // 暗示"这个 Key 最近用过"。
+      var used = _touchInterval === 0
+        ? t('keys.tracking_disabled')
+        : (k.last_used ? new Date(k.last_used * 1000).toLocaleString() : t('keys.never_used'));
       return '<tr>' +
         '<td>' + esc(k.name) + '</td>' +
         '<td class="mono">' + esc(k.masked) + '</td>' +
         '<td>' + created + '</td>' +
         '<td>' + used + '</td>' +
         '<td style="text-align:right; white-space:nowrap;">' +
-          '<button class="btn btn-ghost btn-sm" onclick="rotateKey(' + i + ')">' + t('keys.rotate') + '</button> ' +
-          '<button class="btn btn-danger btn-sm" onclick="deleteKey(' + i + ')">' + t('common.delete') + '</button>' +
+          '<button class="btn btn-ghost btn-sm" data-key="' + esc(k.key) + '" onclick="rotateKey(this)">' + t('keys.rotate') + '</button> ' +
+          '<button class="btn btn-danger btn-sm" data-key="' + esc(k.key) + '" onclick="deleteKey(this)">' + t('common.delete') + '</button>' +
         '</td>' +
         '</tr>';
     }).join('');
@@ -2124,9 +2242,15 @@ export const ADMIN_UI = `<!DOCTYPE html>
     });
   }
 
-  function deleteKey(i) {
-    var keyRecord = _keys[i];
-    if (!keyRecord) return;
+  function deleteKey(btn) {
+    var key = btn && btn.getAttribute ? btn.getAttribute('data-key') : '';
+    // Resolve by value, not by position: another tab may have changed _keys since
+    // this row was rendered.
+    //
+    // 按值解析而不是按位置：渲染之后另一个标签页可能已改动 _keys。
+    var idx = _keys.findIndex(function (k) { return k.key === key; });
+    if (idx < 0) return;
+    var keyRecord = _keys[idx];
     if (!confirm(t('keys.del_confirm') + '[' + keyRecord.name + ']' + t('keys.del_confirm_end'))) return;
     api('/admin/api/keys', { method: 'DELETE', body: { key: keyRecord.key } })
       .then(function () {
@@ -2136,7 +2260,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
         //
         // 先在本地移除：KV list 索引是最终一致的，立即重新拉取
         // 可能仍返回已删除的 Key。
-        _keys.splice(i, 1);
+        _keys.splice(idx, 1);
         renderKeys();
         loadStatus();
         loadKeys(); // overwrite with the server list once it has caught up / 服务端列表同步后覆盖
@@ -2144,9 +2268,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
       .catch(function (err) { toast(etext(err.message), 'err'); });
   }
 
-  function rotateKey(i) {
-    var keyRecord = _keys[i];
-    if (!keyRecord) return;
+  function rotateKey(btn) {
+    var key = btn && btn.getAttribute ? btn.getAttribute('data-key') : '';
+    var idx = _keys.findIndex(function (k) { return k.key === key; });
+    if (idx < 0) return;
+    var keyRecord = _keys[idx];
     if (!confirm(t('keys.rotate_confirm') + '[' + keyRecord.name + ']' + t('keys.rotate_confirm_end'))) return;
     api('/admin/api/keys/rotate', { method: 'POST', body: { key: keyRecord.key } })
       .then(function (data) {
@@ -2155,7 +2281,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
         //
         // 本地替换该行（与创建/删除相同的写后读补偿机制），随后弹出
         // 新 Key 的一次性复制弹窗。
-        _keys[i] = {
+        _keys[idx] = {
           key: data.key,
           name: data.name,
           prefix: data.prefix,
@@ -2175,7 +2301,13 @@ export const ADMIN_UI = `<!DOCTYPE html>
   function esc(s) {
     var div = document.createElement('div');
     div.textContent = s == null ? '' : String(s);
-    return div.innerHTML;
+    // Element-content serialization only escapes & < >; values that also land
+    // inside double-quoted attributes (e.g. data-probe-model="...") need the
+    // quotes escaped too, or a crafted model id could break out of the attribute.
+    //
+    // 元素内容序列化只转义 & < >；同样落进双引号属性的取值（如
+    // data-probe-model="..."）还需要转义引号，否则构造的模型 id 可以逃出属性。
+    return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
   // init language before first paint of dynamic content

@@ -88,23 +88,23 @@ const QWEN =
 test("outer schema: all seven canonical levels are read", () => {
   const full = literalError(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
   assert.deepEqual(extractEffortCandidates(full), [
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
     "max",
+    "xhigh",
+    "high",
+    "medium",
+    "low",
+    "minimal",
+    "none",
   ]);
 });
 
 test("outer schema: a four-level enumeration is read", () => {
   const partial = literalError(["none", "low", "medium", "high"]);
-  assert.deepEqual(extractEffortCandidates(partial), ["none", "low", "medium", "high"]);
+  assert.deepEqual(extractEffortCandidates(partial), ["high", "medium", "low", "none"]);
 });
 
 test("second layer: Harmony wording is understood (the old parser could not read it)", () => {
-  assert.deepEqual(extractEffortCandidates(HARMONY), ["low", "medium", "high"]);
+  assert.deepEqual(extractEffortCandidates(HARMONY), ["high", "medium", "low"]);
 });
 
 test("second layer: rejecting one value without naming alternatives claims nothing", () => {
@@ -112,7 +112,7 @@ test("second layer: rejecting one value without naming alternatives claims nothi
 });
 
 test("second layer: Qwen wording (space, not underscore) is understood", () => {
-  assert.deepEqual(extractEffortCandidates(QWEN), ["low", "medium", "xhigh"]);
+  assert.deepEqual(extractEffortCandidates(QWEN), ["xhigh", "medium", "low"]);
 });
 
 test("engine-declared default is mined from the second layer only", () => {
@@ -146,8 +146,8 @@ test("the default-effort parse is stable across repeated calls", () => {
 
 test("candidate extraction stays stable too (it uses matchAll, not exec)", () => {
   for (let call = 1; call <= 3; call += 1) {
-    assert.deepEqual(extractEffortCandidates(QWEN), ["low", "medium", "xhigh"], `call ${call}`);
-    assert.deepEqual(extractEffortCandidates(HARMONY), ["low", "medium", "high"], `call ${call}`);
+    assert.deepEqual(extractEffortCandidates(QWEN), ["xhigh", "medium", "low"], `call ${call}`);
+    assert.deepEqual(extractEffortCandidates(HARMONY), ["high", "medium", "low"], `call ${call}`);
   }
 });
 
@@ -298,12 +298,12 @@ test("engineBuild mines the engine build string and tolerates junk", () => {
 // 思考挡位信息推导
 // --------------------------------------------------------------------------- //
 
-test("supported_efforts are sorted into canonical order and unknown ones pass through last", () => {
+test("supported_efforts are sorted into canonical order (largest effort first, as OpenRouter lists them) and unknown ones pass through last", () => {
   assert.deepEqual(
     sortEfforts(["high", "none", "medium", "low", "minimal", "xhigh", "max"]),
-    ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    ["max", "xhigh", "high", "medium", "low", "minimal", "none"],
   );
-  assert.deepEqual(sortEfforts(["turbo", "low", "none"]), ["none", "low", "turbo"]);
+  assert.deepEqual(sortEfforts(["turbo", "low", "none"]), ["low", "none", "turbo"]);
 });
 
 test("reasoning info carries the engine-declared default and mandatory flag", () => {
@@ -313,7 +313,7 @@ test("reasoning info carries the engine-declared default and mandatory flag", ()
     true,
   );
   assert.deepEqual(info, {
-    supported_efforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    supported_efforts: ["max", "xhigh", "high", "medium", "low", "minimal", "none"],
     mandatory: false,
     default_effort: "xhigh",
     default_enabled: true,
@@ -389,8 +389,10 @@ test("present() emits only established facts", () => {
   const cache = seededCache();
   const presented = cache.present("a");
   assert.ok(presented);
+  // present() re-sorts into the canonical order (largest effort first).
+  // present() 会重新按规范顺序排序（最大挡位在前）。
   assert.deepEqual(presented.reasoning, {
-    supported_efforts: ["none", "low"],
+    supported_efforts: ["low", "none"],
     mandatory: false,
     default_effort: "low",
     default_enabled: true,
@@ -457,7 +459,9 @@ test("failed probes back off instead of being retried immediately", () => {
 test("a failed re-probe never throws away established facts", () => {
   const cache = seededCache();
   cache.recordFailure("a", "fp-a", "boom");
-  assert.deepEqual(cache.present("a")?.reasoning?.supported_efforts, ["none", "low"]);
+  // present() re-sorts into the canonical order (largest effort first).
+  // present() 会重新按规范顺序排序（最大挡位在前）。
+  assert.deepEqual(cache.present("a")?.reasoning?.supported_efforts, ["low", "none"]);
   assert.equal(cache.entry("a")?.status, "ok");
   assert.equal(cache.entry("a")?.last_error, "boom");
 });

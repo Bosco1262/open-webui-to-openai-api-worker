@@ -21,7 +21,7 @@ model probe cache*) and its follow-up refinement commit.
 | Probe execution | `app.py::_probe_model` (six steps, ~10 typical / 20 worst-case requests per model) | `worker/src/probeRound.ts` |
 | Cache storage | `model_probe_cache.json` (version 2) | The `ModelProbeCoordinator` DO's SQLite (one row per model), exportable in the same JSON shape |
 | Refresh orchestration | `app.py::_refresh_model_probe` (concurrency + Semaphore) | DO serial + budget sharding + self-continuing alarm |
-| Re-probe triggers | Fingerprint change / backoff expiry / manual | Same (**no time-based TTL**) |
+| Re-probe triggers | Fingerprint change / backoff expiry / manual | Same (**no time-based TTL**; plus an optional scheduled patrol, off by default) |
 | Served contract | `/v1/models` fields, the `x_open_webui` envelope, `GET /v1/models/{id}`, 400 self-heal | Same |
 
 Renames are hard, with no compatibility layer (decision D11), so old file names / KV keys /
@@ -40,7 +40,7 @@ admin endpoints are all gone.
 | D7 | Unestablished capabilities | **Omitted**, never filled in from the OWUI template |
 | D8 | `reasoning.default_*` | **Omitted** unless the engine says otherwise |
 | D9 | Error bodies | This worker's own wording (structurally isomorphic to Python) |
-| D10 | `/v1/models/{id}` | Copied: **no envelope, never triggers a probe** |
+| D10 | `/v1/models/{id}` | Copied: **no envelope, never waits** (missing facts for that one model are filled in by a background round, without blocking the response) |
 | D11 | Naming | **Hard rename**, no fallback; operators redeploy |
 | D12 | Logging | Round-level summaries + one line per failure/exception (256 KB per-request cap in Workers Logs) |
 | D13 | Persistence granularity | **Write as soon as each model lands** (DO SQLite has no KV 1-write/s/key limit) |
@@ -53,10 +53,10 @@ admin endpoints are all gone.
 Worker (thin)                                 Durable Object: ModelProbeCoordinator (one instance per upstream base_url)
 ├─ GET  /v1/models            ──────────────▶ present(refs, waitSeconds)      strongly consistent + bounded wait
 │    1 fetch upstream /models                  ├─ SQLite: models table (one JSON row per model: 13 fields + fingerprint + state)
-│    2 fingerprint + normalize (modelCatalog.ts)│           meta table (cache version, upstream prefix, instance_meta)
+│    2 fingerprint + normalize (modelCatalog.ts)│           meta table (cache version, upstream prefix, instance_meta, heartbeat_next)
 │    3 ONE RPC for probe fields + envelope     ├─ alarm: drains the queue (15 min wall time per run, no client traffic needed)
 │    4 KV: settings:probe                      └─ RPC: refresh / probeOne / invalidate / view
-├─ GET  /v1/models/{id}       ──────────────▶ present([ref], 0)               never triggers a probe
+├─ GET  /v1/models/{id}       ──────────────▶ present([ref], 0)               single model only, never waits
 ├─ POST /v1/chat/completions  ── 400/422 mentioning the effort keyword ─▶ invalidate(model, effort)
 └─ /admin/api/probe*          ──────────────▶ view / refresh / probeOne
 ```
@@ -75,6 +75,17 @@ The budget still applies: one invocation may spend at most `settings.budget` ups
 subrequests. When it runs out, the round persists what it has and arms an alarm
 (`ALARM_CONTINUE_MS = 2s`), which is why a cold deployment converges over a few seconds
 instead of one request.
+
+**Trigger list**: the admin "Probe now" / per-row "re-probe" (`POST /admin/api/probe/refresh`),
+the on-demand top-ups from `/v1/models` and `/v1/models/{id}`, the 400 self-heal re-probe, the
+alarm continuation of a budget-truncated round (`pending_round`) -- and the **optional scheduled
+patrol** (off by default): it rides the SAME DO alarm, the wake landing at
+`min(backoff expiry, heartbeat tick)`, and a due tick runs the ordinary NON-forced round -- with
+no debt its entire cost is the 1-2 model-list requests, probing still happens only on a
+fingerprint change, and it is never a forced full re-probe. The interval is one of the shared
+granularity table's steps (30 minutes to daily, 0 = off), adjusted in the console
+and re-armed immediately on save; the tick is persisted in the coordinator's meta table (key
+`heartbeat_next`) and survives eviction. No Cron Trigger, no `wrangler.jsonc` change.
 
 ## 4. Probe algorithm (six steps, all `max_tokens=1`)
 
@@ -119,8 +130,8 @@ wins).
   `max_model_len`/`max_context_length`/`context_length`, `quantization`, `description`,
   `x_open_webui.capabilities` (the **diff keys** against the shared template) + probe-added
   `capabilities`, `supported_parameters`, `reasoning`, `architecture`.
-  Rule: **omit what is not established, never fill in a default**; levels stay in ascending
-  order `none → max`.
+  Rule: **omit what is not established, never fill in a default**; levels follow the OpenRouter
+  ordering from the largest effort down, `max → none` (unknown levels sort last).
 - **Envelope**: `{object:"list", data:[…], x_open_webui:{name?, version?, features?, default_model_capabilities?}}`;
   `default_model_capabilities` = the keys **every reporting model agrees on** (computed by the
   Worker and handed to the coordinator in the same RPC call); with `exposeInstanceMeta=false`
@@ -183,7 +194,7 @@ KV version). After deploying:
 | One DO instance (sharded by upstream base_url) | Every `/v1/models` read for that upstream goes through it | Soft limit of 1,000 req/s per object; a personal deployment is far below it |
 | Upstream load x10 (~10 requests per model) + Cloudflare egress IPs | May trigger upstream rate limits | Lower the budget/concurrency, raise backoff; a physical fact that cannot be removed |
 | No CLI (Python has `--probe`) | Triggering is admin-console only | "Probe now" / per-row "re-probe" in the console |
-| First wake-up depends on traffic | A cold deployment starts probing with the first request | The DO keeps going by itself once awake; D4 chose not to add a Cron Trigger |
+| First wake-up depends on traffic | A cold deployment starts probing with the first request | The DO keeps going by itself once awake; D4 chose not to add a Cron Trigger; an idle deployment can enable the "scheduled patrol" as a backstop (optional, off by default, implemented as a DO alarm heartbeat) |
 | An upstream that accepts the connection and never answers | A request could hang forever | Every upstream request is bounded: 15s for metadata (model list, prefix probing), 300s for a body-producing call, and a streaming call bounds only the wait for headers (`fetchUpstream`) |
 | Prefix probing: "anything but a 404 is a hit" (old rule) | The SPA's 200+HTML, or a temporary 5xx, was cached as "the prefix works" | Now **confirmation-based**: only a readable model list or a 401/403 confirms (`confirmUpstreamPrefix`); all three call sites share the rule |
 | Blindly joining an in-flight round (old behaviour) | An admin "probe now" could force nothing yet return someone else's statistics | Now `canJoinRound`: join only when the in-flight round is at least as thorough and covers at least the same models, otherwise queue |
@@ -236,6 +247,15 @@ outcome mapping (the detailed reasoning lives in the corresponding code comments
 | A4 | A budget-truncated round only told the alarm "there is work left", losing its forcedness: the alarm restarted with `force=false`, skipping every model that still holds an `ok` conclusion — on the free plan "Probe Now" re-probed only the first ~4 models, the rest of the list was never re-probed, and the banner's "the rest continues in the background" was untrue | `runProbeRound` reports the unfinished `stats.remaining`; on truncation it is written into the coordinator's meta table together with the force flag, and the alarm resumes the original request (measured locally: a forced re-probe drains `total` 6→5→4→3→2 hop by hop); the banner gained "probe still running / budget used up / the rest continues automatically" |
 | A5 | The budget select displayed a non-preset value as "Free plan (40 subrequests/round)", and its relation to the "Custom Budget" input read like two settings | The select gains a "Custom (N subrequests/round)" entry for non-preset values; the hint now explains both controls are the **same** `budget` value |
 
+**Console adjustments, round two (2026-09-12, operator feedback)**
+
+| Id | Content | Disposition |
+|---|---|---|
+| A6 | Two controls for the budget (a preset select + the custom input), duplicating one setting | The preset select and the `budgetPresets` API field are removed; "Subrequest Budget Per Round" is the single entry point (4–9000, applied on Save), with the hint documenting the free plan's 50-subrequest ceiling and the ≤40 recommendation |
+| A7 | Efforts were emitted in ascending `none → max` order | Aligned with OpenRouter: largest effort first, `max → none` (unknown levels still sort last); `EFFORT_ORDER` also drives the fallback candidate sweep |
+| A8 | The platform's per-invocation subrequest cap ("Too many subrequests") was recorded as **that model's** failure and sent into backoff, polluting the cache semantics | `isPlatformSubrequestError()` recognises it and handles it like budget exhaustion: the round truncates, the model stays untouched, and the alarm continues in a fresh invocation — the error never enters the cache and clients are unaffected |
+| A9 | Efforts/capabilities/parameters were crammed onto one line, and a long error squeezed "Supported Parameters" into one letter per line | All three columns render one entry per line (`.mp-list`); the error gets its own wrapping line (`.mp-error`); a failed probe keeps a **persistent** red report in the round banner box (re-rendered on every load) until it clears |
+
 ## 9. Verification
 
 **Static checks and tests**
@@ -247,11 +267,11 @@ npm.cmd run typecheck        # tsc --noEmit, 0 errors (including the erasableSyn
 npm.cmd test                 # node --test --test-isolation=none --test-concurrency=1
 ```
 
-Current measured state: `typecheck` 0 errors; `npm test` **149/149 passing** (12 test files):
+Current measured state: `typecheck` 0 errors; `npm test` **162/162 passing** (12 test files):
 
 ```text
-ℹ tests 149
-ℹ pass 149
+ℹ tests 162
+ℹ pass 162
 ℹ fail 0
 ```
 
@@ -275,7 +295,10 @@ queries, subset alignment not trimming other models, an id repeated only probed 
 hit/expiry/in-flight sharing/failure-not-cached, the `/api/config` HTML trap and snapshot
 merging, the prefix confirmation rule (500 / SPA 200+HTML do not confirm; 401/403 do),
 `canJoinRound`'s six combinations, corrupt KV values degrading, setup 403 while
-`ADMIN_PASSWORD` is bound, and the three outcomes of the connectivity test.
+`ADMIN_PASSWORD` is bound, and the three outcomes of the connectivity test; the heartbeat
+wake axis (earlier of the two wins / off leaves the backoff untouched / never waking a
+backoff early / a corrupt tick degrading), the strict heartbeat write validation against
+the full shared step table, and the immediate heartbeat re-arm on a settings save.
 
 The contract test (`test/proxyContract.test.ts`, stub fetch + fake KV + fake DO) additionally
 pins `/v1/models`' field set and envelope, the upstream template never leaking into
@@ -316,7 +339,7 @@ item 3 was additionally re-checked in local workerd (`npm run mock` + `wrangler 
 budget=12) for the hop-by-hop drain.
 
 1. **The five hard assertions against the real upstream — all pass**:
-   - `Qwen3.8-27B` → `supported_efforts == [none, low, medium, xhigh]`, `default_effort == "xhigh"` ✓
+   - `Qwen3.8-27B` → `supported_efforts == [xhigh, medium, low, none]` (OpenRouter ordering), `default_effort == "xhigh"` ✓
    - `gpt-oss-120b` → `[low, medium, high]`, `mandatory == true` ✓
    - `DeepSeek-V4-Flash-0731` → `capabilities.vision == false` ✓
    - `gemma-4-31B-it` / `GLM-OCR` → `capabilities.function_calling == false` ✓

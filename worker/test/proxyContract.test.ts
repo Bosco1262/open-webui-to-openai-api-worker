@@ -524,6 +524,23 @@ test("an unknown model answers the OpenAI 404 instead of the upstream HTML page"
   });
 });
 
+test("a malformed percent-escape in the model id answers 400, not 500", async () => {
+  // The URIError used to bubble into handleV1Request's catch-all and surface as a
+  // bare 500 an OpenAI client cannot interpret.
+  //
+  // URIError 此前会冒泡进 handleV1Request 的兜底 catch，变成 OpenAI 客户端无法解读的
+  // 裸 500。
+  const h = await makeHarness({ settings: DEFAULT_SETTINGS, baseUrl: "https://bad-escape.test" });
+  const response = await handleV1Request(h.env, requestFor("/v1/models/%E0%A4%A"), ctx(h.waitUntil));
+  assert.equal(response.status, 400);
+  const body = (await response.json()) as { error: { code: string; param: string } };
+  assert.equal(body.error.code, "invalid_model_id");
+  assert.equal(body.error.param, "model");
+  // The upstream is never reached.
+  // 从未到达上游。
+  assert.equal(h.upstream.calls.length, 0);
+});
+
 // --------------------------------------------------------------------------- //
 // 400 self-heal
 // --------------------------------------------------------------------------- //
@@ -577,6 +594,35 @@ test("an unrelated 400 does not touch the probe cache", async () => {
   assert.equal(response.status, 400);
   await Promise.all(h.waitUntil);
   assert.deepEqual(h.coordinator.invalidated, []);
+});
+
+test("an effort error past the truncation point still triggers the self-heal", async () => {
+  // The client-facing error is truncated to 2000 chars, but the heal decision must
+  // see the FULL body: a verbose upstream that mentions the effort late in a long
+  // page of diagnostics used to escape the check.
+  //
+  // 给客户端的错误被截到 2000 字符，但自愈判定必须看到**完整**响应体：冗长的上游把
+  // 挡位字样放在长篇诊断的尾部时，旧实现会漏掉它。
+  const filler = "x".repeat(3000);
+  const h = await makeHarness({
+    settings: DEFAULT_SETTINGS,
+    chatBody: JSON.stringify({ detail: filler + " reasoning_effort='max' is not supported" }),
+  });
+  const response = await handleV1Request(
+    h.env,
+    requestFor("/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({
+        model: "Shared-1",
+        messages: [{ role: "user", content: "hi" }],
+        reasoning_effort: "max",
+      }),
+    }),
+    ctx(h.waitUntil),
+  );
+  assert.equal(response.status, 400);
+  await Promise.all(h.waitUntil);
+  assert.deepEqual(h.coordinator.invalidated, [["Shared-1", "max"]]);
 });
 
 // --------------------------------------------------------------------------- //
@@ -713,13 +759,22 @@ test("a transport failure is not remembered, so the next request probes again", 
     assert.equal(response.status, 502, `call ${call}`);
   }
   const modernCalls = h.upstream.calls.filter((call) => call.endsWith("/api/v1/models"));
-  console.error("DBG retry calls", h.upstream.calls);
   // One probe plus the real request per call: the prefix was probed again on call 2.
   // 每次调用一次探测加一次真实请求：第 2 次调用又探了一遍前缀。
   assert.equal(modernCalls.length, 4);
 });
 
-test("an unconfirmable-but-answering upstream IS remembered (no probe on the next call)", async () => {
+test("an unconfirmable-but-answering upstream is NOT remembered either (every call re-probes)", async () => {
+  // A transient 5xx (or a SPA answering 200 + HTML) can leave even the correct
+  // candidate unconfirmed for a few seconds; remembering the fallback then would pin
+  // the isolate to the wrong prefix until eviction -- a legacy deployment whose `/api`
+  // hiccuped once would never discover its real answer again. Only a CONFIRMED prefix
+  // is remembered, so the probe re-runs until some candidate confirms.
+  //
+  // 一次瞬时 5xx（或 SPA 的 200 + HTML）会让哪怕正确的候选在几秒内无法确认；此时记住
+  // 兜底值会把 isolate 锁死在错误前缀上直到被驱逐——旧版部署的 `/api` 打一个嗝，就永远
+  // 再也发现不了真正的答案。**只有被确认的前缀才会被记住**，因此探测会反复运行，直到
+  // 某个候选被确认。
   const h = await makeHarness({
     settings: DEFAULT_SETTINGS,
     baseUrl: "https://prefix-sticky.test",
@@ -734,13 +789,36 @@ test("an unconfirmable-but-answering upstream IS remembered (no probe on the nex
     assert.equal((await handleV1Request(h.env, requestFor("/v1/models"), ctx(h.waitUntil))).status, 502);
     const afterFirst = h.upstream.calls.length;
     assert.equal((await handleV1Request(h.env, requestFor("/v1/models"), ctx(h.waitUntil))).status, 502);
-    // The second call went straight to the remembered fallback.
-    // 第二次调用直接走了记下来的兜底前缀。
-    assert.equal(h.upstream.calls.length, afterFirst + 1);
+    // The second call probed BOTH candidates again (2 probes + 1 real request), instead
+    // of walking straight into a remembered fallback.
+    //
+    // 第二次调用把两个候选又各探了一遍（2 次探测 + 1 次真实请求），而不是直接走进被
+    // 记住的兜底前缀。
+    assert.equal(h.upstream.calls.length, afterFirst + 3);
   } finally {
     console.warn = originalWarn;
   }
-  assert.equal(warnings.filter((line) => line.includes("upstream prefix not confirmed")).length, 1);
+  // One warning per call: the misbehaving upstream is named every time nothing confirms.
+  // 每次调用一条警告：上游每次都无法确认时都被点名。
+  assert.equal(warnings.filter((line) => line.includes("upstream prefix not confirmed")).length, 2);
+});
+
+test("a /v1-prefixed path without a slash answers 404 without touching the upstream", async () => {
+  // `startsWith("/v1")` used to let `/v1models` into the proxy, where the passthrough
+  // built `.../api/v1models` -- a route that does not exist, often answered by the
+  // SPA's "200 + HTML" page. The entry route matches exactly now, and the proxy
+  // duplicates that check for callers that skip index.ts.
+  //
+  // `startsWith("/v1")` 此前会放行 `/v1models`，透传随后拼出 `.../api/v1models`
+  // ——一个不存在的路由，常被 SPA 以 "200 + 一页 HTML" 应答。入口路由现在做精确
+  // 匹配，代理层也为绕过 index.ts 的调用方复制了这一检查。
+  const h = await makeHarness({ settings: DEFAULT_SETTINGS, baseUrl: "https://slashless.test" });
+  const response = await handleV1Request(h.env, requestFor("/v1models"), ctx(h.waitUntil));
+  assert.equal(response.status, 404);
+  assert.equal(((await response.json()) as { error: { code: string } }).error.code, "not_found");
+  // Not one upstream request left the Worker.
+  // 没有任何上游请求离开 Worker。
+  assert.equal(h.upstream.calls.length, 0);
 });
 
 // --------------------------------------------------------------------------- //

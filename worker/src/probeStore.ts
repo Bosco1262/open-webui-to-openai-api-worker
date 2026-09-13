@@ -131,7 +131,19 @@ export class SqliteProbeStore implements ProbeStore {
   migrate(): void {
     this.sql.exec("CREATE TABLE IF NOT EXISTS models (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
     this.sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    const stored = Number(this.readMeta("version"));
+    // A MISSING version reads as unknown provenance (-1), NOT as the accidental
+    // Number(null) === 0: rows whose shape cannot be shown to match the current
+    // one are dropped -- the same rule `parseProbeCacheFile` applies to a file
+    // whose version it cannot verify. `Number.isFinite` below is then the real
+    // gate: rows present plus a version that is not a number, or any version
+    // other than CACHE_VERSION, mean "wipe and re-probe".
+    //
+    // **缺失的**版本按"来历不明"（-1）处理，而不是巧合地依赖 Number(null) === 0：
+    // 无法证明这些行的结构与当前匹配，因此清空——与 `parseProbeCacheFile` 对无法
+    // 验证版本的文件所用的规则相同。下面的 `Number.isFinite` 才是真正的闸门：
+    // 存在行且版本不是数字（或任何 !== CACHE_VERSION 的版本）意味着"清空重探"。
+    const rawVersion = this.readMeta("version");
+    const stored = rawVersion === null ? -1 : Number(rawVersion);
     if (stored !== CACHE_VERSION) {
       // Version 1 stored only effort lists and no fingerprint, so its entries
       // cannot be trusted to be complete; re-probe instead of migrating.

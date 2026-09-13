@@ -12,7 +12,10 @@
  * waiting for response headers and a serial round needs one. `refreshInterval` (this
  * project's old time-based TTL) is gone too: the upstream design re-probes on an
  * engine fingerprint change or when a previous attempt left the answer open, not on
- * a clock.
+ * a clock. `heartbeatInterval` is the ONE opt-in clock: a patrol interval in seconds
+ * drawn from the shared granularity table (0 = off) that only re-aligns the model
+ * list when the deployment is otherwise idle -- probing itself still follows the
+ * fingerprint/backoff rules, never the clock.
  *
  * 探测设置（KV 键名："settings:probe"）。
  *
@@ -24,10 +27,13 @@
  * `MODEL_PROBE_CONCURRENCY` 刻意不搬：轮次是串行的（一次一个模型），因为单次调用
  * 最多只能有六个连接处于"等待响应头"状态，而串行轮次只需要一个。旧的时间型 TTL
  * `refreshInterval` 也一并去掉：上游设计只在引擎指纹变化、或上次尝试没有定论时才
- * 重探，而不是按钟表。
+ * 重探，而不是按钟表。`heartbeatInterval` 是唯一的可选时钟：一个取自共享档位表的
+ * 巡检间隔（秒，0 = 关闭），只在部署空闲时重新对齐模型列表——是否探测仍按
+ * 指纹/退避规则，绝不按钟表。
  */
 
 import { cacheGet, cacheSet, readKvJson } from "./kv.ts";
+import { isIntervalOption } from "./intervals.ts";
 import type { Env, ProbeSettings } from "./types.ts";
 
 /** KV key holding the probe settings. */
@@ -45,14 +51,13 @@ const DEFAULT_PROBE_SETTINGS: ProbeSettings = {
   wait: 5,
   budget: 40,
   exposeInstanceMeta: true,
+  // Off by default: the upstream design probes on evidence (fingerprint change, open
+  // attempt), and a clock-driven patrol must be something the operator asks for.
+  //
+  // 默认关闭：上游设计按证据探测（指纹变化、未定论的尝试），按钟表巡检必须由运维
+  // 主动开启才算数。
+  heartbeatInterval: 0,
 };
-
-/** Budget presets offered by the admin console, with the documented ceilings. */
-/** 管理控制台提供的预算预设，附各自的平台上限。 */
-export const PROBE_BUDGET_PRESETS: ReadonlyArray<{ value: number; label: string }> = [
-  { value: 40, label: "free" },
-  { value: 2000, label: "paid" },
-];
 
 /** Hard bounds for the settings an operator may write. */
 /** 运维可写设置的硬边界。 */
@@ -67,6 +72,20 @@ const PROBE_SETTINGS_BOUNDS = {
 //
 // 逐字段校验并夹紧取值范围；任何非法值都回退默认，损坏或写一半的 KV 数据永远不会
 // 破坏代理路径。
+//
+// The heartbeat accepts every step of the shared granularity table (30 minutes to
+// daily, plus 0 = off) and is the exception in one direction: its fallback is OFF,
+// not the nearest step. A hand-mangled interval must not silently become a patrol
+// cadence nobody chose -- picking a step in the console again is the only way back on.
+//
+// 心跳接受共享档位表的全部档位（每三十分钟到每天，另有 0 = 关闭），且在一个方向上
+// 是例外：它的回退值是"关"而不是最近的档位。被改坏的间隔绝不能悄悄变成没人选过的
+// 巡检节奏——想重新开启只能由运维在控制台再选一次档位。
+function normalizeHeartbeatInterval(value: unknown): number {
+  const parsed = Number(value);
+  return isIntervalOption(parsed) ? parsed : 0;
+}
+
 function normalizeProbeSettings(raw: unknown): ProbeSettings {
   const out: ProbeSettings = { ...DEFAULT_PROBE_SETTINGS };
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
@@ -75,6 +94,7 @@ function normalizeProbeSettings(raw: unknown): ProbeSettings {
   if (typeof obj.exposeInstanceMeta === "boolean") {
     out.exposeInstanceMeta = obj.exposeInstanceMeta;
   }
+  out.heartbeatInterval = normalizeHeartbeatInterval(obj.heartbeatInterval);
   const clamp = (value: unknown, min: number, max: number, fallback: number): number => {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return fallback;
@@ -117,12 +137,21 @@ export function parseProbeSettingsInput(body: Record<string, unknown>): ProbeSet
     PROBE_SETTINGS_BOUNDS.budget.min,
     PROBE_SETTINGS_BOUNDS.budget.max,
   );
+  // The heartbeat step must be one of the shared granularity table's steps in seconds
+  // (0 = off). Unlike the knobs above there is no clamping here: a silently adjusted
+  // patrol cadence would misrepresent what the operator picked in the console.
+  //
+  // 心跳档位必须是共享档位表中的某一档（秒，0 = 关闭）。与上面的旋钮不同，这里不
+  // 夹紧：被悄悄调整的巡检节奏会歪曲运维在控制台实际选择的档位。
+  const heartbeatInterval = Number(body.heartbeat_interval);
+  if (!isIntervalOption(heartbeatInterval)) return null;
   if (timeout === null || wait === null || budget === null) return null;
   return {
     enabled: body.enabled,
     timeout,
     wait,
     budget,
+    heartbeatInterval,
     exposeInstanceMeta: body.expose_instance_meta,
   };
 }

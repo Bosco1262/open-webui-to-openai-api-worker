@@ -194,6 +194,60 @@ export function retryWakeDelayMs(
   return Math.min(Math.max((earliest - now) * 1000, minMs), maxMs);
 }
 
+// --------------------------------------------------------------------------- //
+// Heartbeat wake axis (the optional patrol)
+// 心跳唤醒轴（可选巡检）
+// --------------------------------------------------------------------------- //
+
+/**
+ * The earlier of the two wake axes -- the backoff deadline and the next heartbeat
+ * tick -- or null when NEITHER has anything pending. This is the whole scheduling
+ * rule for the single alarm: a heartbeat must never pull a backoff wake earlier than
+ * the backoff itself, and with the heartbeat off (null tick) the backoff axis keeps
+ * exactly its old shape.
+ *
+ * 两条唤醒轴——退避到期与下一次心跳刻度——中较早者；两者皆无待办时返回 null。这就是
+ * 唯一 alarm 的全部排程规则：心跳绝不能把退避唤醒提前到退避本身之前，而心跳关闭
+ * （刻度为 null）时，退避轴保持与从前完全一致的形态。
+ */
+export function nextWakeAtSeconds(retryAt: number | null, heartbeatAt: number | null): number | null {
+  if (retryAt === null) return heartbeatAt;
+  if (heartbeatAt === null) return retryAt;
+  return Math.min(retryAt, heartbeatAt);
+}
+
+/**
+ * Whether the stored heartbeat tick has arrived. A missing tick (heartbeat off, or no
+ * tick persisted yet) is never due: "due" must come from something an operator opted
+ * into, never from an absent value.
+ *
+ * 已存储的心跳刻度是否已到期。缺失的刻度（心跳关闭，或尚未落盘）永不到期："到期"
+ * 必须来自运维主动开启的东西，绝不能来自一个不存在的值。
+ */
+export function heartbeatDue(next: number | null, now: number): boolean {
+  return next !== null && next <= now;
+}
+
+/**
+ * Parse the persisted heartbeat tick (coordinator meta key `heartbeat_next`).
+ *
+ * Empty or unparseable means "no tick" -- the caller then anchors a fresh one a full
+ * interval out. A parseable number is kept as-is, INCLUDING one in the past: a tick
+ * that already passed is exactly "the heartbeat is due", and degrading it to "no
+ * tick" would postpone the patrol by another whole interval.
+ *
+ * 解析已落盘的心跳刻度（协调者 meta 键 `heartbeat_next`）。
+ *
+ * 空 或解析不了一律表示"没有刻度"——调用方随后向外锚定一个完整间隔后的新刻度。
+ * 能解析的数字原样保留，**包括过去的时间**：已经过去的刻度恰恰意味着"心跳到期"，
+ * 把它退化成"没有刻度"会让巡检再推迟整整一个间隔。
+ */
+export function heartbeatNextFromMeta(raw: string | null): number | null {
+  if (!raw || !raw.trim()) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 /**
  * The upstream prefixes to try, remembered one first.
  *
