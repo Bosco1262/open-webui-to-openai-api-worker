@@ -464,7 +464,13 @@ export async function runProbeRound(input: ProbeRoundInput): Promise<ProbeRoundS
     now: input.now,
     prune: input.prune !== false,
   });
-  const selected = input.only ? toProbe.filter((modelId) => input.only?.includes(modelId)) : toProbe;
+  // `only` as a Set: the filter runs once per candidate model, and a plain array
+  // `includes` would make selection O(n²) on large model lists.
+  //
+  // `only` 用 Set：过滤对每个候选模型各跑一次，普通数组的 `includes` 会让选择在
+  // 大模型列表上退化为 O(n²)。
+  const onlySet = input.only ? new Set(input.only) : null;
+  const selected = onlySet ? toProbe.filter((modelId) => onlySet.has(modelId)) : toProbe;
 
   // Persist the reconciliation immediately (vanished models lose their rows).
   // 立即落盘对齐结果（消失的模型要删行）。

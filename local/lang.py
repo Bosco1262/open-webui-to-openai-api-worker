@@ -50,8 +50,8 @@ _MESSAGES: Dict[str, Tuple[str, str]] = {
         "捕获后的静默观察期秒数（默认 6）",
     ),
     "cli_headless_help": (
-        "Launch the browser in headless mode",
-        "以无头模式启动浏览器",
+        "Launch the browser in headless mode (manual login needs a visible window; only useful when the page auto-logs-in via an existing SSO session)",
+        "以无头模式启动浏览器（手动登录需要可见窗口；仅当页面依赖已有 SSO 会话自动登录时才有用）",
     ),
     "cli_insecure_help": (
         "Skip upstream HTTPS cert verification (use with caution)",

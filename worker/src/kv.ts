@@ -184,7 +184,15 @@ export async function getApiKeyMeta(env: Env, key: string): Promise<ApiKeyMeta |
 }
 
 export async function putApiKey(env: Env, key: string, meta: ApiKeyMeta): Promise<void> {
-  await env.KV.put(apiKeyKVKey(key), JSON.stringify(meta));
+  // metadata mirrors the value: KV.list returns it inline, so listing keys no
+  // longer costs one GET per key (the name-uniqueness check and the console's
+  // key table both list). Entries written before this change carry no metadata —
+  // listApiKeys falls back to a GET for those.
+  //
+  // metadata 与值互为镜像：KV.list 会内联返回它，列 Key 不再需要每键一次 GET
+  // （重名检查与控制台的 Key 表都会触发列表）。本改动之前写入的条目没有
+  // metadata——listApiKeys 对它们回退 GET。
+  await env.KV.put(apiKeyKVKey(key), JSON.stringify(meta), { metadata: meta });
 }
 
 export async function deleteApiKey(env: Env, key: string): Promise<void> {
@@ -201,7 +209,13 @@ export async function listApiKeys(
   do {
     const page = await env.KV.list({ prefix: K_API_KEY_PREFIX, cursor });
     for (const item of page.keys) {
-      const meta = await readKvJson<ApiKeyMeta>(env.KV, item.name);
+      // Prefer the inline metadata (zero extra reads); entries written before
+      // metadata mirroring exist only as values and fall back to a GET.
+      //
+      // 优先用内联 metadata（零额外读取）；镜像上线前写入的旧条目只有值，
+      // 对它们回退 GET。
+      const meta =
+        (item.metadata as ApiKeyMeta | undefined) ?? (await readKvJson<ApiKeyMeta>(env.KV, item.name));
       if (meta) out.push({ key: item.name.slice(K_API_KEY_PREFIX.length), meta });
     }
     cursor = page.list_complete ? undefined : page.cursor;
@@ -229,15 +243,54 @@ export async function setPasswordHash(env: Env, ph: PasswordHash): Promise<void>
   await env.KV.put(K_PASSWORD_HASH, JSON.stringify(ph));
 }
 
-/** Auto-derived HMAC secret for admin cookies, cached per instance. */
-/** 自动派生的管理 Cookie HMAC 密钥，按实例缓存。 */
-let sessionSecretCache: string | null = null;
+/**
+ * Auto-derived HMAC secret for admin cookies, cached per instance WITH a TTL.
+ * A cache without an expiry would keep signing and verifying with an old value
+ * after the operator rotates SESSION_SECRET or re-creates the KV entry, until
+ * the isolate happens to be recycled.
+ *
+ * 自动派生的管理 Cookie HMAC 密钥，按实例缓存并**带 TTL**。无过期的缓存会在运维
+ * 更换 SESSION_SECRET 或重建 KV 条目后继续用旧值签发/校验，直到 isolate 恰好被回收。
+ */
+const SESSION_SECRET_CACHE_TTL_MS = 60_000;
+let sessionSecretCache: { value: string; expireAt: number } | null = null;
+
+function cachedSessionSecret(): string | null {
+  if (sessionSecretCache && Date.now() < sessionSecretCache.expireAt) {
+    return sessionSecretCache.value;
+  }
+  return null;
+}
+
+/**
+ * READ-ONLY lookup for token verification paths. Verification must never carry
+ * write side effects: generating and persisting a missing secret is the setup /
+ * login paths' job (see getOrCreateSessionSecret), not something minted
+ * mid-verification.
+ *
+ * 供令牌校验路径使用的**只读**查找。校验绝不能携带写副作用：生成并持久化缺失的
+ * secret 是设密 / 登录路径的职责（见 getOrCreateSessionSecret），不能在校验中途
+ * 凭空铸造。
+ */
+export async function getSessionSecretReadonly(env: Env): Promise<string | null> {
+  // An explicitly bound secret always wins.
+  // 显式绑定的 Secret 始终优先。
+  if (env.SESSION_SECRET) return env.SESSION_SECRET;
+  const cached = cachedSessionSecret();
+  if (cached) return cached;
+  const secret = await env.KV.get(K_SESSION_SECRET);
+  if (secret) {
+    sessionSecretCache = { value: secret, expireAt: Date.now() + SESSION_SECRET_CACHE_TTL_MS };
+  }
+  return secret;
+}
 
 export async function getOrCreateSessionSecret(env: Env): Promise<string> {
   // An explicitly bound secret always wins.
   // 显式绑定的 Secret 始终优先。
   if (env.SESSION_SECRET) return env.SESSION_SECRET;
-  if (sessionSecretCache) return sessionSecretCache;
+  const cached = cachedSessionSecret();
+  if (cached) return cached;
   let secret = await env.KV.get(K_SESSION_SECRET);
   if (!secret) {
     // Generate once and persist; reused by every isolate afterwards.
@@ -254,7 +307,7 @@ export async function getOrCreateSessionSecret(env: Env): Promise<string> {
     // 会莫名其妙地掉线。
     secret = (await env.KV.get(K_SESSION_SECRET)) || generated;
   }
-  sessionSecretCache = secret;
+  sessionSecretCache = { value: secret, expireAt: Date.now() + SESSION_SECRET_CACHE_TTL_MS };
   return secret;
 }
 
@@ -270,12 +323,29 @@ export async function getOrCreateSessionSecret(env: Env): Promise<string> {
 // 每条管理鉴权路径都直接读写（不做实例缓存）：修改密码时自增纪元必须立即使
 // 所有已签发的无状态令牌失效，因此不能容忍过期的缓存值。
 
-/** Current epoch embedded in admin session tokens (default 0). */
-/** 嵌入管理会话令牌的当前纪元（默认 0）。 */
+/**
+ * Current epoch embedded in admin session tokens (default 0).
+ *
+ * Threat model note: this is a plain KV number with NO monotonicity guarantee — a
+ * hand-edited or cross-copied KV namespace can move it backwards. The read is
+ * therefore FAIL-CLOSED (operator decision): a MISSING key means "never bumped"
+ * and reads as the legal 0, but a key that exists with a corrupt value reads as
+ * -1, which no issued token can match — every admin session is invalidated and
+ * must re-login, instead of a pre-first-bump `ver: 0` token passing again.
+ *
+ * 嵌入管理会话令牌的当前纪元（默认 0）。
+ *
+ * 威胁模型说明：这是一个普通的 KV 数字，**没有**单调性保障——手改或跨站复制的
+ * KV 命名空间可以让它倒退。因此读取采取 **fail-closed**（运维决策）：键**缺失**
+ * 表示"从未自增"，按合法的 0 读取；键存在但值损坏按 -1 处理——没有任何已签发
+ * 令牌能匹配它，所有管理会话失效、需重新登录，而不是让首次自增前的 `ver: 0`
+ * 令牌重新通过校验。
+ */
 export async function getSessionEpoch(env: Env): Promise<number> {
   const raw = await env.KV.get(K_SESSION_EPOCH);
-  const epoch = raw === null ? NaN : Number(raw);
-  return Number.isFinite(epoch) && epoch >= 0 ? Math.floor(epoch) : 0;
+  if (raw === null) return 0;
+  const epoch = Number(raw);
+  return Number.isFinite(epoch) && epoch >= 0 ? Math.floor(epoch) : -1;
 }
 
 /**
@@ -293,6 +363,16 @@ export async function getSessionEpoch(env: Env): Promise<number> {
  * ——少数改密前的令牌在其剩余 TTL 内仍有效——而原子计数器会在每条纪元读取路径上
  * 引入 Durable Object，对这个低频操作不值得。
  */
-export async function bumpSessionEpoch(env: Env): Promise<void> {
-  await env.KV.put(K_SESSION_EPOCH, String((await getSessionEpoch(env)) + 1));
+export async function bumpSessionEpoch(env: Env): Promise<number> {
+  const current = await getSessionEpoch(env);
+  // A corrupt current value (-1) has no knowable successor: restart from 1. Every
+  // live token was minted with ver -1 (paired with the corrupt read) or older, and
+  // the write below moves the epoch away from both — nothing survives that should.
+  //
+  // 当前值损坏（-1）时没有可推算的后继：从 1 重新起算。现存的令牌要么签发于损坏
+  // 期间（ver=-1，与损坏读取配对），要么更旧——下方写入会让纪元离开这两种取值，
+  // 该失效的都不会漏掉。
+  const next = current < 0 ? 1 : current + 1;
+  await env.KV.put(K_SESSION_EPOCH, String(next));
+  return next;
 }

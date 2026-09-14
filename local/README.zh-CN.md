@@ -50,7 +50,7 @@ python login.py --base-url https://your-open-webui.example.com
 | `--base-url` | 环境变量 `OPEN_WEBUI_BASE_URL` | Open WebUI 地址，需含 `http(s)://` 前缀 |
 | `--timeout` | `600` | 最长等待登录的秒数 |
 | `--quiet-period` | `6` | 捕获凭证后的静默观察期（秒） |
-| `--headless` | `false` | 以无头模式启动浏览器 |
+| `--headless` | `false` | 以无头模式启动浏览器；手动登录需要可见窗口——仅当页面依赖已有 SSO 会话自动登录时才可用 |
 | `--output` | `session.json` | 输出文件路径 |
 | `--insecure` | `false` | 跳过上游 HTTPS 证书校验（慎用） |
 | `--lang` | `auto` | 输出语言：`zh` / `en` / `auto`（auto = 跟随系统语言） |
@@ -75,6 +75,7 @@ python login.py --base-url https://chat.example.com --lang en
 
 - 凭证通过真实上游鉴权后才算登录成功，避免把"过期 Token 探测请求"或"校园网未认证跳转"误存为有效凭证。
 - `session.json` 已加入 `.gitignore`，请勿提交到版本库。
+- POSIX 系统上文件权限会收紧为 `0600`；**Windows** 上文件继承输出目录的 ACL——请避免把它保存到共享或公开可读的位置。
 - 当 Open WebUI 的 JWT 过期（通常数天，取决于服务端 `JWT_EXPIRES_IN`），重新运行本工具刷新即可。
 
 ## 开源许可

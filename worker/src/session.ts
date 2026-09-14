@@ -21,17 +21,37 @@
 
 import type { StoredSession } from "./types.ts";
 
-/** Request headers to carry the Open WebUI credentials upstream. */
-/** 携带 Open WebUI 凭证发往上游的请求头。 */
-export function sessionHeaders(session: StoredSession): Record<string, string> {
+/**
+ * Auth + identity headers shared by EVERY upstream call: the captured User-Agent
+ * (impersonating the logged-in browser) plus the credentials. NO Accept or
+ * Content-Type here — those are endpoint-specific, and pinning them on the
+ * catch-all passthrough broke every non-JSON upload/download (the JSON
+ * Content-Type overwrote the client's multipart; a `request.text()` round-trip
+ * additionally mangled binary bodies — see buildUpstreamHeaders in proxy.ts).
+ *
+ * 所有上游调用共享的鉴权 + 身份头：捕获的 User-Agent（模拟登录浏览器）与凭证。
+ * 这里**不含** Accept / Content-Type——它们是端点相关的；把它们钉在兜底透传上
+ * 曾破坏一切非 JSON 的上传/下载（JSON Content-Type 覆盖了客户端的 multipart，
+ * 经 request.text() 的往返还会破坏二进制 body——见 proxy.ts 的
+ * buildUpstreamHeaders）。
+ */
+export function sessionAuthHeaders(session: StoredSession): Record<string, string> {
   const headers: Record<string, string> = {
-    Accept: "application/json",
-    "Content-Type": "application/json",
     "User-Agent": session.user_agent || "open-webui-to-openai-api-worker",
   };
   if (session.authorization) headers.Authorization = session.authorization;
   if (session.cookie) headers.Cookie = session.cookie;
   return headers;
+}
+
+/** Auth headers plus JSON content negotiation, for the JSON-speaking endpoints. */
+/** 鉴权头 + JSON 内容协商，供以 JSON 通信的端点使用。 */
+export function sessionHeaders(session: StoredSession): Record<string, string> {
+  return {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    ...sessionAuthHeaders(session),
+  };
 }
 
 /**
@@ -114,10 +134,20 @@ export interface UpstreamFetchOptions {
  * Throws whatever `fetch` throws (including the abort error when the ceiling is
  * reached); callers already map that to their own error shape.
  *
+ * Note on the non-streaming path: `AbortSignal.timeout` bounds the WHOLE exchange —
+ * headers AND body reads. A response whose body is still arriving when the ceiling
+ * hits is cut off mid-read. The body ceiling is deliberately generous (300s), but
+ * this is a real cutoff, unlike the streaming path below which bounds only the
+ * wait for the response headers.
+ *
  * 带上限地向上游发起 `fetch`。
  *
  * `fetch` 抛什么就抛什么（包括到达上限时的中止错误）；各调用方已把它映射成自己的
  * 错误形状。
+ *
+ * 关于非流式路径的说明：`AbortSignal.timeout` 限定的是整个交换过程——响应头**与**
+ * 响应体的读取。到达上限时仍在传输的响应体会被拦腰切断。响应体上限刻意给得宽松
+ * （300 秒），但这是一次真实的切断，与下方只限定"等待响应头"的流式路径不同。
  */
 export async function fetchUpstream(
   url: string,

@@ -25,7 +25,7 @@
  */
 
 import type { Env, InstanceMeta, ModelProbeFields, ProbeSettings, StoredSession } from "./types.ts";
-import { fetchUpstream, sessionHeaders, sessionIsUsable } from "./session.ts";
+import { fetchUpstream, sessionAuthHeaders, sessionHeaders, sessionIsUsable } from "./session.ts";
 import { AUTH_FAILURE_CODES, PREFIX_CANDIDATES, confirmUpstreamPrefix } from "./upstream.ts";
 import type { ConfirmedPrefix } from "./upstream.ts";
 import { getSession } from "./kv.ts";
@@ -121,6 +121,27 @@ function authFailureResponse(status: number): Response {
   );
 }
 
+/**
+ * Map an upstream failure response to the OpenAI-style error the client receives:
+ * 4xx passes the upstream status through, 5xx is masked as 502 upstream_error.
+ * The echoed body copy is truncated to `maxLen`; the caller already read the full
+ * text. `source` labels the endpoint in the message ("/models " for the list
+ * endpoint, empty elsewhere) without duplicating the 4xx/5xx dispatch.
+ *
+ * 把上游失败响应映射成客户端收到的 OpenAI 风格错误：4xx 原样透传上游状态码，
+ * 5xx 统一掩蔽为 502 upstream_error。回显的响应体截断到 `maxLen`；全文已由调用方
+ * 读取。`source` 在消息中标注端点（列表端点为 "/models "，其余为空），同时消除
+ * 重复的 4xx/5xx 分派代码。
+ */
+function upstreamErrorResponse(resp: Response, text: string, source: string, maxLen: number): Response {
+  const status = resp.status;
+  const where = source ? `${source} ` : "";
+  return openaiError(`Upstream ${where}returned HTTP ${status}: ${text.slice(0, maxLen)}`, status < 500 ? status : 502, {
+    type: status < 500 ? "invalid_request_error" : "server_error",
+    code: "upstream_error",
+  });
+}
+
 // The handler's own configuration could not be read (a KV failure). That is not an
 // upstream problem, so it answers its own code instead of `upstream_error` -- which
 // would send the operator hunting for a fault on the Open WebUI side.
@@ -157,9 +178,17 @@ function filterResponseHeaders(src: Headers): Headers {
   return out;
 }
 
-/** Build the request headers for the upstream: client headers + session credentials. */
-/** 构造上游请求头：客户端请求头 + 会话凭证。 */
-function buildUpstreamHeaders(request: Request, session: StoredSession): Headers {
+/**
+ * Build the request headers for the upstream: client headers + session
+ * credentials. JSON-speaking endpoints pin the JSON content negotiation; the
+ * passthrough (`json: false`) keeps the client's own Content-Type/Accept so
+ * multipart uploads and non-JSON downloads survive the hop.
+ *
+ * 构造上游请求头：客户端请求头 + 会话凭证。JSON 端点钉住 JSON 内容协商；透传
+ * （`json: false`）保留客户端自己的 Content-Type/Accept，使 multipart 上传与
+ * 非 JSON 下载能完整越过这一跳。
+ */
+function buildUpstreamHeaders(request: Request, session: StoredSession, json: boolean): Headers {
   const headers = new Headers();
   for (const [key, value] of request.headers.entries()) {
     const lowerKey = key.toLowerCase();
@@ -170,7 +199,8 @@ function buildUpstreamHeaders(request: Request, session: StoredSession): Headers
   }
   // Session credentials override everything (the client can't set its own auth).
   // 会话凭证覆盖一切（客户端无法自带上游鉴权）。
-  for (const [key, value] of Object.entries(sessionHeaders(session))) {
+  const sessionHeadersOut = json ? sessionHeaders(session) : sessionAuthHeaders(session);
+  for (const [key, value] of Object.entries(sessionHeadersOut)) {
     headers.set(key, value);
   }
   return headers;
@@ -181,10 +211,18 @@ function buildUpstreamHeaders(request: Request, session: StoredSession): Headers
 // 前缀探测（按上游 base 缓存）
 // --------------------------------------------------------------------------- //
 
-// Probe result cache: base_url -> chosen prefix, per isolate.
-// 探测结果缓存：base_url -> 选定前缀，按 isolate 存放。
+// Probe result cache: base_url -> chosen prefix, per isolate. TTL-bounded: an
+// isolate can live long enough that a permanently-cached prefix would keep
+// hitting a route the upstream has since moved; re-probing once per TTL costs
+// 1-2 subrequests and self-heals.
+//
+// 探测结果缓存：base_url -> 选定前缀，按 isolate 存放。带 TTL：一个 isolate 可以
+// 活得足够久，永久缓存的前缀会在上游迁移路由后一直打错地方；每个 TTL 重探一次只
+// 花费 1-2 个子请求，并能自愈。
+const PREFIX_CACHE_TTL_MS = 10 * 60_000;
 let cachedPrefixKey = "";
 let cachedPrefix = PREFIX_CANDIDATES[0];
+let cachedPrefixAt = 0;
 
 // Detect the working upstream API prefix by probing /models. A prefix is only
 // accepted when the answer CONFIRMS it (a model list, or 401/403); a 404, a 5xx or the
@@ -197,9 +235,11 @@ let cachedPrefix = PREFIX_CANDIDATES[0];
 // 在这里本来就要读完（无论如何都要排空连接），正好用于这个判定，因此确认过程不多花请求。
 async function detectPrefix(request: Request, session: StoredSession): Promise<string> {
   const base = session.base_url;
-  if (cachedPrefixKey === base) return cachedPrefix;
+  if (cachedPrefixKey === base && Date.now() - cachedPrefixAt < PREFIX_CACHE_TTL_MS) {
+    return cachedPrefix;
+  }
 
-  const headers = buildUpstreamHeaders(request, session);
+  const headers = buildUpstreamHeaders(request, session, true);
   let confirmed: ConfirmedPrefix | null = null;
   try {
     confirmed = await confirmUpstreamPrefix(PREFIX_CANDIDATES, async (prefix) => {
@@ -221,21 +261,25 @@ async function detectPrefix(request: Request, session: StoredSession): Promise<s
   if (confirmed) {
     cachedPrefix = confirmed.prefix;
     cachedPrefixKey = base;
+    cachedPrefixAt = Date.now();
     return confirmed.prefix;
   }
-  // Nothing was confirmed. ONLY a confirmed prefix is remembered: a transient 5xx can
-  // leave even the correct candidate unconfirmed for a few seconds, and remembering the
+  // Nothing was confirmed: drop any stale cached value so the next request
+  // re-probes from scratch. ONLY a confirmed prefix is remembered: a transient 5xx
+  // can leave even the correct candidate unconfirmed for a few seconds, and remembering the
   // fallback then would pin this isolate to the wrong prefix until it is evicted -- a
   // legacy deployment's real answer would never be discovered again. Re-probing on the
   // next request costs 1-2 subrequests ONLY while the upstream misbehaves, and the
   // fallback below lets the actual request report the real error (the warn is its only
   // trace; it is still not a success and must not be reported as one).
   //
-  // 没有任何候选被确认。**只有被确认的前缀才会被记住**：一次瞬时 5xx 会让哪怕正确的
+  // 没有任何候选被确认：清掉可能残留的旧缓存值，让下一次请求从头重新探测。
+  // **只有被确认的前缀才会被记住**：一次瞬时 5xx 会让哪怕正确的
   // 候选在这几秒内都无法确认，此时记住兜底值就会把本 isolate 锁死在错误前缀上直到被
   // 驱逐——旧版部署真正的答案永远不会再被发现。在上游表现异常期间，下次请求重新探测
   // 只多花 1-2 个子请求，而下面的兜底让真正的那次请求报告真实错误（warn 是它唯一的
   // 痕迹；它依然不是成功，也不得当成成功上报）。
+  cachedPrefixKey = "";
   console.warn(
     JSON.stringify({
       message: "upstream prefix not confirmed",
@@ -270,7 +314,7 @@ async function fetchUpstreamModels(
 ): Promise<{ cards: unknown[] } | { error: Response }> {
   const prefix = await detectPrefix(request, session);
   const base = session.base_url;
-  const headers = buildUpstreamHeaders(request, session);
+  const headers = buildUpstreamHeaders(request, session, true);
 
   let resp: Response;
   try {
@@ -289,13 +333,8 @@ async function fetchUpstreamModels(
     return { error: authFailureResponse(resp.status) };
   }
   if (resp.status !== 200) {
-    const text = (await resp.text()).slice(0, 500);
-    return {
-      error: openaiError(`Upstream /models returned HTTP ${resp.status}: ${text}`, 502, {
-        type: "server_error",
-        code: "upstream_error",
-      }),
-    };
+    const text = await resp.text();
+    return { error: upstreamErrorResponse(resp, text, "/models", 500) };
   }
 
   const text = await resp.text();
@@ -325,7 +364,12 @@ async function handleModels(
   if ("error" in fetched) return fetched.error;
   const rawModels = fetched.cards;
 
-  const { models, refs } = await normalizeCatalog(rawModels);
+  // Computed once: the shared capability template feeds both the normalization
+  // below and the coordinator call (it used to be derived twice per request).
+  //
+  // 只算一次：共享能力模板同时供下方的规范化与协调者调用使用（此前每请求重复推导两次）。
+  const shared = sharedDefaultCapabilities(rawModels);
+  const { models, refs } = await normalizeCatalog(rawModels, shared);
 
   // Probe-derived fields and the instance envelope are best-effort: neither may ever
   // fail the model list. BOTH now arrive in ONE coordinator call -- the instance
@@ -358,7 +402,7 @@ async function handleModels(
         wantsFields ? settings.wait : 0,
         {
           wantInstanceMeta: wantsEnvelope,
-          defaultModelCapabilities: sharedDefaultCapabilities(rawModels),
+          defaultModelCapabilities: shared,
         },
       );
       if (wantsFields) {
@@ -401,17 +445,25 @@ async function handleModels(
  */
 async function normalizeCatalog(
   rawModels: unknown[],
+  shared: Record<string, boolean> | null = sharedDefaultCapabilities(rawModels),
 ): Promise<{ models: Array<Record<string, unknown>>; refs: Array<[string, string]> }> {
-  const shared = sharedDefaultCapabilities(rawModels);
   const models: Array<Record<string, unknown>> = [];
-  const refs: Array<[string, string]> = [];
+  // Fingerprints are independent: hash them concurrently instead of serially
+  // awaiting one SHA-256 per model. Promise.all preserves input order.
+  //
+  // 各指纹相互独立：并发哈希，而不是逐模型串行等待一次 SHA-256。Promise.all 保持
+  // 输入顺序。
+  const fingerprintWork: Array<Promise<[string, string]>> = [];
   for (const raw of rawModels) {
     const model = normalizeModel(raw, shared);
     if (!model) continue;
     models.push(model);
     const modelId = typeof model.id === "string" ? model.id : String(modelIdOf(raw) ?? "");
-    refs.push([modelId, await modelFingerprint(raw, modelId)]);
+    fingerprintWork.push(
+      modelFingerprint(raw, modelId).then((fingerprint) => [modelId, fingerprint] as [string, string]),
+    );
   }
+  const refs = await Promise.all(fingerprintWork);
   return { models, refs };
 }
 
@@ -560,10 +612,15 @@ async function handleChat(
     return openaiError("messages must be a non-empty array.", 400, { code: "missing_required_field", param: "messages" });
   }
 
-  const isStream = Boolean(payload.stream);
+  // Strictly `true`: string "false" / "0" must not flip the request into the
+  // streaming path (OpenAI clients send a boolean; hand-rolled clients may not).
+  //
+  // 严格等于 true：字符串 "false" / "0" 不能把请求翻进流式分支（OpenAI 客户端发送
+  // 布尔值；手写客户端未必）。
+  const isStream = payload.stream === true;
   const prefix = await detectPrefix(request, session);
   const base = session.base_url;
-  const headers = buildUpstreamHeaders(request, session);
+  const headers = buildUpstreamHeaders(request, session, true);
 
   let resp: Response;
   try {
@@ -607,14 +664,7 @@ async function handleChat(
     }
     // 4xx maps back to the client, 5xx is masked as 502 upstream_error.
     // 4xx 原样映射回客户端，5xx 统一掩蔽为 502 upstream_error。
-    return openaiError(
-      `Upstream returned HTTP ${resp.status}: ${text.slice(0, 2000)}`,
-      resp.status < 500 ? resp.status : 502,
-      {
-        type: resp.status < 500 ? "invalid_request_error" : "server_error",
-        code: "upstream_error",
-      },
-    );
+    return upstreamErrorResponse(resp, text, "", 2000);
   }
 
   if (!isStream) {
@@ -673,7 +723,7 @@ async function handleEmbeddings(request: Request, session: StoredSession): Promi
 
   const prefix = await detectPrefix(request, session);
   const base = session.base_url;
-  const headers = buildUpstreamHeaders(request, session);
+  const headers = buildUpstreamHeaders(request, session, true);
 
   let resp: Response;
   try {
@@ -694,15 +744,8 @@ async function handleEmbeddings(request: Request, session: StoredSession): Promi
     return authFailureResponse(resp.status);
   }
   if (resp.status >= 400) {
-    const text = (await resp.text()).slice(0, 2000);
-    return openaiError(
-      `Upstream returned HTTP ${resp.status}: ${text}`,
-      resp.status < 500 ? resp.status : 502,
-      {
-        type: resp.status < 500 ? "invalid_request_error" : "server_error",
-        code: "upstream_error",
-      },
-    );
+    const text = await resp.text();
+    return upstreamErrorResponse(resp, text, "", 2000);
   }
   return new Response(resp.body, { status: resp.status, headers: filterResponseHeaders(resp.headers) });
 }
@@ -719,8 +762,13 @@ async function handlePassthrough(request: Request, session: StoredSession): Prom
   const prefix = await detectPrefix(request, session);
   const base = session.base_url;
   const target = `${base}${prefix}${subpath}${url.search}`;
-  const headers = buildUpstreamHeaders(request, session);
-  const body = await request.text();
+  // The passthrough is generic: keep the client's own Content-Type/Accept (a JSON
+  // pin used to break multipart uploads) and stream the body through untouched —
+  // a `request.text()` round-trip used to mangle binary uploads (N1).
+  //
+  // 透传是通用的：保留客户端自己的 Content-Type/Accept（钉死 JSON 曾破坏 multipart
+  // 上传），并把 body 原样流式转发——经 request.text() 的往返曾破坏二进制上传（N1）。
+  const headers = buildUpstreamHeaders(request, session, false);
 
   let resp: Response;
   try {
@@ -731,7 +779,7 @@ async function handlePassthrough(request: Request, session: StoredSession): Prom
     resp = await fetchUpstream(target, {
       method: request.method,
       headers,
-      body: body || undefined,
+      body: request.body ?? undefined,
     }, { stream: true });
   } catch (err) {
     return openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {

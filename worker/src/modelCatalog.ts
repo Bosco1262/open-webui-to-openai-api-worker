@@ -27,8 +27,12 @@
 import { isPlainObject } from "./json.ts";
 
 /** Quantization tokens recognizable in model ids: NVFP4, FP8, FP16, INT8, GPTQ, AWQ, ...
- *  Kept in sync with the pre-probe behaviour of this project. */
-/** 模型名中可识别的量化标识：NVFP4、FP8、FP16、INT8、GPTQ、AWQ 等，与探测功能加入前的行为保持一致。 */
+ *  Kept in sync with the pre-probe behaviour of this project.
+ *  Known limitation: `Q[0-9]` also matches version-like fragments (e.g. "q3-omni"
+ *  yields quantization "Q3"). Decorative served field only — accepted noise. */
+/** 模型名中可识别的量化标识：NVFP4、FP8、FP16、INT8、GPTQ、AWQ 等，与探测功能加入前的行为保持一致。
+ *  已知限制：`Q[0-9]` 也会命中形如版本的片段（如 "q3-omni" 会得到 quantization "Q3"）。
+ *  仅是对外装饰字段——接受该噪音。 */
 const QUANT_PATTERN =
   /\b(NVFP4|FP4|FP8|FP16|INT8|INT4|GPTQ(?:-?[0-9]+BIT)?|AWQ|GGUF|Q[0-9](?:_[A-Z0-9]+)*)\b/i;
 

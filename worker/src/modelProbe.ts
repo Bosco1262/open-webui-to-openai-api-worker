@@ -166,8 +166,15 @@ const LOC_RE = /'loc'\s*:\s*\(([^)]*)\)/;
 const LOC_TOKEN_RE = /'([^']+)'|"([^"]+)"/g;
 
 /** Keyword -> parameter name, for engines that do not return a pydantic loc
- *  (e.g. vLLM's tool-call-parser complaint). */
-/** 关键词 -> 参数名，用于不返回 pydantic loc 的引擎（例如 vLLM 关于 tool-call-parser 的报错）。 */
+ *  (e.g. vLLM's tool-call-parser complaint). Compiled once into word-bounded
+ *  regexes below: a bare substring match let ordinary English words inside an
+ *  unrelated 400 body ("...cannot stop...") blame the `stop` parameter and
+ *  cascade real parameters out of supported_parameters.
+ *
+ *  关键词 -> 参数名，用于不返回 pydantic loc 的引擎（例如 vLLM 关于
+ *  tool-call-parser 的报错）。下方一次性编译成带词边界的正则：裸子串匹配会让
+ *  无关 400 响应体里的普通英文单词（"…cannot stop…"）归因到 stop 参数，并把
+ *  实际支持的参数级联剔除出 supported_parameters。 */
 const PARAMETER_KEYWORDS: ReadonlyArray<readonly [string, string]> = [
   ["tool_choice", "tool_choice"],
   ["tool choice", "tool_choice"],
@@ -187,6 +194,12 @@ const PARAMETER_KEYWORDS: ReadonlyArray<readonly [string, string]> = [
   ["parallel_tool_calls", "parallel_tool_calls"],
   ["reasoning", "reasoning_effort"],
 ];
+
+/** Word-bounded keyword matchers, in the same priority order as the table above. */
+/** 带词边界的关键词匹配器，与上表保持相同的优先级顺序。 */
+const PARAMETER_KEYWORD_RES: ReadonlyArray<readonly [RegExp, string]> = PARAMETER_KEYWORDS.map(
+  ([keyword, parameter]) => [new RegExp(`\\b${keyword}\\b`, "i"), parameter],
+);
 
 /** Whether a raw token is plausible as an effort level. */
 /** 判断一个原始 token 是否可能是挡位值。 */
@@ -276,7 +289,13 @@ export function extractEffortCandidates(errorText: string): string[] {
  * 旧实现靠猜（"medium" 或可接受列表的中位数）；引擎没说时，诚实的答案是 null。
  */
 export function extractDefaultEffort(errorText: string): string | null {
-  if (!errorText) return null;
+  // Same topical guard as extractEffortCandidates: the "default" markers below are
+  // generic phrasing, so without the guard an unrelated enum error could be mined
+  // for a default effort if a future call site reuses this parser.
+  //
+  // 与 extractEffortCandidates 相同的切题防线：下面的 "default" 标记是通用措辞，
+  // 若未来调用方复用本解析器，没有这道防线就会从无关枚举的报错里挖出默认挡位。
+  if (!errorText || !EFFORT_TOPIC_RE.test(errorText)) return null;
   for (const pattern of [DEFAULT_MARKER_RE, DEFAULT_PHRASE_RE]) {
     const match = pattern.exec(errorText);
     if (match) {
@@ -324,9 +343,8 @@ export function parameterOfError(errorText: string): string | null {
     }
   }
 
-  const lowered = errorText.toLowerCase();
-  for (const [keyword, parameter] of PARAMETER_KEYWORDS) {
-    if (lowered.includes(keyword)) return parameter;
+  for (const [keywordRe, parameter] of PARAMETER_KEYWORD_RES) {
+    if (keywordRe.test(errorText)) return parameter;
   }
   return null;
 }

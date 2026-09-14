@@ -30,7 +30,7 @@ import {
 } from "./probeSettings.ts";
 import { RoundUnavailable } from "./probeRuntime.ts";
 import type { ModelProbeCoordinator, ProbeCoordinatorView } from "./probeCoordinator.ts";
-import { getTouchInterval, setTouchInterval } from "./touch.ts";
+import { clearTouchMarker, getTouchInterval, setTouchInterval } from "./touch.ts";
 import { INTERVAL_OPTIONS } from "./intervals.ts";
 import {
   bytesToBase64Url,
@@ -186,7 +186,7 @@ async function handleLogin(env: Env, request: Request): Promise<Response> {
           status: 429,
           headers: {
             "content-type": "application/json",
-            "retry-after": String(lock.retryAfterSec ?? 900),
+            "retry-after": String(lock.retryAfterSec),
           },
         },
       );
@@ -369,6 +369,15 @@ async function handleImportSession(env: Env, request: Request): Promise<Response
   const test = shouldTest ? await testUpstreamSession(session) : null;
 
   if (shouldSave) {
+    // A failed connectivity test means the credentials may be dead: refuse to
+    // overwrite the stored session (which may still be working) unless the
+    // operator explicitly forces the import.
+    //
+    // 连通性测试失败说明凭证可能已死：拒绝覆盖已存储（可能仍可用）的 session，
+    // 除非运维显式强制导入。
+    if (test && !test.ok && body.force !== true) {
+      return json({ ok: false, error: "err.session_test_failed", needForce: true, test }, 409);
+    }
     await setSession(env, session);
   }
 
@@ -463,6 +472,9 @@ async function handleDeleteKey(env: Env, request: Request): Promise<Response> {
   const key = typeof body.key === "string" ? body.key : "";
   if (!key) return fail("err.key_missing");
   await deleteApiKey(env, key);
+  // Drop the in-instance touch marker: the key no longer exists.
+  // 清除实例内的写入标记：这个 Key 已不存在。
+  clearTouchMarker(key);
   return json({ ok: true });
 }
 
@@ -482,15 +494,22 @@ async function handleRotateKey(env: Env, request: Request): Promise<Response> {
   if (!existing) return fail("err.key_missing");
   const newKey = generateApiKey();
   const meta: ApiKeyMeta = {
-    // Name is kept verbatim: uniqueness is unchanged, no duplicate check needed.
-    // 名称原样保留：唯一性不变，无需重名检查。
+    // Name AND last_used are kept verbatim (operator decision): the rotation
+    // re-issues the credential for the same client, so "has this client been
+    // used and when" survives the swap; only the secret itself is replaced.
+    //
+    // 名称与 last_used 原样保留（运维决策）：轮转是为同一客户端换发凭证，因此
+    // "这个客户端是否被用过、何时" 在换发后延续；被替换的只是密钥本身。
     name: existing.name,
     prefix: newKey.slice(0, 8),
-    created_at: Math.floor(Date.now() / 1000),
-    last_used: 0,
+    created_at: existing.created_at,
+    last_used: existing.last_used,
   };
   await putApiKey(env, newKey, meta);
   await deleteApiKey(env, key);
+  // Drop the in-instance touch marker of the OLD key: it no longer exists.
+  // 清除**旧** Key 的实例内写入标记：它已不存在。
+  clearTouchMarker(key);
   return json({
     ok: true,
     key: newKey,
@@ -577,16 +596,16 @@ async function handleProbeRefresh(env: Env, request: Request): Promise<Response>
   if (!coordinator) return fail("err.probe_session_missing", 502);
   try {
     const requested = typeof body.model === "string" && body.model ? body.model : null;
-    const stats = requested ? await coordinator.probeOne(requested) : await coordinator.refresh(true);
-    // `authExpired` is echoed at the top level for the console: the banner switches to
-    // the "credentials expired, re-import the session" wording on it. Without this the
-    // round stops on the first 401/403 yet the console still announced a green
-    // "probe finished" summary.
+    // Ack-and-poll: the round runs on the coordinator's alarm (a full round can
+    // outlive an HTTP invocation), so this answers as soon as the up-front checks
+    // (session, model list, model existence) pass. Round results surface in the
+    // probe table, which the console refreshes on timers.
     //
-    // `authExpired` 在最外层回传给控制台：横幅据此切换为"凭证已过期，请重新导入
-    // session"的措辞。没有它的话，整轮明明在首个 401/403 上中止，控制台却仍会宣布
-    // 一条绿色的"探测完成"。
-    return json({ ok: true, model: requested, stats, authExpired: stats.authExpired === true });
+    // 应答后轮询：轮次由协调者的 alarm 执行（完整轮次可能超出一次 HTTP 调用的生存
+    // 期），因此前置检查（session、模型列表、模型存在性）一通过就应答。轮次结果
+    // 由探测表呈现，控制台按定时器刷新。
+    await coordinator.refreshInBackground(requested);
+    return json({ ok: true, accepted: true, model: requested });
   } catch (err) {
     const roundCode = roundUnavailableCode(err);
     if (roundCode) {
@@ -634,8 +653,20 @@ async function handleProbeRefresh(env: Env, request: Request): Promise<Response>
  */
 function roundUnavailableCode(err: unknown): "session_missing" | "models_failed" | null {
   if (err instanceof RoundUnavailable) return err.code;
-  if (err instanceof Error && err.name === "RoundUnavailable") {
-    return err.message.includes("session_missing") ? "session_missing" : "models_failed";
+  if (err instanceof Error) {
+    // Across the RPC boundary only `name` and `message` survive. The coordinator
+    // embeds the code in the name ("RoundUnavailable:<code>", see RoundUnavailable);
+    // the bare name plus message match stays as a fallback for older deployed
+    // instances still serving the previous format.
+    //
+    // 跨 RPC 边界只保留 name 与 message。协调者把 code 嵌进 name
+    // （"RoundUnavailable:<code>"，见 RoundUnavailable）；裸 name + message 的匹配
+    // 作为仍在运行旧格式的已部署实例的兜底。
+    const named = /^RoundUnavailable:(.+)$/.exec(err.name);
+    if (named) return named[1] === "session_missing" ? "session_missing" : "models_failed";
+    if (err.name === "RoundUnavailable") {
+      return err.message.includes("session_missing") ? "session_missing" : "models_failed";
+    }
   }
   return null;
 }
@@ -654,6 +685,27 @@ function probeCoordinatorFor(env: Env, session: StoredSession | null): DurableOb
 // 路由
 // --------------------------------------------------------------------------- //
 
+// Routes that exist behind the auth gate. Checked BEFORE authentication so an
+// unknown path answers 404 ("no such route") instead of 401 ("not logged in") —
+// keep this list in sync with the switch below.
+//
+// 鉴权门后实际存在的路由。在鉴权**之前**检查：未知路径应答 404（"无此路由"），
+// 而不是被误报成 401（"未登录"）——本列表需与下方 switch 保持同步。
+const AUTHED_ROUTES: readonly string[] = [
+  "POST /admin/api/session",
+  "DELETE /admin/api/session",
+  "POST /admin/api/session/check",
+  "GET /admin/api/keys",
+  "POST /admin/api/keys",
+  "DELETE /admin/api/keys",
+  "POST /admin/api/keys/rotate",
+  "POST /admin/api/password",
+  "POST /admin/api/settings",
+  "GET /admin/api/probe",
+  "POST /admin/api/probe/settings",
+  "POST /admin/api/probe/refresh",
+];
+
 // Dispatch /admin/api/* requests: public routes first, then auth-protected ones.
 // 分发 /admin/api/* 请求：先处理公开路由，再处理需鉴权的路由。
 export async function handleAdminApiRequest(
@@ -670,6 +722,15 @@ export async function handleAdminApiRequest(
   if (method === "POST" && path === "/admin/api/login") return handleLogin(env, request);
   if (method === "POST" && path === "/admin/api/setup") return handleSetup(env, request);
   if (method === "POST" && path === "/admin/api/logout") return handleLogout(env, request);
+
+  // Unknown endpoints: 404 before the auth gate (see AUTHED_ROUTES above). The
+  // switch's default below stays as a belt for anyone editing the list out of sync.
+  //
+  // 未知端点：在鉴权门之前即答 404（见上方 AUTHED_ROUTES）。下方 switch 的 default
+  // 保留作为兜底，防止两处列表不同步时漏网。
+  if (!AUTHED_ROUTES.includes(`${method} ${path}`)) {
+    return json({ ok: false, error: "err.unknown_endpoint" }, 404);
+  }
 
   // Everything else requires admin auth, and is blocked outright while no
   // admin password exists yet (mirrors M365: the console must be set up first).

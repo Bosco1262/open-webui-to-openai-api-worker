@@ -71,6 +71,8 @@ Two deployment methods are supported:
 - **Method 1 (recommended): one-click deploy via Cloudflare Dashboard Git integration** — fork the repository and connect it in the Dashboard. The KV Namespace is **created automatically** on first deploy; no manual preparation is needed.
 - **Method 2: CLI deployment with `wrangler`** — requires Node.js installed locally.
 
+> **Bind an access entry before first use.** `worker/wrangler.jsonc` ships with `workers_dev: false` and no routes, so a fresh deployment has **no public URL at all**. After deploying, open the Cloudflare Dashboard → your Worker → **Settings → Domains & Routes** and either enable the `workers.dev` subdomain or bind a custom domain / route. Only then is `/admin` reachable for the first-time password setup.
+
 > Automatic Resource Provisioning is enabled in `worker/wrangler.jsonc`: the KV binding declares only a `binding` without an `id`. On deploy, the KV Namespace is created automatically (prefixed with the Worker name) and bound, making a fresh fork truly one-click. To reuse an existing KV, fill in the `id` manually. The Durable Object needs no preparation either: the `migrations` entry creates `ModelProbeCoordinator` on first deploy.
 
 ### Method 1: Cloudflare Dashboard Git integration (Workers Builds)
@@ -239,6 +241,8 @@ This Worker implements the OpenAI-compatible endpoints listed below (plus a gene
 | GET             | `/v1/models/{id}`                       | API key      | One model (probe fields included; unknown id answers 404 `model_not_found`) |
 
 Client authentication accepts both `Authorization: Bearer <key>` and `X-API-Key: <key>`.
+
+> **Server-side clients only.** The `/v1` proxy serves no CORS headers and answers no `OPTIONS` preflight, so browser-based pages cannot call it directly — point OpenAI-compatible server-side clients (SDKs, CLIs, gateways) at it.
 
 ## Configuration
 

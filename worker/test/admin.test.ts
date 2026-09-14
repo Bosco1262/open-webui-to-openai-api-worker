@@ -90,24 +90,20 @@ function makeEnv(
   } as unknown as Env;
 }
 
-/** A coordinator stub whose probe RPC throws the given error. */
+/** A coordinator stub whose background-round RPC throws the given error. */
 function failingProbe(error: unknown): DurableObjectNamespace {
   const stub = {
-    refresh: async (): Promise<never> => {
-      throw error;
-    },
-    probeOne: async (): Promise<never> => {
+    refreshInBackground: async (): Promise<never> => {
       throw error;
     },
   };
   return { getByName: () => stub } as unknown as DurableObjectNamespace;
 }
 
-/** A coordinator stub whose probe round answers with the given stats. */
-function reportingProbe(stats: Record<string, unknown>): DurableObjectNamespace {
+/** A coordinator stub that accepts a background round. */
+function acceptingProbe(): DurableObjectNamespace {
   const stub = {
-    refresh: async (): Promise<Record<string, unknown>> => stats,
-    probeOne: async (): Promise<Record<string, unknown>> => stats,
+    refreshInBackground: async (): Promise<void> => {},
   };
   return { getByName: () => stub } as unknown as DurableObjectNamespace;
 }
@@ -373,32 +369,22 @@ test("a per-model refresh naming an absent model answers its own localized 404",
   assert.equal(((await response.json()) as { error: string }).error, "err.probe_model_missing");
 });
 
-test("a round aborted by 401/403 reports authExpired to the console", async () => {
+test("a probe request is acknowledged for background execution", async () => {
   const env = makeEnv({
     adminPassword: "preset",
     storedSession: STORED_SESSION,
-    probe: reportingProbe({
-      ok: 2,
-      partial: 0,
-      unprobeable: 0,
-      failed: 0,
-      authExpired: true,
-      total: 7,
-      cached: 7,
-      budgetUsed: 21,
-      truncated: true,
-    }),
+    probe: acceptingProbe(),
   });
   const response = await post(env, "/admin/api/probe/refresh", {}, true);
   assert.equal(response.status, 200);
-  const payload = (await response.json()) as { authExpired: boolean; stats: { authExpired: boolean } };
-  // Without the top-level echo the console announced a green "probe finished" while
-  // the round had actually stopped on the first dead-credential answer.
+  const payload = (await response.json()) as { accepted: boolean };
+  // The round runs on the coordinator's alarm (it can outlive an HTTP invocation);
+  // the console gets an immediate ack and watches the table and the failure banner
+  // instead of carrying round stats in this response.
   //
-  // 缺少最外层的回传时，控制台会在整轮其实已因凭证失效而中止的情况下，宣布一条绿色的
-  // "探测完成"。
-  assert.equal(payload.authExpired, true);
-  assert.equal(payload.stats.authExpired, true);
+  // 轮次由协调者的 alarm 执行（它可能超出一次 HTTP 调用的生存期）；控制台立即得到
+  // 应答，改为观察表格与失败横幅，而不是由本响应携带轮次统计。
+  assert.equal(payload.accepted, true);
 });
 
 // --------------------------------------------------------------------------- //

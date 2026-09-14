@@ -51,7 +51,7 @@ After running:
 | `--base-url`     | env var `OPEN_WEBUI_BASE_URL`  | Open WebUI URL; must include the `http(s)://` prefix              |
 | `--timeout`      | `600`                          | Max seconds to wait for login                                     |
 | `--quiet-period` | `6`                            | Quiet observation period after capture (seconds)                  |
-| `--headless`     | `false`                        | Launch the browser in headless mode                               |
+| `--headless`     | `false`                        | Headless mode; manual login needs a visible window — only works when the page auto-logs-in via an existing SSO session |
 | `--output`       | `session.json`                 | Output file path                                                  |
 | `--insecure`     | `false`                        | Skip upstream HTTPS certificate verification (use with caution)   |
 | `--lang`         | `auto`                         | Output language: `zh` / `en` / `auto` (auto = system language)    |
@@ -76,6 +76,7 @@ The `--help` output follows `--lang` as well, e.g. `python login.py --lang en --
 
 - Credentials are only considered valid after passing a real upstream authentication check, avoiding saving "expired-token probing requests" or "unauthenticated campus portal redirects" as valid credentials.
 - `session.json` is in `.gitignore`; do not commit it to version control.
+- File permissions are tightened to `0600` on POSIX; on **Windows** the file inherits the output directory's ACL — avoid saving it to a shared or publicly readable location.
 - When the Open WebUI JWT expires (typically a few days, depending on the server's `JWT_EXPIRES_IN`), simply rerun this tool to refresh it.
 
 ## License

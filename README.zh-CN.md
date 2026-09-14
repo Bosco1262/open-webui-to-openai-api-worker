@@ -71,6 +71,8 @@ OpenAI 客户端 ──▶ Bearer sk-xxx ──▶  /v1/*        │
 - **方式一（推荐）：Cloudflare 网页连接 GitHub 一键部署** —— fork 仓库后在 Dashboard 连接即可，KV Namespace 会在首次部署时**自动创建**，无需任何手动准备。
 - **方式二：命令行 `wrangler` 部署** —— 需要本机安装 Node.js。
 
+> **首次使用前请先绑定访问入口。** `worker/wrangler.jsonc` 中 `workers_dev` 为 `false` 且未声明任何 routes，因此**全新部署没有任何公网入口**。部署完成后，请在 Cloudflare Dashboard → 对应 Worker → **Settings → Domains & Routes** 中启用 `workers.dev` 子域或绑定自定义域名 / 路由；之后 `/admin` 才可达，才能进行首次管理密码设置。
+
 > 本项目已在 `worker/wrangler.jsonc` 中启用 Wrangler 的**自动资源供应（Automatic Resource Provisioning）**：KV 绑定只声明 `binding` 不写 `id`，部署时自动创建 KV Namespace（以 Worker 名为前缀）并完成绑定，实现真正的 fork 即一键部署。如需复用已有 KV，可手动补充 `id`。Durable Object 同样无需任何准备：`migrations` 声明会在首次部署时创建 `ModelProbeCoordinator`。
 
 ### 方式一：Cloudflare 网页连接 GitHub 一键部署（Workers Builds）
@@ -239,6 +241,8 @@ for chunk in resp:
 | GET             | `/v1/models/{id}`                       | API Key  | 单个模型（含探测字段；未知 id 返回 404 `model_not_found`） |
 
 客户端鉴权支持 `Authorization: Bearer <key>` 与 `X-API-Key: <key>` 两种方式。
+
+> **仅面向服务端客户端。** `/v1` 代理不返回 CORS 头、也不应答 `OPTIONS` 预检，浏览器端页面无法直接调用——请将 OpenAI 兼容的服务端客户端（SDK、CLI、网关）接入本代理。
 
 ## 配置说明
 

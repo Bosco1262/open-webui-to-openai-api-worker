@@ -42,7 +42,13 @@ export class RoundUnavailable extends Error {
 
   constructor(code: "session_missing" | "models_failed") {
     super(code);
-    this.name = "RoundUnavailable";
+    // Embed the code in the NAME as well: Durable Object RPC keeps only `name`
+    // and `message` across the boundary, and the admin router parses the code
+    // back out of the name — an explicit coupling instead of an incidental one.
+    //
+    // 把 code 同时嵌进 name：Durable Object RPC 跨边界只保留 name 与 message，
+    // 管理端路由从 name 中解析出 code——让这层耦合显式化，而不是凭巧合成立。
+    this.name = `RoundUnavailable:${code}`;
     this.code = code;
   }
 }
@@ -281,13 +287,19 @@ export function prefixCandidates(
 export async function refsFromCards(
   cards: readonly unknown[],
 ): Promise<Array<[string, string]>> {
-  const refs: Array<[string, string]> = [];
-  for (const card of cards) {
+  // Fingerprints are independent: hash them concurrently instead of serially
+  // awaiting one SHA-256 per card. Promise.all preserves input order, so the
+  // upstream order is kept.
+  //
+  // 各指纹相互独立：并发哈希，而不是逐卡串行等待一次 SHA-256。Promise.all 保持
+  // 输入顺序，上游顺序不变。
+  const work = cards.map(async (card): Promise<[string, string] | null> => {
     const modelId = modelIdOf(card);
-    if (!modelId) continue;
-    refs.push([modelId, await modelFingerprint(card, modelId)]);
-  }
-  return refs;
+    if (!modelId) return null;
+    return [modelId, await modelFingerprint(card, modelId)];
+  });
+  const refs = await Promise.all(work);
+  return refs.filter((ref): ref is [string, string] => ref !== null);
 }
 
 /**

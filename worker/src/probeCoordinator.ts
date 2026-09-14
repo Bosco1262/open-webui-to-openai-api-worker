@@ -104,6 +104,19 @@ const META_PREFIX_KEY = "upstream_prefix";
 /** 被预算截断的轮次交给 alarm 的轮次请求的记账键。 */
 const META_PENDING_ROUND_KEY = "pending_round";
 
+/**
+ * Bookkeeping key for an ADMIN-requested round (written by `refreshInBackground`,
+ * consumed by the alarm). The heavy work runs on the alarm machinery on purpose:
+ * a full round can outlive a request's `waitUntil` budget (~30s), while the alarm
+ * handler gets 15 minutes of wall time and the existing pending/backoff machinery
+ * already knows how to resume a truncated round.
+ *
+ * 管理端请求的轮次的记账键（由 `refreshInBackground` 写入、alarm 消费）。重活刻意
+ * 交给 alarm 机制：完整轮次可能超出请求的 `waitUntil` 预算（约 30 秒），而 alarm
+ * 处理器有 15 分钟墙钟，且既有的 pending/退避机制本就知道如何续跑被截断的轮次。
+ */
+const META_REQUESTED_ROUND_KEY = "requested_round";
+
 /** Bookkeeping key for the next heartbeat tick (epoch seconds). Persisted in the meta
  *  table so the patrol survives eviction: an in-memory-only tick would be re-derived
  *  "a full interval out" on every wake and never actually fire. */
@@ -308,11 +321,22 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
 
     if (waitSeconds > 0) {
       // Only the wait is bounded: the round itself keeps running for later callers.
-      // 只有"等待"是有界的：轮次本身继续为后续调用方运行。
-      await Promise.race([
-        running.catch(() => null),
-        new Promise((resolve) => setTimeout(resolve, Math.max(0, waitSeconds) * 1000)),
-      ]);
+      // The timer is cleared when the round wins the race — a DO lives long, and an
+      // orphaned timeout would otherwise sit idle for the full wait window.
+      //
+      // 只有"等待"是有界的：轮次本身继续为后续调用方运行。轮次先完成时清除定时器
+      // ——DO 的存活期很长，被遗落的定时器会白白挂满整个等待窗口。
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          running.catch(() => null),
+          new Promise((resolve) => {
+            timer = setTimeout(resolve, Math.max(0, waitSeconds) * 1000);
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
       fill();
     }
     return { fields, instanceMeta };
@@ -419,28 +443,30 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
     }
   }
 
-  /** Force a fresh round for every model currently upstream. */
-  /** 为当前上游的全部模型强制开一轮。 */
-  async refresh(force: boolean): Promise<ProbeRoundStats> {
-    this.ensureLoaded();
-    const settings = await this.probeSettingsCache();
-    const models = await this.fetchModelRefs(settings);
-    if (!models) throw new RoundUnavailable("models_failed");
-    return this.startRound(models, force, settings);
-  }
-
   /**
-   * Force a round for ONE model; the full model list is still reconciled so the
-   * other entries survive.
+   * Queue a forced round (every model, or one model when `modelId` is given) and
+   * return immediately; the round itself runs on the coordinator's alarm.
    *
-   * 只对**一个**模型强制开一轮；仍然用完整模型列表做对齐，因此其它条目不受影响。
+   * An up-front check on a FRESH model list lets the caller learn synchronously
+   * whether the session works and whether the requested model exists — the list
+   * is then re-fetched by the alarm before the round (freshness contract), which
+   * costs one extra subrequest per admin action: the price of not exceeding the
+   * `waitUntil` budget with a round that can run for minutes.
+   *
+   * 排入一轮强制探测（全部模型；`modelId` 给定时仅该模型）并立即返回；轮次本身
+   * 由协调者的 alarm 执行。
+   *
+   * 前置检查用**新鲜**的模型列表，调用方能同步得知 session 是否可用、所请求的
+   * 模型是否存在——随后 alarm 在轮次开始前会重新拉取列表（新鲜性契约）。每次管理
+   * 动作因此多花一个子请求：这是不让一个可能运行数分钟的轮次超出 `waitUntil`
+   * 预算的代价。
    */
-  async probeOne(modelId: string): Promise<ProbeRoundStats> {
+  async refreshInBackground(modelId: string | null): Promise<void> {
     this.ensureLoaded();
     const settings = await this.probeSettingsCache();
     const models = await this.fetchModelRefs(settings);
     if (!models) throw new RoundUnavailable("models_failed");
-    if (!models.some(([id]) => id === modelId)) {
+    if (modelId !== null && !models.some(([id]) => id === modelId)) {
       // A dedicated error NAME, not just a message: Durable Object RPC keeps only
       // `name` and `message` across the boundary, so the admin API matches on the
       // name to answer its own localized 404 (the same mechanism
@@ -453,7 +479,13 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
       err.name = "ModelNotInList";
       throw err;
     }
-    return this.startRound(models, true, settings, { only: [modelId] });
+    this.store.writeMeta(
+      META_REQUESTED_ROUND_KEY,
+      pendingRoundMeta({ force: true, only: modelId === null ? undefined : [modelId] }),
+    );
+    // Wake the queue immediately; the alarm consumes the marker and runs the round.
+    // 立即唤醒队列；alarm 消费该标记并执行轮次。
+    await this.ctx.storage.setAlarm(Date.now() + WAKE_MIN_MS);
   }
 
   /**
@@ -551,11 +583,19 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
       // 三个门控全是本地读取（SQLite meta + 内存缓存）：判断"要不要干活"不花任何上游
       // 请求。待续请求在这里**读取**，但只在拿到模型列表之后（runRound 内部）才会被
       // 写入，因此下面遇到的上游不可达绝不会丢掉下一次尝试要完成的事。
-      const pending = pendingRoundFromMeta(this.store.readMeta(META_PENDING_ROUND_KEY));
+      // An admin-requested round takes priority over a truncated continuation:
+      // both are drained by the round below, and the completion re-arms whatever
+      // is still owed.
+      //
+      // 管理端请求的轮次优先于被截断的续跑：两者都由下面的轮次排空，轮次完成时会
+      // 重排 alarm 继续处理仍欠的部分。
+      const owed =
+        pendingRoundFromMeta(this.store.readMeta(META_REQUESTED_ROUND_KEY)) ??
+        pendingRoundFromMeta(this.store.readMeta(META_PENDING_ROUND_KEY));
       const retryAt = retryWakeAtSeconds(this.cache.all(), now);
       const heartbeatAt = this.heartbeatDeadline(settings, now);
       const backoffDue = retryAt !== null && retryAt <= now;
-      if (!pending && !backoffDue && !heartbeatDue(heartbeatAt, now)) {
+      if (!owed && !backoffDue && !heartbeatDue(heartbeatAt, now)) {
         // A wake with nothing due on any axis: the heartbeat tick re-arming itself, or
         // an alarm that fired slightly ahead of its deadline. Re-arm at the earlier
         // axis and stay silent.
@@ -566,14 +606,25 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
         return;
       }
 
-      const models = await this.fetchModelRefs(settings);
-      if (!models) {
-        await this.ctx.storage.setAlarm(Date.now() + ALARM_RETRY_MS);
-        return;
-      }
-      await this.startRound(models, pending?.force ?? false, settings, {
-        only: pending?.only,
+      // The model list is fetched inside runRound, when the round actually
+      // executes — a queued round no longer runs on the list captured at request
+      // time (see runRound).
+      //
+      // 模型列表改在 runRound 内、即轮次真正执行时拉取——排队的轮次不再拿着请求
+      // 时刻捕获的列表运行（见 runRound）。
+      await this.startRound(null, owed?.force ?? false, settings, {
+        only: owed?.only,
+        requireOnlyInList: true,
       });
+      // Consume the admin marker once the round it spawned has finished. A
+      // pending_round continuation (budget-truncated tail) keeps its own marker
+      // and is drained by the alarm this completion re-arms.
+      //
+      // 它所启动的轮次结束后即消费管理标记。若本轮被预算截断，pending_round 的
+      // 续跑标记仍在，由本次完成所重排的 alarm 继续排空。
+      if (this.store.readMeta(META_REQUESTED_ROUND_KEY)) {
+        this.store.writeMeta(META_REQUESTED_ROUND_KEY, "");
+      }
     } catch (err) {
       console.error(
         JSON.stringify({
@@ -581,6 +632,16 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
           error: err instanceof Error ? err.message : String(err),
         }),
       );
+      // A missing session is permanent until the operator re-imports: stop the
+      // alarm instead of looping every five minutes (a deleted/rotated session
+      // must not leave a zombie wake loop).
+      //
+      // session 缺失在运维重新导入前是永久状态：停止 alarm，而不是每五分钟循环
+      // （被删除/更换的 session 不能留下僵尸唤醒循环）。
+      if (err instanceof RoundUnavailable && err.code === "session_missing") {
+        await this.stopAlarmForMissingSession();
+        return;
+      }
       await this.ctx.storage.setAlarm(Date.now() + ALARM_RETRY_MS);
     }
   }
@@ -631,13 +692,19 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
     this.cache.load(this.store.loadAll());
   }
 
-  /** Start (or join) a round, deduplicating concurrent callers. */
-  /** 启动（或加入）一轮，并对并发调用方去重。 */
+  /**
+   * Start (or join) a round, deduplicating concurrent callers. `models: null`
+   * means "fetch the list when the round actually executes" (see runRound);
+   * only the proxy's present() path hands over a list it already read.
+   *
+   * 启动（或加入）一轮，并对并发调用方去重。`models: null` 表示"轮次真正执行时
+   * 再拉取列表"（见 runRound）；只有代理的 present() 路径会传入已经读取的列表。
+   */
   private startRound(
-    models: ModelRefs,
+    models: ModelRefs | null,
     force: boolean,
     settings: ProbeSettings,
-    options: { only?: readonly string[]; prune?: boolean } = {},
+    options: { only?: readonly string[]; prune?: boolean; requireOnlyInList?: boolean } = {},
   ): Promise<ProbeRoundStats> {
     const request: RoundRequest = { force, only: options.only };
     // Join only when the running round is at least as thorough and covers at least the
@@ -673,15 +740,38 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
   }
 
   private async runRound(
-    models: ModelRefs,
+    models: ModelRefs | null,
     force: boolean,
     settings: ProbeSettings,
-    options: { only?: readonly string[]; prune?: boolean } = {},
+    options: { only?: readonly string[]; prune?: boolean; requireOnlyInList?: boolean } = {},
   ): Promise<ProbeRoundStats> {
     const session = await getSession(this.env);
     if (!session || !sessionIsUsable(session)) throw new RoundUnavailable("session_missing");
     const prefix = await this.resolvePrefix(session, settings);
     if (!prefix) throw new RoundUnavailable("models_failed");
+
+    // The model list is fetched HERE, when the round actually executes — not when
+    // it was requested. A round queued behind another one used to run on the list
+    // captured at request time: stale fingerprints forced needless re-probes and,
+    // with prune on, a stale list deleted entries for models still upstream. The
+    // one exception is the proxy's present() path, which hands over the list it
+    // just read for the client response (prune:false).
+    //
+    // 模型列表在**这里**、即轮次真正执行时拉取——而不是在请求时。此前排在其它轮次
+    // 之后的轮次会拿着请求时刻捕获的列表运行：陈旧指纹触发无谓重探，prune 开启时
+    // 陈旧列表还会删掉上游仍在的模型条目。唯一例外是代理的 present() 路径——它
+    // 传入刚为客户端响应读取的列表（prune:false）。
+    const modelRefs = models ?? (await this.fetchModelRefs(settings));
+    if (!modelRefs) throw new RoundUnavailable("models_failed");
+    if (options.requireOnlyInList && options.only) {
+      for (const modelId of options.only) {
+        if (!modelRefs.some(([id]) => id === modelId)) {
+          const err = new Error(`model '${modelId}' is not in the upstream model list`);
+          err.name = "ModelNotInList";
+          throw err;
+        }
+      }
+    }
 
     const transport = this.transportFor(session, prefix, settings);
     let stats: ProbeRoundStats;
@@ -689,7 +779,7 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
       stats = await runProbeRound({
         cache: this.cache,
         store: this.store,
-        models,
+        models: modelRefs,
         transport,
         force,
         only: options.only,
@@ -777,7 +867,7 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
   private async scheduleRetryWake(): Promise<void> {
     const delayMs = retryWakeDelayMs(this.cache.all(), Date.now() / 1000);
     if (delayMs === null) {
-      if (pendingRoundFromMeta(this.store.readMeta(META_PENDING_ROUND_KEY))) {
+      if (this.hasOwedRound()) {
         await this.ctx.storage.setAlarm(Date.now() + ALARM_CONTINUE_MS);
       } else {
         await this.ctx.storage.deleteAlarm();
@@ -847,7 +937,7 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
   private async armWake(now: number, retryAt: number | null, heartbeatAt: number | null): Promise<void> {
     const next = nextWakeAtSeconds(retryAt, heartbeatAt);
     if (next === null) {
-      if (pendingRoundFromMeta(this.store.readMeta(META_PENDING_ROUND_KEY))) {
+      if (this.hasOwedRound()) {
         await this.ctx.storage.setAlarm(Date.now() + ALARM_CONTINUE_MS);
       } else {
         await this.ctx.storage.deleteAlarm();
@@ -948,19 +1038,67 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
       return null;
     }
     try {
-      if (response.status !== 200) return null;
+      if (response.status !== 200) {
+        // The remembered prefix stopped answering: forget it so the NEXT round
+        // re-probes the candidates instead of pinning to a dead route forever.
+        //
+        // 记忆的前缀不再应答：遗忘它，让**下一轮**重新探测候选，而不是永远钉死在
+        // 失效路由上。
+        this.forgetPrefix();
+        return null;
+      }
       const payload: unknown = await response.json().catch(() => null);
-      // A 200 we cannot read as a model list is NOT "the upstream has no models".
-      // Reconciling the cache with an empty list would drop every model and force a
-      // full re-probe, so this round is skipped instead.
+      // A 200 we cannot read as a model list is NOT "the upstream has no models",
+      // and it is just as likely a sign the prefix is wrong: forget it and skip
+      // the round either way — reconciling against an HTML page or an empty list
+      // would corrupt the cache.
       //
-      // 200 但读不成模型列表，绝不等于"上游没有模型"。按空列表对齐缓存会删掉所有模型并
-      // 触发全量重探，因此这里选择跳过本轮。
-      if (!isModelListPayload(payload)) return null;
+      // 读不成模型列表的 200 不等于"上游没有模型"，它同样可能是前缀错了：无论
+      // 哪种都遗忘前缀并跳过本轮——按 HTML 页面或空列表对齐都会污染缓存。
+      if (!isModelListPayload(payload)) {
+        this.forgetPrefix();
+        return null;
+      }
       return await refsFromCards(extractModelList(payload));
     } finally {
       void response.body?.cancel().catch(() => {});
     }
+  }
+
+  /** Forget the remembered prefix (memory + meta): the next round re-probes. */
+  /** 遗忘已记忆的前缀（内存 + meta）：下一轮重新探测。 */
+  private forgetPrefix(): void {
+    this.prefix = null;
+    this.store.writeMeta(META_PREFIX_KEY, "");
+  }
+
+  /**
+   * Whether a requested or truncated round still owes the queue work. Checked by
+   * every "nothing to wake for" decision: dropping the alarm while such a marker
+   * survives would strand the queue.
+   *
+   * 是否仍有管理请求或被截断的轮次欠着队列的工作。所有"无事可唤醒"的判定都要检查
+   * 它：在标记尚存时删除 alarm 会让队列搁浅。
+   */
+  private hasOwedRound(): boolean {
+    if (this.store.readMeta(META_REQUESTED_ROUND_KEY)) return true;
+    return Boolean(pendingRoundFromMeta(this.store.readMeta(META_PENDING_ROUND_KEY)));
+  }
+
+  /**
+   * Stop the alarm because the session is gone. Any owed round (admin request or
+   * budget-truncated continuation) is dropped with it: with no session the queue
+   * could do nothing, and a surviving marker would only make the next alarm wake
+   * into the same dead end. A fresh import re-arms everything.
+   *
+   * 因 session 消失而停止 alarm。一切欠账（管理请求或截断续跑）随之丢弃：没有
+   * session 队列什么也做不了，残留的标记只会让下一次 alarm 撞进同一个死胡同。
+   * 重新导入 session 会重建一切。
+   */
+  private async stopAlarmForMissingSession(): Promise<void> {
+    this.store.writeMeta(META_REQUESTED_ROUND_KEY, "");
+    this.store.writeMeta(META_PENDING_ROUND_KEY, "");
+    await this.ctx.storage.deleteAlarm();
   }
 
   /**
@@ -1004,11 +1142,17 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
         };
       });
     } catch {
-      // Unreachable (or timed out) for every candidate: no prefix to remember.
-      // 所有候选都连不上（或超时）：没有可记住的前缀。
+      // Unreachable (or timed out) for every candidate: no prefix to remember —
+      // and a poisoned memory must not survive either.
+      //
+      // 所有候选都连不上（或超时）：没有可记住的前缀——被污染的记忆同样不能长存。
+      this.forgetPrefix();
       return null;
     }
-    if (!confirmed) return null;
+    if (!confirmed) {
+      this.forgetPrefix();
+      return null;
+    }
     this.prefix = confirmed.prefix;
     this.store.writeMeta(META_PREFIX_KEY, confirmed.prefix);
     return confirmed.prefix;

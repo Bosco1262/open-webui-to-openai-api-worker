@@ -74,6 +74,18 @@ export async function touchApiKey(env: Env, key: string, meta: ApiKeyMeta): Prom
   // redundancy (the instance cache makes it cheap, but not free).
   //
   // 一次读取服务整个调用；被替换的第二次读取纯属冗余（实例缓存让它便宜，但不免费）。
+  // Claim the marker synchronously BEFORE the first await: two concurrent calls
+  // for a never-used key would otherwise both pass the throttle check below and
+  // both write the same KV key (KV allows ~1 write/sec per key). The caller that
+  // claimed the marker writes immediately; the other one sees the fresh marker
+  // and skips. The claim itself is not a write, hence the `claimedByMe` flag.
+  //
+  // 在首个 await 之前同步占位标记：否则同一"从未使用"Key 的两个并发调用都会通过
+  // 下面的节流检查、各写一次同一个 KV 键（KV 同键约每秒 1 次写入上限）。占位到的
+  // 调用立即写入；后到的调用看到新标记即跳过。占位本身不算写入，因此需要
+  // `claimedByMe` 标志。
+  const claimedByMe = !lastTouched.has(key);
+  if (claimedByMe) lastTouched.set(key, Date.now());
   const interval = await getTouchInterval(env);
   // The off switch is checked before the first-use write: "off" must mean no write
   // at all, not "one write and then never again".
@@ -81,23 +93,32 @@ export async function touchApiKey(env: Env, key: string, meta: ApiKeyMeta): Prom
   // 关闭开关要在"首次使用写入"之前判断：关就是一次都不写，而不是"写一次以后再也不写"。
   if (interval === 0) return;
   const now = Date.now();
-  // A never-used key is recorded immediately on its first call.
-  // 从未使用的 Key 在首次调用时立即记录。
-  if (!meta.last_used) {
+  const updated: ApiKeyMeta = { ...meta, last_used: Math.floor(now / 1000) };
+  // A never-used key is recorded immediately on its first call — including the
+  // call that just claimed the marker above (that claim is not a write).
+  //
+  // 从未使用的 Key 在首次调用时立即记录——包括刚刚占位标记的那次调用
+  // （占位本身不是写入）。
+  if (meta.last_used === 0 && claimedByMe) {
     lastTouched.set(key, now);
-    await env.KV.put(apiKeyKVKey(key), JSON.stringify({ ...meta, last_used: Math.floor(now / 1000) }));
+    await env.KV.put(apiKeyKVKey(key), JSON.stringify(updated), { metadata: updated });
     return;
   }
-  const intervalMs = interval * 1000;
   // Skip if the key was written within the throttle window; the persisted
   // last_used also counts so a fresh isolate does not rewrite early.
   //
   // 若 Key 在节流窗口内已写入则跳过；持久化的 last_used 同样计入，
   // 避免新 isolate 提前重写。
   const lastWrite = Math.max(lastTouched.get(key) ?? 0, meta.last_used * 1000);
-  if (now - lastWrite < intervalMs) return;
+  if (now - lastWrite < interval * 1000) return;
   lastTouched.set(key, now);
   // Write off the critical path so the response is not delayed.
   // 写入不阻塞关键路径，避免拖慢响应。
-  await env.KV.put(apiKeyKVKey(key), JSON.stringify({ ...meta, last_used: Math.floor(now / 1000) }));
+  await env.KV.put(apiKeyKVKey(key), JSON.stringify(updated), { metadata: updated });
+}
+
+/** Drop the in-instance write marker (the key was deleted or rotated). */
+/** 清除实例内的写入标记（Key 已删除或轮转）。 */
+export function clearTouchMarker(key: string): void {
+  lastTouched.delete(key);
 }

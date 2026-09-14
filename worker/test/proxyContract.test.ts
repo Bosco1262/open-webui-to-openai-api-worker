@@ -133,6 +133,8 @@ interface Harness {
     calls: string[];
     /** Headers sent upstream, one entry per call, for "what is forwarded" assertions. */
     headers: Array<Record<string, string>>;
+    /** Body text sent upstream, one entry per call ("" when there was none). */
+    bodies: string[];
     /** Whether each call carried an abort signal (the upstream timeout). */
     signals: boolean[];
     /** Models path -> status, for prefix-detection tests. */
@@ -207,6 +209,7 @@ async function makeHarness(options: HarnessOptions): Promise<Harness> {
   const upstream: Harness["upstream"] = {
     calls: [],
     headers: [],
+    bodies: [],
     signals: [],
     modelsStatus: new Map(Object.entries(options.modelsStatus ?? {})),
     modelsHtmlPaths: new Set(options.modelsHtmlPaths ?? []),
@@ -247,6 +250,13 @@ async function makeHarness(options: HarnessOptions): Promise<Harness> {
     });
     upstream.headers.push(sentHeaders);
     upstream.signals.push(init?.signal instanceof AbortSignal);
+    upstream.bodies.push(
+      typeof init?.body === "string"
+        ? init.body
+        : init?.body instanceof ReadableStream
+          ? await new Response(init.body).text()
+          : "",
+    );
     if (url.includes("/models")) {
       const pathname = new URL(url).pathname;
       const forced = upstream.modelsStatus.get(pathname);
@@ -955,4 +965,68 @@ test("the forwarded request keeps client headers but never accept-encoding or th
   // 会话凭证覆盖客户端自带的鉴权。
   assert.equal(sent.authorization, "Bearer upstream-token");
   assert.ok(h.upstream.signals[chatCall]);
+});
+
+// --------------------------------------------------------------------------- //
+// passthrough: generic headers and an untouched body (A2/N1)
+// 透传：通用请求头与原样 body（A2/N1）
+// --------------------------------------------------------------------------- //
+
+test("the passthrough keeps the client's Content-Type and streams the body untouched", async () => {
+  const h = await makeHarness({
+    settings: DEFAULT_SETTINGS,
+    baseUrl: "https://passthrough-headers.test",
+  });
+  const response = await handleV1Request(
+    h.env,
+    requestFor("/v1/files/upload", {
+      method: "POST",
+      body: "BINARY-PAYLOAD-0x00FF",
+      headers: {
+        "content-type": "multipart/form-data; boundary=xyz",
+        accept: "application/octet-stream",
+      },
+    }),
+    ctx(h.waitUntil),
+  );
+  // The passthrough relays whatever the upstream answered (the stub's 404).
+  // 透传原样回传上游的答复（stub 的 404）。
+  assert.equal(response.status, 404);
+
+  // Last upstream call = the forwarded upload (the first was the prefix probe).
+  // 最后一次上游调用 = 转发的上传（第一次是前缀探测）。
+  const sent = h.upstream.headers.at(-1) as Record<string, string>;
+  // Session credentials still ride along, but the client's own content
+  // negotiation is preserved instead of being pinned to application/json —
+  // the old JSON pin broke every multipart upload and non-JSON download.
+  //
+  // 会话凭证仍随行，但客户端自己的内容协商被保留，而不是被钉成 application/json
+  // ——旧的 JSON 钉死破坏了一切 multipart 上传与非 JSON 下载。
+  assert.equal(sent.authorization, "Bearer upstream-token");
+  assert.equal(sent["content-type"], "multipart/form-data; boundary=xyz");
+  assert.equal(sent.accept, "application/octet-stream");
+
+  // The body arrives intact: streamed through, never round-tripped through
+  // `request.text()`, which mangled binary payloads.
+  //
+  // body 完整到达：流式直通，绝不经过会破坏二进制负载的 `request.text()` 往返。
+  assert.equal(h.upstream.bodies.at(-1), "BINARY-PAYLOAD-0x00FF");
+});
+
+test("JSON endpoints still pin the JSON content negotiation", async () => {
+  const h = await makeHarness({
+    settings: DEFAULT_SETTINGS,
+    baseUrl: "https://json-headers.test",
+  });
+  await handleV1Request(
+    h.env,
+    requestFor("/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ model: "Shared-1", messages: [{ role: "user", content: "hi" }] }),
+    }),
+    ctx(h.waitUntil),
+  );
+  const sent = h.upstream.headers.at(-1) as Record<string, string>;
+  assert.equal(sent["content-type"], "application/json");
+  assert.equal(sent.accept, "application/json");
 });

@@ -280,6 +280,15 @@ async def credentials_are_valid(base_url: str, session: Session) -> bool:
             if resp.status_code == 404:
                 continue
             if not (200 <= resp.status_code < 300):
+                # 5xx says nothing about this candidate prefix: try the next one,
+                # matching the Worker-side confirmUpstreamPrefix semantics. 401/403
+                # (credentials dead) and 3xx (portal redirect) stay a hard failure.
+                #
+                # 5xx 说明不了该候选前缀本身的好坏：换下一个候选再试，与 Worker 侧
+                # confirmUpstreamPrefix 的语义一致。401/403（凭证失效）与 3xx（被门户
+                # 重定向）仍是硬失败。
+                if 500 <= resp.status_code < 600:
+                    continue
                 return False
             if not looks_like_model_list(resp):
                 continue

@@ -149,7 +149,13 @@ export function parseInstanceConfig(
   text: string,
 ): Record<string, unknown> | null {
   if (status !== 200) return null;
-  if ((contentType ?? "").toLowerCase().includes("text/html")) return null;
+  // Same wide "html" test as `looksLikeModelList` in modelCatalog.ts: it also
+  // rejects application/xhtml+xml, keeping one consistent test across both
+  // body-inspection sites.
+  //
+  // 与 modelCatalog.ts 的 `looksLikeModelList` 相同的宽口径 "html" 判定：同样拒绝
+  // application/xhtml+xml，使两处响应体检查使用一致的口径。
+  if ((contentType ?? "").toLowerCase().includes("html")) return null;
   const trimmed = text.trim();
   if (!trimmed || trimmed.startsWith("<")) return null;
   let payload: unknown;

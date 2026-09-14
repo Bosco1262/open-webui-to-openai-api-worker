@@ -137,11 +137,24 @@ test("the default-effort parse is stable across repeated calls", () => {
   assert.equal(extractDefaultEffort(QWEN), "xhigh", "and the next call must still hit");
 
   // The phrase form ("the default is high") is stateful in exactly the same way.
-  // 措辞形式（"the default is high"）有完全相同的状态性问题。
-  const phrase = '{"detail": "the default is high"}';
+  // The topical guard in extractDefaultEffort requires the text to mention the
+  // reasoning effort — real callers only ever pass effort-related 400 bodies,
+  // and an unrelated "default is X" must NOT be mined.
+  //
+  // 措辞形式（"the default is high"）有完全相同的状态性问题。extractDefaultEffort
+  // 的切题防线要求文本提到 reasoning effort——真实调用方只会传入与 effort 相关的
+  // 400 响应体，而无关的 "default is X" 不应被挖出。
+  const phrase = '{"detail": "reasoning_effort: the default is high"}';
   for (let call = 1; call <= 3; call += 1) {
     assert.equal(extractDefaultEffort(phrase), "high", `phrase call ${call}`);
   }
+  // The topical guard itself: an unrelated "default is X" yields nothing.
+  // 切题防线本身：与 effort 无关的 "default is X" 不得产出结果。
+  assert.equal(
+    extractDefaultEffort('{"detail": "the default is high"}'),
+    null,
+    "an off-topic default marker must be ignored",
+  );
 });
 
 test("candidate extraction stays stable too (it uses matchAll, not exec)", () => {

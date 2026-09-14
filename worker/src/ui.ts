@@ -10,6 +10,8 @@
  * 深色控制台风格，玻璃拟态卡片与橙色点缀。
  */
 
+import { I18N } from "./ui-i18n.ts";
+
 const VERSION = "1.0.0";
 
 export const ADMIN_UI = `<!DOCTYPE html>
@@ -848,424 +850,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   // ---------- i18n ----------
   // ---------- 国际化 ----------
-  var I18N = {
-    'zh-CN': {
-      'app.title': 'Open WebUI 代理控制台',
-      'brand.name': 'Open WebUI 代理控制台',
-      'login.subtitle': '将 Open WebUI 反代为 OpenAI 兼容 API',
-      'login.subtitle_setup': '首次使用，请先设置管理密码',
-      'login.pw_ph': '管理密码',
-      'login.pw1_ph': '设置管理密码（至少 8 位）',
-      'login.pw2_ph': '确认管理密码',
-      'login.btn': '登 录',
-      'login.setup_btn': '设置密码并进入',
-      'login.err_short': '密码长度至少 8 位',
-      'login.err_mismatch': '两次输入的密码不一致',
-      'nav.logout': '退出登录',
-      'nav.label': '导航',
-      'nav.dashboard': '仪表盘',
-      'nav.upstream': '上游服务端',
-      'nav.keys': 'API 管理',
-      'nav.settings': '网页设置',
-      'nav.foot1': '登录后可管理上游凭证、',
-      'nav.foot2': 'API Key 与控制台设置。',
-      'dash.subtitle': '代理服务整体运行状态一览。',
-      'stat.session': 'Session 凭证',
-      'stat.upstream': '上游地址',
-      'stat.keys': 'API Key 数量',
-      'stat.keys_sub': '生成的客户端密钥',
-      'dash.access_title': '客户端接入',
-      'dash.access_desc': '在任何 OpenAI 兼容客户端中使用以下地址与密钥接入本代理。',
-      'dash.chip_title': '客户端接入地址，点击复制',
-      'dash.copy': '复制',
-      'up.subtitle': '导入并管理 Open WebUI 的 Session 凭证。',
-      'up.import_title': '导入 Session',
-      'up.import_desc': '在本地运行 <code>python login.py --base-url https://你的-open-webui 地址</code>，完成浏览器登录后，将终端输出的 <b>session.json 全部 JSON 内容</b> 粘贴到下方并导入。',
-      'up.json_label': 'session.json 内容',
-      'up.test': '校验并测试连通',
-      'up.import': '导入 Session',
-      'up.status_title': '当前凭证状态',
-      'up.status_desc': '最近一次导入的凭证摘要，凭证过期后请重新登录上游并再次导入。',
-      'up.state': '状态',
-      'st.imported': '已导入',
-      'st.unusable': '凭证不可用',
-      'st.not_imported': '未导入',
-      'st.not_imported_hint': '请先导入 session.json',
-      'up.import_ok': '导入成功。',
-      'up.import_summary': ' 凭证摘要：',
-      'up.test_ok': '直连连通（前缀 {prefix}，HTTP {status}）',
-      'up.test_http': '上游返回 HTTP {status}（前缀 {prefix}），凭证可能已过期',
-      'up.test_network': '无法连接上游：{error}',
-      'up.test_not_models': '所有候选前缀都没有返回模型列表（可能是被前端页面接管或状态码异常），请确认地址指向 Open WebUI',
-      'err.need_setup': '管理员密码尚未设置，请先完成首次设置。',
-      'err.too_many': '登录失败次数过多，请稍后重试。',
-      'err.wrong_password': '密码错误。',
-      'err.not_logged_in': '未登录或会话已过期。',
-      'err.unknown_endpoint': '未知的管理接口。',
-      'err.pw_too_short': '密码长度至少 8 位。',
-      'err.pw_mismatch': '两次输入的密码不一致。',
-      'err.pw_cur_required': '请填写当前密码。',
-      'err.pw_new_required': '请填写新密码。',
-      'err.pw_cur_wrong': '当前密码不正确。',
-      'err.pw_new_short': '新密码长度至少 8 位。',
-      'err.pw_new_same': '新密码不能与当前密码相同。',
-      'err.pw_change_failed': '修改密码失败。',
-      'err.setup_failed': '设置密码失败。',
-      'err.setup_secret_exists': '管理员密码已由部署配置（ADMIN_PASSWORD）提供，无需在网页设置。',
-      'err.already_setup': '管理员密码已设置。',
-      'err.session_empty': '请粘贴 session.json 的 JSON 内容。',
-      'err.session_json_bad': 'JSON 解析失败，请检查粘贴内容。',
-      'err.session_format_bad': '内容格式不正确，应为 JSON 对象。',
-      'err.session_missing_credentials': '缺少 Authorization 与 Cookie（至少需要其一）。',
-      'err.session_bad_base_url': 'base_url 缺失或不是合法地址（需 http/https 开头）。',
-      'err.key_missing': '缺少要删除的 API Key。',
-      'err.key_name_required': '请填写 Key 名称。',
-      'err.key_name_duplicate': '已存在同名 Key，请更换名称。',
-      'up.del_confirm': '确认删除已导入的 Session？客户端将无法使用代理。',
-      'up.deleted': 'Session 已删除',
-      'up.check_session': '检测 Session 连通性',
-      'up.delete_session': '删除 Session',
-      'err.session_not_imported': '尚未导入 Session，请先在下方导入后再检测。',
-      'keys.subtitle': '生成与管理客户端使用的 API Key。',
-      'keys.title': '管理 API Key',
-      'keys.desc1': '客户端使用以下 API Key 访问 ',
-      'keys.desc2': '。完整 Key 仅在创建时显示一次。',
-      'keys.name_label': 'Key 名称（必填）',
-      'keys.name_ph': '如：Cherry Studio',
-      'keys.create': '生成 Key',
-      'kn.title': '生成 API Key',
-      'kn.note': '请输入 Key 名称，用于标识使用该 Key 的客户端。',
-      'kn.submit': '确认生成',
-      'keys.th_name': '名称',
-      'keys.th_key': 'Key',
-      'keys.th_created': '创建时间',
-      'keys.th_used': '最近使用',
-      'keys.never_used': '从未使用',
-      'keys.tracking_disabled': '已关闭此功能',
-      'keys.empty': '暂无 API Key',
-      'keys.del_confirm': '确认删除 Key ',
-      'keys.del_confirm_end': '？',
-      'keys.deleted': 'Key 已删除',
-      'keys.rotate': '轮转',
-      'keys.rotate_confirm': '确认轮转 Key ',
-      'keys.rotate_confirm_end': '？旧 Key 将立即失效，使用它的客户端需更换为新 Key。',
-      'keys.rotated': 'Key 已轮转，旧 Key 已失效',
-      'set.subtitle': '控制台自身账号与安全配置。',
-      'set.pw_title': '密码设置',
-      'set.pw_desc': '管理控制台的登录密码。修改后所有已登录的管理会话将失效，需重新登录。',
-      'set.pw_src_label': '当前密码储存位置',
-      'set.pw_src_hint': 'Secret（ADMIN_PASSWORD）仅在 KV 不存在相关记录时生效',
-      'set.src_secret': 'Secret（ADMIN_PASSWORD）',
-      'set.src_kv': 'KV（控制台修改）',
-      'set.src_none': '未设置',
-      'set.pw_change': '修改密码',
-      'set.lang_title': '语言设置',
-      'set.lang_label': '界面语言',
-      'set.lang_hint': '手动选择优先于浏览器语言；未选择时自动检测，默认英文。',
-      'set.lang_zh': '简体中文',
-      'set.lang_en': 'English',
-      'set.lang_saved': '语言偏好已保存',
-      'set.touch_title': '使用记录粒度',
-      'set.touch_desc': '控制 API Key「最近使用」时间的 KV 写入频率。从未使用的 Key 首次调用会立即记录一次，之后按所选粒度更新；粒度越粗，KV 写入次数越少（免费层每日写入上限 1000 次）。选择「关闭」后不再记录，历史数据仍保留在 KV 中，但「最近使用」列不再显示。',
-      'set.touch_label': '记录间隔',
-      'set.touch_hint': '更改立即生效，无需重新部署。',
-      'set.touch_off': '关闭（不记录）',
-      'set.touch_daily': '每天（默认）',
-      'set.touch_12h': '每十二小时',
-      'set.touch_6h': '每六小时',
-      'set.touch_3h': '每三小时',
-      'set.touch_hourly': '每小时',
-      'set.touch_30m': '每三十分钟',
-      'msg.touch_saved': '使用记录粒度已保存',
-      'err.settings_invalid': '无效的设置值。',
-      'mp.title': '模型探测',
-      'mp.desc': '逐模型探测上游引擎真正接受什么：每个思考挡位都用真实请求实证，视觉 / 函数调用 / 结构化输出等能力同样来自引擎。结果体现在 /v1/models 的 capabilities、supported_parameters、reasoning 与 architecture。',
-      'mp.enabled_label': '启用模型探测',
-      'mp.enabled_hint': '关闭后不发起任何探测，/v1/models 也不再输出探测得出的字段（capabilities、supported_parameters、reasoning、architecture）。',
-      'mp.on': '开启',
-      'mp.off': '关闭',
-      'mp.hb_label': '定时巡检',
-      'mp.hb_hint': '开启后，空闲部署也会每隔所选时长自动对齐一次上游模型列表（每次巡检约 1–2 个上游子请求）；有指纹变化才探测，仍受「每轮子请求预算」约束并由 alarm 自动继续；上游模型的增减与凭证过期会被更早发现。默认关闭。',
-      'mp.hb_off': '关闭',
-      'mp.hb_30m': '每三十分钟',
-      'mp.hb_hourly': '每小时',
-      'mp.hb_3h': '每三小时',
-      'mp.hb_6h': '每六小时',
-      'mp.hb_12h': '每十二小时',
-      'mp.hb_daily': '每天',
-      'mp.params_title': '探测参数',
-      'mp.params_hint': '此参数设置作用于所有探测。',
-      'mp.cache_title': '已缓存的模型及其探测结果',
-      'mp.cache_hint': '列出已探测的模型与状态：正常（结论完整）、部分结论（有请求未得出答案，会按退避重试）、不可探测（上游从不校验该字段）、失败待重试。能力与最后错误显示在挡位下方。',
-      'mp.budget_label': '每轮子请求预算',
-      'mp.budget_hint': '单轮探测（一次调用）最多向上游发送的子请求数，4–9000，按「保存」生效。一个模型典型消耗约 10 个、最坏约 20 个；免费层单次调用上限 50 个（含模型列表与前缀探测的开销），建议不超过 40。预算用完时协调者用自身 alarm 继续，无需再点「立即探测」。',
-      'mp.timeout_label': '单模型超时',
-      'mp.timeout_hint': '每个模型探测请求的最长等待时间（1–120 秒）。另有单模型总墙钟 45 秒的保险（不可调），调大本值不会突破它。',
-      'mp.wait_label': '等待时长',
-      'mp.wait_hint': '/v1/models 最多等待缺失模型探测完成的时长（0–30 秒，0 为不等待）。',
-      'mp.save': '保存',
-      'mp.saved': '探测设置已保存',
-      'mp.refresh': '立即探测',
-      'mp.refresh_done': '探测完成：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个',
-      'mp.refresh_truncated': '探测进行中：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个。本轮子请求预算已用完（{used} 个），其余 {pending} 个模型由后台自动继续，无需再点「立即探测」。',
-      'mp.refresh_auth': '探测中途凭证失效（HTTP 401/403），已中止：成功 {probed} 个，不可探测 {unknown} 个，失败 {failed} 个。请重新导入 Session',
-      'mp.th_model': '模型',
-      'mp.th_efforts': '支持挡位',
-      'mp.th_probed': '探测时间',
-      'mp.th_status': '状态',
-      'mp.th_caps': '能力字段',
-      'mp.th_params': '支持参数',
-      'mp.empty': '暂无探测结果，点击「立即探测」开始',
-      'mp.unprobeable': '上游未校验，无法获知挡位',
-      'mp.st_unprobeable': '不可探测',
-      'mp.st_ok': '正常',
-      'mp.st_partial': '部分结论',
-      'mp.st_failed': '失败待重试',
-      'mp.failed_banner': '有 {count} 个模型探测失败，将按退避自动重试（不会影响已确立的结论，也不影响客户端）。最近错误：{error}',
-      'mp.reprobe': '重探',
-      'mp.expose_label': '实例元信息',
-      'mp.expose_hint': '在 /v1/models 信封中输出上游部署的 name / version / features 与共享能力模板（x_open_webui）。关闭后该键完全不出现。',
-      'err.probe_session_missing': '尚未导入 Session，无法探测。',
-      'err.probe_models_failed': '无法获取上游模型列表，请检查凭证或稍后重试。',
-      'err.probe_model_missing': '该模型不在上游的模型列表中，可能已被移除或更名。',
-      'km.title': 'API Key 已生成',
-      'km.note': '请立即复制保存，关闭后将无法再次查看完整 Key。',
-      'pm.title': '修改管理密码',
-      'pm.note': '修改后密码将保存于 KV 并立即生效，所有已登录的管理会话将失效，需使用新密码重新登录。',
-      'pm.cur': '当前密码',
-      'pm.new': '新密码（至少 8 位）',
-      'pm.new2': '确认新密码',
-      'pm.cur_ph': '请输入当前密码',
-      'pm.new_ph': '请输入新密码（至少 8 位）',
-      'pm.new2_ph': '请再次输入新密码',
-      'pm.submit': '确认修改',
-      'pm.confirm_secret': '当前管理员密码来自 Cloudflare Secret（ADMIN_PASSWORD）。\\n\\n在此修改会把生效密码覆盖为 KV 中保存的新密码，之后该 Secret 将不再被使用（除非把 Secret 改成与新密码一致）。\\n如不想覆盖，请前往 Cloudflare Dashboard 更新 Secret。\\n\\n确定要继续吗？',
-      'msg.copied': '已复制',
-      'msg.copy_failed': '复制失败',
-      'msg.processing': ' 处理中…',
-      'msg.session_expired': '登录已过期，请重新登录',
-      'msg.fill_cur': '请填写当前密码',
-      'msg.pw_short': '新密码长度至少 8 位',
-      'msg.pw_same': '新密码不能与当前密码相同',
-      'msg.pw_mismatch': '两次输入的新密码不一致',
-      'msg.pw_changed': '密码已修改，所有旧会话已失效，请使用新密码重新登录',
-      'common.delete': '删除',
-      'common.copy': '复制',
-      'common.close': '关闭',
-      'common.cancel': '取消',
-      'common.loading': '加载中…',
-      'common.actions': '操作',
-      'common.show_pw': '显示/隐藏密码'
-    },
-    'en': {
-      'app.title': 'Open WebUI Proxy Console',
-      'brand.name': 'Open WebUI Proxy Console',
-      'login.subtitle': 'Expose Open WebUI as an OpenAI-compatible API',
-      'login.subtitle_setup': 'First run — set an admin password',
-      'login.pw_ph': 'Admin password',
-      'login.pw1_ph': 'Set admin password (min 8 chars)',
-      'login.pw2_ph': 'Confirm admin password',
-      'login.btn': 'Sign In',
-      'login.setup_btn': 'Set Password and Continue',
-      'login.err_short': 'Password must be at least 8 characters',
-      'login.err_mismatch': 'Passwords do not match',
-      'nav.logout': 'Sign Out',
-      'nav.label': 'Navigation',
-      'nav.dashboard': 'Dashboard',
-      'nav.upstream': 'Upstream Server',
-      'nav.keys': 'API Management',
-      'nav.settings': 'Settings',
-      'nav.foot1': 'Manage upstream credentials,',
-      'nav.foot2': 'API keys and console settings after signing in.',
-      'dash.subtitle': 'Overview of the proxy service status.',
-      'stat.session': 'Session Credential',
-      'stat.upstream': 'Upstream URL',
-      'stat.keys': 'API Keys',
-      'stat.keys_sub': 'Client keys generated',
-      'dash.access_title': 'Client Access',
-      'dash.access_desc': 'Use the address and key below in any OpenAI-compatible client.',
-      'dash.chip_title': 'Client base URL, click to copy',
-      'dash.copy': 'Copy',
-      'up.subtitle': 'Import and manage Open WebUI session credentials.',
-      'up.import_title': 'Import Session',
-      'up.import_desc': 'Run <code>python login.py --base-url https://your-open-webui-url</code> locally and finish the browser login, then paste the <b>full JSON content of session.json</b> below and import.',
-      'up.json_label': 'session.json Content',
-      'up.test': 'Validate and Test',
-      'up.import': 'Import Session',
-      'up.status_title': 'Current Credential Status',
-      'up.status_desc': 'Summary of the last imported credential. If it expires, sign in upstream again and re-import.',
-      'up.state': 'Status',
-      'st.imported': 'Imported',
-      'st.unusable': 'Credential unusable',
-      'st.not_imported': 'Not imported',
-      'st.not_imported_hint': 'Import session.json first',
-      'up.import_ok': 'Import succeeded. ',
-      'up.import_summary': ' Credential summary: ',
-      'up.test_ok': 'Direct connection OK (prefix {prefix}, HTTP {status})',
-      'up.test_http': 'Upstream returned HTTP {status} (prefix {prefix}); credentials may have expired',
-      'up.test_network': 'Cannot connect to upstream: {error}',
-      'up.test_not_models': 'No candidate prefix returned a model list (the page may be served by the SPA, or the status code was unexpected); please verify the URL points to Open WebUI',
-      'err.need_setup': 'Admin password is not set. Complete the first-time setup first.',
-      'err.too_many': 'Too many failed attempts. Please try again later.',
-      'err.wrong_password': 'Incorrect password.',
-      'err.not_logged_in': 'Not signed in or session expired.',
-      'err.unknown_endpoint': 'Unknown admin endpoint.',
-      'err.pw_too_short': 'Password must be at least 8 characters.',
-      'err.pw_mismatch': 'Passwords do not match.',
-      'err.pw_cur_required': 'Please enter the current password.',
-      'err.pw_new_required': 'Please enter the new password.',
-      'err.pw_cur_wrong': 'Current password is incorrect.',
-      'err.pw_new_short': 'New password must be at least 8 characters.',
-      'err.pw_new_same': 'New password must differ from the current one.',
-      'err.pw_change_failed': 'Failed to change password.',
-      'err.setup_failed': 'Failed to set password.',
-      'err.setup_secret_exists': 'The admin password is already provided by the deployment config (ADMIN_PASSWORD); no need to set it here.',
-      'err.already_setup': 'Admin password is already set.',
-      'err.session_empty': 'Please paste the JSON content of session.json.',
-      'err.session_json_bad': 'JSON parsing failed. Please check the pasted content.',
-      'err.session_format_bad': 'Invalid content format; expected a JSON object.',
-      'err.session_missing_credentials': 'Missing Authorization and Cookie (at least one is required).',
-      'err.session_bad_base_url': 'base_url is missing or not a valid URL (must start with http/https).',
-      'err.key_missing': 'Missing the API key to delete.',
-      'err.key_name_required': 'Please enter a key name.',
-      'err.key_name_duplicate': 'A key with the same name already exists. Choose another.',
-      'up.del_confirm': 'Delete the imported session? Clients will no longer be able to use the proxy.',
-      'up.deleted': 'Session deleted',
-      'up.check_session': 'Check Session Connectivity',
-      'up.delete_session': 'Delete Session',
-      'err.session_not_imported': 'No session imported yet; import one below first.',
-      'keys.subtitle': 'Generate and manage client API keys.',
-      'keys.title': 'Manage API Keys',
-      'keys.desc1': 'Clients use these API keys to access ',
-      'keys.desc2': '. The full key is shown only once at creation.',
-      'keys.name_label': 'Key Name (Required)',
-      'keys.name_ph': 'e.g. Cherry Studio',
-      'keys.create': 'Generate Key',
-      'kn.title': 'Generate API Key',
-      'kn.note': 'Enter a name to identify the client that uses this key.',
-      'kn.submit': 'Confirm',
-      'keys.th_name': 'Name',
-      'keys.th_key': 'Key',
-      'keys.th_created': 'Created',
-      'keys.th_used': 'Last Used',
-      'keys.never_used': 'Never Used',
-      'keys.tracking_disabled': 'Tracking is off',
-      'keys.empty': 'No API Keys Yet',
-      'keys.del_confirm': 'Delete key ',
-      'keys.del_confirm_end': '?',
-      'keys.deleted': 'Key deleted',
-      'keys.rotate': 'Rotate',
-      'keys.rotate_confirm': 'Rotate key ',
-      'keys.rotate_confirm_end': '? The old key is invalidated immediately; clients using it must switch to the new key.',
-      'keys.rotated': 'Key rotated; the old key is now invalid',
-      'set.subtitle': 'Console account and security configuration.',
-      'set.pw_title': 'Password',
-      'set.pw_desc': 'Manage the console login password. Changing it signs out all admin sessions.',
-      'set.pw_src_label': 'Current Password Storage',
-      'set.pw_src_hint': 'The Secret (ADMIN_PASSWORD) only takes effect when no related record exists in KV.',
-      'set.src_secret': 'Secret (ADMIN_PASSWORD)',
-      'set.src_kv': 'KV (changed in console)',
-      'set.src_none': 'Not set',
-      'set.pw_change': 'Change Password',
-      'set.lang_title': 'Language',
-      'set.lang_label': 'Interface Language',
-      'set.lang_hint': 'Manual choice overrides browser language; otherwise auto-detected, English fallback.',
-      'set.lang_zh': '简体中文',
-      'set.lang_en': 'English',
-      'set.lang_saved': 'Language preference saved',
-      'set.touch_title': 'Usage Tracking Granularity',
-      'set.touch_desc': 'Controls how often the "Last Used" timestamp of API keys is written to KV. A never-used key is recorded immediately on its first call; afterwards it refreshes at the chosen granularity. Coarser granularity means fewer KV writes (free tier: 1,000 writes/day). With "Off", recording stops entirely; existing history stays in KV but the column is no longer shown.',
-      'set.touch_label': 'Record Interval',
-      'set.touch_hint': 'Changes take effect immediately; no redeploy needed.',
-      'set.touch_off': 'Off (do not record)',
-      'set.touch_daily': 'Daily (default)',
-      'set.touch_12h': 'Every 12 hours',
-      'set.touch_6h': 'Every 6 hours',
-      'set.touch_3h': 'Every 3 hours',
-      'set.touch_hourly': 'Hourly',
-      'set.touch_30m': 'Every 30 minutes',
-      'msg.touch_saved': 'Tracking granularity saved',
-      'err.settings_invalid': 'Invalid setting value.',
-      'mp.title': 'Model Probe',
-      'mp.desc': 'Establishes what each model really accepts: every reasoning level is verified with a real request, and vision / function calling / structured outputs come from the engine too. The results appear on /v1/models as capabilities, supported_parameters, reasoning and architecture.',
-      'mp.enabled_label': 'Enable Model Probe',
-      'mp.enabled_hint': 'When off, no probes are sent and /v1/models carries no probe-derived fields (capabilities, supported_parameters, reasoning, architecture).',
-      'mp.on': 'On',
-      'mp.off': 'Off',
-      'mp.hb_label': 'Scheduled Patrol',
-      'mp.hb_hint': 'When on, an idle deployment also re-aligns the upstream model list at the chosen interval (about 1-2 upstream subrequests per patrol); probing happens only on a fingerprint change, still bounded by the per-round subrequest budget and continued by the alarm; upstream model additions/removals and expired credentials surface sooner. Off by default.',
-      'mp.hb_off': 'Off',
-      'mp.hb_30m': 'Every 30 minutes',
-      'mp.hb_hourly': 'Hourly',
-      'mp.hb_3h': 'Every 3 hours',
-      'mp.hb_6h': 'Every 6 hours',
-      'mp.hb_12h': 'Every 12 hours',
-      'mp.hb_daily': 'Daily',
-      'mp.params_title': 'Probe Parameters',
-      'mp.params_hint': 'These parameters apply to all probes.',
-      'mp.cache_title': 'Cached Models & Probe Results',
-      'mp.cache_hint': 'Lists each probed model with its status: OK (conclusive), Partial (some request left the answer open, retried with backoff), Unprobeable (the upstream never validates the field) or Failed. Capabilities and the last error appear under the levels.',
-      'mp.budget_label': 'Subrequest Budget Per Round',
-      'mp.budget_hint': 'The maximum number of upstream subrequests one probe round (one invocation) may spend; 4–9000, applied on Save. One model typically costs about 10 (worst case ~20). The free plan caps a single invocation at 50 subrequests including the model list and prefix probes, so keep it at or below 40. When the budget runs out the coordinator continues with its own alarm — no need to click again.',
-      'mp.timeout_label': 'Per-model Timeout',
-      'mp.timeout_hint': 'Maximum wait per probe request (1–120 seconds). A fixed per-model wall clock of 45 seconds (not configurable) also applies; raising this value cannot exceed it.',
-      'mp.wait_label': 'Wait Time',
-      'mp.wait_hint': 'How long /v1/models may wait for a missing-models probe (0–30 seconds; 0 = never wait).',
-      'mp.save': 'Save',
-      'mp.saved': 'Probe settings saved',
-      'mp.refresh': 'Probe Now',
-      'mp.refresh_done': 'Probe finished: {probed} probed, {unknown} unprobeable, {failed} failed',
-      'mp.refresh_truncated': 'Probe still running: {probed} probed, {unknown} unprobeable, {failed} failed. This round used up its subrequest budget ({used}); the remaining {pending} models continue in the background — no need to click again.',
-      'mp.refresh_auth': 'Credentials expired mid-probe (HTTP 401/403); aborted: {probed} probed, {unknown} unprobeable, {failed} failed. Please re-import the session',
-      'mp.th_model': 'Model',
-      'mp.th_efforts': 'Supported Efforts',
-      'mp.th_probed': 'Probed At',
-      'mp.th_status': 'Status',
-      'mp.th_caps': 'Capabilities',
-      'mp.th_params': 'Supported Parameters',
-      'mp.empty': 'No probe results yet — click "Probe Now" to start',
-      'mp.unprobeable': 'Upstream accepted the probe without validating',
-      'mp.st_unprobeable': 'Unprobeable',
-      'mp.st_ok': 'OK',
-      'mp.st_partial': 'Partial',
-      'mp.st_failed': 'Failed, will retry',
-      'mp.failed_banner': '{count} model(s) failed to probe; they retry with backoff automatically (established facts and client access are unaffected). Last error: {error}',
-      'mp.reprobe': 'Re-probe',
-      'mp.expose_label': 'Instance Metadata',
-      'mp.expose_hint': 'Serves the upstream deployment name / version / features and the shared capability template as x_open_webui on the /v1/models envelope. When off, the key is absent entirely.',
-      'err.probe_session_missing': 'No session imported; cannot probe.',
-      'err.probe_models_failed': 'Cannot fetch the upstream model list. Check credentials or retry later.',
-      'err.probe_model_missing': "That model is not in the upstream model list; it may have been removed or renamed.",
-      'km.title': 'API Key Generated',
-      'km.note': 'Copy and store it now — the full key cannot be viewed again after closing.',
-      'pm.title': 'Change Admin Password',
-      'pm.note': 'The new password is stored in KV and takes effect immediately; all admin sessions will be signed out.',
-      'pm.cur': 'Current Password',
-      'pm.new': 'New Password (min 8 chars)',
-      'pm.new2': 'Confirm New Password',
-      'pm.cur_ph': 'Enter current password',
-      'pm.new_ph': 'Enter new password (min 8 chars)',
-      'pm.new2_ph': 'Re-enter new password',
-      'pm.submit': 'Confirm Change',
-      'pm.confirm_secret': 'The admin password currently comes from the Cloudflare Secret (ADMIN_PASSWORD).\\n\\nChanging it here overrides the effective password with the new one stored in KV; the Secret will no longer be used (unless you set the Secret to the same new value).\\nTo keep using the Secret, update it in the Cloudflare Dashboard instead.\\n\\nContinue?',
-      'msg.copied': 'Copied',
-      'msg.copy_failed': 'Copy failed',
-      'msg.processing': ' Working…',
-      'msg.session_expired': 'Session expired, please sign in again',
-      'msg.fill_cur': 'Please enter the current password',
-      'msg.pw_short': 'New password must be at least 8 characters',
-      'msg.pw_same': 'New password must differ from the current one',
-      'msg.pw_mismatch': 'Passwords do not match',
-      'msg.pw_changed': 'Password changed. All old sessions are signed out — sign in with the new password.',
-      'common.delete': 'Delete',
-      'common.copy': 'Copy',
-      'common.close': 'Close',
-      'common.cancel': 'Cancel',
-      'common.loading': 'Loading…',
-      'common.actions': 'Actions',
-      'common.show_pw': 'Show/Hide Password'
-    }
-  };
+  var I18N = ${JSON.stringify(I18N)};
 
   var _lang = 'en';
 
@@ -1352,9 +937,15 @@ export const ADMIN_UI = `<!DOCTYPE html>
       }
     }
     if (_loginMsgRender) setLoginMsg(_loginMsgRender);
-    loadStatus();
-    loadKeys();
-    loadProbe();
+    // Only poll when signed in: an unauthenticated visitor switching languages
+    // would otherwise fire three requests that all come back 401.
+    //
+    // 仅在已登录时轮询：未登录访客切换语言会白白发出三个 401 请求。
+    if (_authed) {
+      loadStatus();
+      loadKeys();
+      loadProbe();
+    }
     toast(t('set.lang_saved'), 'ok');
   }
 
@@ -1405,11 +996,22 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   async function api(path, opts) {
     opts = opts || {};
-    var res = await fetch(path, {
-      method: opts.method || 'GET',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: opts.body ? JSON.stringify(opts.body) : undefined
-    });
+    var res;
+    try {
+      res = await fetch(path, {
+        method: opts.method || 'GET',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: opts.body ? JSON.stringify(opts.body) : undefined
+      });
+    } catch (e) {
+      // A transport failure (offline, DNS, aborted) has no error code from the
+      // server: map it to a fixed key so callers show a localized message instead
+      // of the raw "Failed to fetch".
+      //
+      // 传输层失败（离线、DNS、中断）没有服务端错误码：映射为固定键，调用方显示
+      // 本地化消息，而不是原始的 "Failed to fetch"。
+      throw new Error('err.network');
+    }
     var data = {};
     try { data = await res.json(); } catch (e) {}
     if (res.status === 401 && data.needLogin) {
@@ -1420,7 +1022,15 @@ export const ADMIN_UI = `<!DOCTYPE html>
       if (wasAuthed) toast(t('msg.session_expired'), 'warn');
       throw new Error('not authed');
     }
-    if (!data.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    if (!data.ok) {
+      var e = new Error(data.error || ('HTTP ' + res.status));
+      // Carry the structured payload (needForce, test, ...) so callers can branch
+      // on it instead of re-fetching.
+      //
+      // 携带结构化负载（needForce、test 等），调用方可据此分支，而无需重新请求。
+      e.payload = data;
+      throw e;
+    }
     return data;
   }
 
@@ -1953,52 +1563,25 @@ export const ADMIN_UI = `<!DOCTYPE html>
       .finally(function () { setLoading(btn, false); });
   }
 
-  // The round counters are four-way now, but the banner copy only has three slots;
-  // "partial" is folded into "failed" so the message stays truthful and short.
-  // The pending count is what a truncated round still owes the queue: the free plan's
-  // 40 subrequests cover only ~4 models, so "4 probed" is the normal answer there and
-  // must not be announced as a finished round.
-  //
-  // 轮次计数现在是四态，而横幅文案只有三个占位；partial 折进 failed，既不撒谎也不
-  // 让文案变长。pending 是被预算截断的轮次仍欠队列的模型数：免费层 40 个子请求只够
-  // 约 4 个模型，因此"探完 4 个"在那里是常态，绝不能被宣布成"整轮已完成"。
-  function probeBannerParams(data) {
-    var stats = data.stats || data;
-    var probed = stats.ok || 0;
-    var unknown = stats.unprobeable || 0;
-    var failed = (stats.failed || 0) + (stats.partial || 0);
-    return {
-      probed: probed,
-      unknown: unknown,
-      failed: failed,
-      used: stats.budgetUsed || 0,
-      pending: Math.max(0, (stats.total || 0) - probed - unknown - failed)
-    };
-  }
-
   function refreshProbe(btn, model) {
     setLoading(btn, true);
     clearBanner('mp-banner');
     api('/admin/api/probe/refresh', { method: 'POST', body: model ? { model: model } : {} })
-      .then(function (data) {
-        // The auth-expired flag lives in the round stats; older builds also echoed it
-        // at the top level, so read both to stay compatible either way.
+      .then(function () {
+        // Ack-and-poll: the round runs on the coordinator's alarm in the background
+        // (a full round can outlive an HTTP invocation), so the banner only announces
+        // the submission and the table refreshes on timers. Persistent failures still
+        // surface via reportProbeFailures() on each refresh.
         //
-        // 凭证失效标记在轮次统计里；旧构建也曾在最外层回传，因此两者都读以保持兼容。
-        var stats = data.stats || data;
-        var params = probeBannerParams(data);
-        var authExpired = stats.authExpired === true || data.authExpired === true;
-        // A truncated round is not a finished one: the coordinator keeps probing with
-        // its own alarm, so the banner must say so instead of claiming "done".
-        //
-        // 被截断的轮次不等于已完成的轮次：协调者会用自身 alarm 继续探测，因此横幅必须
-        // 说明这一点，而不是宣布"完成"。
-        var truncated = stats.truncated === true;
-        var type = authExpired ? 'warn' : (truncated ? 'warn' : 'ok');
-        var key = authExpired ? 'mp.refresh_auth' : (truncated ? 'mp.refresh_truncated' : 'mp.refresh_done');
-        setBanner('mp-banner', type, function () { return tfmt(key, params); });
+        // 应答后轮询：轮次由协调者的 alarm 在后台执行（完整轮次可能超出一次 HTTP
+        // 调用的生存期），因此横幅只宣布"已提交"，表格改由定时器刷新。持续性失败
+        // 仍会在每次刷新时经 reportProbeFailures() 呈现。
+        setBanner('mp-banner', 'info', function () { return t('mp.refresh_accepted'); });
         _probeRoundBanner = true;
         loadProbe();
+        [3, 10, 25, 45].forEach(function (seconds) {
+          setTimeout(function () { if (_authed) loadProbe(); }, seconds * 1000);
+        });
       })
       .catch(function (err) {
         _probeRoundBanner = false;
@@ -2102,17 +1685,38 @@ export const ADMIN_UI = `<!DOCTYPE html>
       .finally(function () { setLoading(btn, false); });
   }
 
-  function importSession(btn) {
+  function importSession(btn, force) {
     setLoading(btn, true);
     clearBanner('session-banner');
-    api('/admin/api/session', { method: 'POST', body: { json: $('session-json').value, test: true, save: true } })
+    api('/admin/api/session', {
+      method: 'POST',
+      // force: true only after the operator confirms the failed connectivity test
+      // — the server refuses to overwrite a (possibly still working) session on a
+      // dead test otherwise.
+      //
+      // force: true 仅在运维确认连通性测试失败后附加——否则服务端会拒绝在测试未过时
+      // 覆盖（可能仍可用的）现有 Session。
+      body: { json: $('session-json').value, test: true, save: true, force: force === true }
+    })
       .then(function (data) {
         setBanner('session-banner', 'ok', function () {
           return t('up.import_ok') + (data.test ? ' ' + testDetail(data.test) : '') + t('up.import_summary') + data.summary;
         });
         loadStatus();
       })
-      .catch(function (err) { setBanner('session-banner', 'err', function () { return etext(err.message); }); })
+      .catch(function (err) {
+        // The server refused the overwrite because the test failed: ask once, and
+        // retry with force when the operator confirms.
+        //
+        // 服务端因测试未通过而拒绝覆盖：询问一次，运维确认后携带 force 重试。
+        if (err && err.payload && err.payload.needForce) {
+          setLoading(btn, false);
+          if (confirm(t('up.import_force_confirm'))) { importSession(btn, true); }
+          else { setBanner('session-banner', 'warn', function () { return etext('err.session_test_failed'); }); }
+          return;
+        }
+        setBanner('session-banner', 'err', function () { return etext(err.message); });
+      })
       .finally(function () { setLoading(btn, false); });
   }
 
