@@ -203,8 +203,6 @@ interface ProbeModelView {
 /** 管理端看到的整个缓存视图。 */
 export interface ProbeCoordinatorView {
   models: ProbeModelView[];
-  cached: number;
-  now: number;
   /** The queue's health (state, failure streak, last success). */
   /** 队列健康（状态、连续失败计数、最近成功时刻）。 */
   health: ProbeHealth;
@@ -597,16 +595,15 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
       .all()
       .map(([id, probe]) => toView(id, probe))
       .sort((a, b) => a.id.localeCompare(b.id));
-    return { models, cached: this.cache.size, now, health: this.health(now) };
+    return { models, health: this.health(now) };
   }
 
-  /** The health record plus the cache size -- what `/admin/api/status` needs without
-   *  paying for the whole model table (see `view`). */
-  /** 健康记录加上缓存条目数——`/admin/api/status` 需要的东西，而不必为整张模型表买单
-   *  （见 `view`）。 */
-  async healthView(): Promise<{ health: ProbeHealth; cached: number }> {
+  /** The health record -- what `/admin/api/status` needs without paying for the whole
+   *  model table (see `view`). */
+  /** 健康记录——`/admin/api/status` 需要的东西，而不必为整张模型表买单（见 `view`）。 */
+  async healthView(): Promise<ProbeHealth> {
     this.ensureLoaded();
-    return { health: this.health(), cached: this.cache.size };
+    return this.health();
   }
 
   /** The console deleted the session: stop the queue at once, and say why. A later round

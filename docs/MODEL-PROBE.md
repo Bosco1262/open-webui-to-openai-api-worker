@@ -22,7 +22,7 @@ model probe cache*) and its follow-up refinement commit.
 | Cache storage | `model_probe_cache.json` (version 2) | The `ModelProbeCoordinator` DO's SQLite (one row per model), exportable in the same JSON shape |
 | Refresh orchestration | `app.py::_refresh_model_probe` (concurrency + Semaphore) | DO serial + budget sharding + self-continuing alarm |
 | Re-probe triggers | Fingerprint change / backoff expiry / manual | Same (**no time-based TTL**; plus an optional scheduled patrol, off by default) |
-| Queue health | None (a dead session retries forever) | **Permanent failures suspend the queue** after `AUTH_FAIL_SUSPEND_THRESHOLD=3` consecutive rejections (only permanent kinds count: no session / upstream 401-403); the console shows the state on the dashboard and next to the session summary, and re-importing a session or a green connectivity check resumes it |
+| Queue health | None (a dead session retries forever) | **Permanent failures suspend the queue** after `AUTH_FAIL_SUSPEND_THRESHOLD=3` consecutive rejections (only permanent kinds count: no session / upstream 401-403); the console shows the state as the session's own badge -- the dashboard's "Session Credential" card and the upstream page's "Status" field (replacing the bare "Imported" they used to carry) -- and re-importing a session or a green connectivity check resumes it |
 | Served contract | `/v1/models` fields, the `x_open_webui` envelope, `GET /v1/models/{id}`, 400 self-heal | Same |
 
 Renames are hard, with no compatibility layer (decision D11), so old file names / KV keys /

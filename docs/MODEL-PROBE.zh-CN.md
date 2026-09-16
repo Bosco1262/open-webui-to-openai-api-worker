@@ -21,7 +21,7 @@ README 只描述最终行为，本文档记录"**为什么**是这样"。
 | 缓存存放 | `model_probe_cache.json`（version 2） | DO `ModelProbeCoordinator` 的 SQLite（每模型一行），可导出为同样的 JSON 形状 |
 | 刷新编排 | `app.py::_refresh_model_probe`（并发 + Semaphore） | DO 串行 + 预算分片 + alarm 自续 |
 | 重探判据 | 指纹变化 / 退避到期 / 手动 | 同（**无时间型 TTL**；另有可选「定时巡检」，默认关闭） |
-| 队列健康 | 无（会话失效后会一直重试） | **永久类失败连续 `AUTH_FAIL_SUSPEND_THRESHOLD=3` 次后挂起队列**（只统计永久类：无 session / 上游 401-403）；控制台在仪表盘与 Session 摘要旁显示状态；重新导入 session 或连通性检测通过即恢复 |
+| 队列健康 | 无（会话失效后会一直重试） | **永久类失败连续 `AUTH_FAIL_SUSPEND_THRESHOLD=3` 次后挂起队列**（只统计永久类：无 session / 上游 401-403）；控制台把该状态显示为 Session 自身的徽标——仪表盘「Session 凭证」卡与上游页「状态」字段（取代原先只写「已导入」的那个徽标）；重新导入 session 或连通性检测通过即恢复 |
 | 对外契约 | `/v1/models` 字段、`x_open_webui` 信封、`GET /v1/models/{id}`、400 自愈 | 同 |
 
 命名硬改名、不做兼容层（决策 D11），因此旧文件名 / 旧 KV 键 / 旧管理端点全部失效。

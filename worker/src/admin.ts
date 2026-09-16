@@ -28,7 +28,7 @@ import {
   readProbeSettings,
   writeProbeSettings,
 } from "./probeSettings.ts";
-import { AUTH_FAIL_SUSPEND_THRESHOLD, RoundUnavailable } from "./probeRuntime.ts";
+import { RoundUnavailable } from "./probeRuntime.ts";
 import type { ProbeHealth } from "./probeRuntime.ts";
 import type { ModelProbeCoordinator, ProbeCoordinatorView } from "./probeCoordinator.ts";
 import { clearTouchMarker, deleteApiKeyUsage, getTouchInterval, readApiKeyUsages, setTouchInterval } from "./touch.ts";
@@ -713,10 +713,8 @@ async function handleProbeInfo(env: Env): Promise<Response> {
     //
     // 健康状态与表格同行：空表时控制台才能解释原因（"探测已暂停：上游拒绝了凭证"），而不是
     // 什么都不显示。
-    health: view ? healthPayload(view.health, view.cached) : null,
+    health: view ? view.health : null,
     models: view?.models ?? [],
-    cached: view?.cached ?? 0,
-    now: view?.now ?? Date.now() / 1000,
   });
 }
 
@@ -855,25 +853,14 @@ function probeCoordinatorFor(env: Env, session: StoredSession | null): DurableOb
   return env.PROBE.getByName(session.base_url);
 }
 
-/** The health payload the console renders: the coordinator's record plus the two values
- *  the UI would otherwise have to guess (how many models are cached, and after how many
- *  consecutive rejections probing pauses). */
-/** 控制台渲染的健康负载：协调者的记录，外加两个否则要由 UI 猜的值（缓存了多少模型、连续被拒
- *  多少次后暂停探测）。 */
-export interface ProbeHealthPayload extends ProbeHealth {
-  cached_models: number;
-  suspend_threshold: number;
-}
-
-function healthPayload(health: ProbeHealth, cached: number): ProbeHealthPayload {
-  return { ...health, cached_models: cached, suspend_threshold: AUTH_FAIL_SUSPEND_THRESHOLD };
-}
-
 /** The health for `/admin/api/status` (one cheap RPC; null when there is nothing to ask --
- *  no session, or the coordinator did not answer). */
+ *  no session, or the coordinator did not answer). The coordinator's record travels
+ *  verbatim: the console renders its state as the session badges, and nothing else about
+ *  the queue is the deployment's business to invent. */
 /** `/admin/api/status` 用的健康数据（一次廉价 RPC；无对象可问时返回 null——没有 session，
- *  或协调者没有回应）。 */
-async function probeHealthFor(env: Env, session: StoredSession | null): Promise<ProbeHealthPayload | null> {
+ *  或协调者没有回应）。协调者的记录原样透出：控制台把其中的状态渲染成 Session 徽标，队列的
+ *  其它一切都不是部署层有权凭空补上的东西。 */
+async function probeHealthFor(env: Env, session: StoredSession | null): Promise<ProbeHealth | null> {
   // The lookup is inside the try on purpose: a binding that cannot even name the object
   // (no session, a stub namespace in a test, a binding mistake) must degrade to "unknown
   // health", never break the status page.
@@ -883,8 +870,7 @@ async function probeHealthFor(env: Env, session: StoredSession | null): Promise<
   try {
     const coordinator = probeCoordinatorFor(env, session);
     if (!coordinator) return null;
-    const snapshot = await coordinator.healthView();
-    return healthPayload(snapshot.health, snapshot.cached);
+    return await coordinator.healthView();
   } catch (err) {
     console.error(
       JSON.stringify({

@@ -712,7 +712,7 @@ test("a setup whose write does not land is refused, not handed a session", async
 // --------------------------------------------------------------------------- //
 
 /** A coordinator stub that reports a health record and counts the resume/suspend calls. */
-function healthProbe(health: Record<string, unknown>, cached = 3): {
+function healthProbe(health: Record<string, unknown>): {
   namespace: DurableObjectNamespace;
   resumes: () => number;
   removals: () => number;
@@ -729,8 +729,8 @@ function healthProbe(health: Record<string, unknown>, cached = 3): {
     ...health,
   };
   const stub = {
-    healthView: async () => ({ health: record, cached }),
-    view: async () => ({ models: [], cached, now: 4, health: record }),
+    healthView: async () => record,
+    view: async () => ({ models: [], health: record }),
     resumeProbes: async (): Promise<void> => {
       resumes += 1;
     },
@@ -757,12 +757,14 @@ test("status carries the queue's health, and the public branch still does not", 
   const anon = (await anonymous.json()) as Record<string, unknown>;
   assert.equal("health" in anon, false);
 
+  // The coordinator's record travels verbatim -- the console renders its state and needs
+  // nothing the deployment would have had to invent on top of it.
+  //
+  // 协调者的记录原样透出——控制台渲染其中的状态，不需要部署层在其上凭空补任何东西。
   const authed = (await (await get(env, "/admin/api/status")).json()) as {
-    health: { state: string; suspend_threshold: number; cached_models: number };
+    health: { state: string };
   };
   assert.equal(authed.health.state, "suspended");
-  assert.equal(authed.health.suspend_threshold, 3, "the UI must not hardcode the threshold");
-  assert.equal(authed.health.cached_models, 3);
 });
 
 test("status survives a coordinator that cannot even be named", async () => {

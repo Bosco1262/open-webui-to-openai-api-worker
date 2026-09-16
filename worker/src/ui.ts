@@ -238,11 +238,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
   /* ---------- Widgets ---------- */
   /* ---------- 通用组件 ---------- */
   .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-  /* The dashboard got a fourth card (probe health); the session card keeps its own
-     two-column override inline. */
-  /* 仪表盘多了第四张卡（探测健康）；Session 卡片保留它自己的两列内联覆盖。 */
-  .stats-4 { grid-template-columns: repeat(4, 1fr); }
-  .health-line { font-size: 12.5px; color: var(--text-1); margin-top: 12px; line-height: 1.7; }
   .stat {
     background: rgba(26, 34, 51, 0.6); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 16px; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
@@ -403,7 +398,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     .side-item { width: auto; flex: none; padding: 9px 12px; white-space: nowrap; }
     .side-item .side-badge { display: none; }
     .content { padding: 18px 16px 40px; }
-    .stats, .stats-4 { grid-template-columns: repeat(2, 1fr); }
+    .stats { grid-template-columns: repeat(2, 1fr); }
     .grid2 { grid-template-columns: 1fr; }
   }
 </style>
@@ -535,7 +530,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
             <p data-i18n="dash.subtitle">代理服务整体运行状态一览。</p>
           </div>
 
-          <div class="stats stats-4" style="margin-bottom:18px;">
+          <div class="stats" style="margin-bottom:18px;">
             <div class="stat">
               <div class="label" data-i18n="stat.session">Session 凭证</div>
               <div class="value"><span id="st-session">—</span></div>
@@ -550,11 +545,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
               <div class="label" data-i18n="stat.keys">API Key 数量</div>
               <div class="value" id="st-keys">—</div>
               <div class="sub" data-i18n="stat.keys_sub">生成的客户端密钥</div>
-            </div>
-            <div class="stat">
-              <div class="label" data-i18n="health.title">探测健康</div>
-              <div class="value"><span id="st-health">—</span></div>
-              <div class="sub" id="st-health-sub"></div>
             </div>
           </div>
 
@@ -601,11 +591,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
                 <div class="sub" id="up-upstream-sub"></div>
               </div>
             </div>
-            <!-- Probe health, right after the "imported" badge: "imported" alone hides
-                 the case that matters most -- credentials the upstream is rejecting. -->
-            <!-- 探测健康，紧跟"已导入"之后：只显示"已导入"会掩盖最要紧的情形——上游正在
-                 拒绝这份凭证。 -->
-            <div class="health-line" id="up-health"></div>
             <div class="banner" id="status-banner"></div>
           </div>
 
@@ -1648,6 +1633,14 @@ export const ADMIN_UI = `<!DOCTYPE html>
     return '<span class="badge ' + type + '">' + text + '</span>';
   }
 
+  // The fallback badge, for when the queue has no health to report (no session, or the
+  // coordinator did not answer). A payload, when there is one, is rendered by renderHealth
+  // on top of this -- the health states subsume "imported": a credential the upstream
+  // rejects is still "imported", and must not read as such.
+  //
+  // 兜底徽标，用于队列没有健康可报时（没有 session，或协调者没有回应）。有负载时由
+  // renderHealth 在这之上重绘——健康状态涵盖"已导入"：被上游拒绝的凭证也仍然"已导入"，
+  // 因此绝不能只显示它。
   function fillSessionStatus(prefix, status) {
     if (status.session && status.session.imported) {
       $(prefix + '-session').innerHTML = status.session.usable ? badge('ok', t('st.imported')) : badge('err', t('st.unusable'));
@@ -1664,17 +1657,6 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   // ---------- probe health ----------
   // ---------- 探测健康 ----------
-  /** "3 minutes ago" / "从未成功", in the active language. */
-  /** 按当前语言输出"3 分钟前"/"从未成功"。 */
-  function agoText(unixSeconds) {
-    if (!unixSeconds) return t('health.never');
-    var seconds = Math.max(0, Math.floor(Date.now() / 1000 - unixSeconds));
-    if (seconds < 60) return t('health.ago_now');
-    if (seconds < 3600) return tfmt('health.ago_minutes', { n: Math.floor(seconds / 60) });
-    if (seconds < 86400) return tfmt('health.ago_hours', { n: Math.floor(seconds / 3600) });
-    return tfmt('health.ago_days', { n: Math.floor(seconds / 86400) });
-  }
-
   var HEALTH_BADGE = {
     ok: 'ok',
     degraded: 'warn',
@@ -1690,47 +1672,27 @@ export const ADMIN_UI = `<!DOCTYPE html>
   // 页面共同依据的那一份）。
   var _probeHealth = null;
 
-  /** Render the queue's health into the dashboard card and the session card. One
-   *  function for both, so the two can never disagree. */
-  /** 把队列健康渲染到仪表盘卡片与 Session 卡片。两处共用一个函数，因此不可能各说各话。 */
+  /** Render the queue's health as the state badge of the session cards -- the dashboard's
+   *  "Session Credential" card and the upstream page's "Status" field, which is where the
+   *  credential state already sits. The badge is the ONLY thing this replaces: the sub line
+   *  keeps the credential summary it has always carried. One function over both prefixes,
+   *  so the two can never disagree. */
+  /** 把队列健康渲染成 Session 卡片的状态徽标——仪表盘的「Session 凭证」与上游页的「状态」
+   *  字段，那正是凭证状态本来所在的位置。这里被替换的**只有**徽标：副标题行始终保留它原先
+   *  承载的凭证摘要。两个前缀共用一个函数，因此两处不可能各说各话。 */
   function renderHealth(health) {
     _probeHealth = health || null;
-    var dashValue = $('st-health');
-    var dashSub = $('st-health-sub');
-    var line = $('up-health');
-    if (!health) {
-      // No session yet, or the coordinator did not answer: say nothing rather than
-      // invent a state.
-      //
-      // 还没有 session，或协调者没有回应：什么都不说，绝不凭空造一个状态。
-      if (dashValue) dashValue.textContent = '—';
-      if (dashSub) dashSub.textContent = '';
-      if (line) line.innerHTML = '';
-      return;
-    }
+    // No payload (no session yet, or the coordinator did not answer): the badge
+    // fillSessionStatus() just wrote stays, rather than inventing a state.
+    //
+    // 没有负载（还没有 session，或协调者没有回应）：保留 fillSessionStatus() 刚写下的徽标，
+    // 绝不凭空造一个状态。
+    if (!health) return;
     var state = health.state || 'ok';
-    var badgeType = HEALTH_BADGE[state] || 'gray';
-    var label = t('health.' + state);
-    if (dashValue) dashValue.innerHTML = badge(badgeType, label);
-    var ago = agoText(health.last_success_at);
-    var sub;
-    if (state === 'suspended') {
-      sub = tfmt('health.sub_suspended', {
-        since: health.since ? new Date(health.since * 1000).toLocaleString() : '—'
-      });
-    } else if (state === 'no_session') {
-      sub = t('health.sub_no_session');
-    } else if (state === 'auth_rejected') {
-      sub = tfmt('health.sub_auth', { n: health.consecutive_permanent_failures || 0, max: health.suspend_threshold || 3 });
-    } else if (state === 'degraded') {
-      sub = tfmt('health.sub_degraded', { ago: ago });
-    } else {
-      sub = tfmt('health.sub_ok', { ago: ago });
-    }
-    if (dashSub) {
-      dashSub.textContent = sub + (health.cached_models ? ' · ' + tfmt('health.cached', { n: health.cached_models }) : '');
-    }
-    if (line) line.innerHTML = t('health.prefix') + badge(badgeType, label) + ' ' + esc(sub);
+    var stateBadge = badge(HEALTH_BADGE[state] || 'gray', t('health.' + state));
+    ['st', 'up'].forEach(function (prefix) {
+      $(prefix + '-session').innerHTML = stateBadge;
+    });
   }
 
   function loadStatus() {
@@ -1748,8 +1710,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
       // 上游页面状态
       fillSessionStatus('up', status);
 
-      // probe health (dashboard card + the session card's line)
-      // 探测健康（仪表盘卡片 + Session 卡片那一行）
+      // probe health (it takes over the session cards' state badge, on both pages)
+      // 探测健康（它会接管两个页面上 Session 卡片的状态徽标）
       renderHealth(status.health);
 
       // The key count is intentionally NOT rendered here: it comes from the
