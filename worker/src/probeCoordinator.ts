@@ -50,19 +50,24 @@ import {
   RoundUnavailable,
   WAKE_MAX_MS,
   WAKE_MIN_MS,
+  applyProbeFailure,
+  applyProbeSuccess,
   canJoinRound,
   createTtlCache,
   heartbeatDue,
   heartbeatNextFromMeta,
+  isProbeQueueStopped,
   nextWakeAtSeconds,
   pendingRoundFromMeta,
   pendingRoundMeta,
   prefixCandidates,
+  probeHealthFromMeta,
   refsFromCards,
   retryWakeAtSeconds,
   retryWakeDelayMs,
+  roundUnavailableCodeFor,
 } from "./probeRuntime.ts";
-import type { RoundRequest } from "./probeRuntime.ts";
+import type { ProbeFailureKind, ProbeHealth, RoundRequest } from "./probeRuntime.ts";
 import { SqliteProbeStore } from "./probeStore.ts";
 import {
   ProbeAuthExpired,
@@ -75,7 +80,12 @@ import type { ProbeAnswer, ProbeTransport } from "./probeRound.ts";
 import { readProbeSettings } from "./probeSettings.ts";
 import { getSession } from "./kv.ts";
 import { fetchUpstream, sessionHeaders, sessionIsUsable } from "./session.ts";
-import { AUTH_FAILURE_CODES, PREFIX_CANDIDATES, confirmUpstreamPrefix } from "./upstream.ts";
+import {
+  AUTH_FAILURE_CODES,
+  PREFIX_CANDIDATES,
+  confirmUpstreamPrefix,
+  shouldForgetPrefixAfterModels,
+} from "./upstream.ts";
 import {
   INSTANCE_CONFIG_PATH,
   INSTANCE_CONFIG_TIMEOUT_MS,
@@ -124,6 +134,20 @@ const META_REQUESTED_ROUND_KEY = "requested_round";
  *  的刻度会在每次唤醒时被重新推导成"一个完整间隔之后"，永远不会真正触发。 */
 const META_HEARTBEAT_KEY = "heartbeat_next";
 
+/**
+ * Bookkeeping key for the queue's health record (state, failure streak, last success).
+ *
+ * Persisted for the same reason as the heartbeat tick, plus one more: the console reads
+ * it to explain WHY probing stopped, and an eviction must not turn "suspended because the
+ * credentials were rejected" back into a running queue.
+ *
+ * 队列健康记录（状态、连续失败计数、最近成功时刻）的记账键。
+ *
+ * 持久化的理由与心跳刻度相同，另加一条：控制台靠它解释"探测为什么停了"，而一次驱逐绝不能把
+ * "因凭证被拒而挂起"变回一个正在跑的队列。
+ */
+const META_HEALTH_KEY = "probe_health";
+
 /** How soon to continue when a round ran out of budget (milliseconds). */
 /** 预算耗尽后多久继续（毫秒）。 */
 const ALARM_CONTINUE_MS = 2_000;
@@ -131,6 +155,18 @@ const ALARM_CONTINUE_MS = 2_000;
 /** How long to wait before retrying when the model list itself was unreachable. */
 /** 连模型列表都拿不到时，隔多久重试。 */
 const ALARM_RETRY_MS = 300_000;
+
+/**
+ * Whether a thrown value is a `RoundUnavailable` — locally or after crossing the RPC
+ * boundary (where only `name` and `message` survive, so `instanceof` cannot be used).
+ *
+ * 抛出的值是否为 `RoundUnavailable`——本地实例，或跨过 RPC 边界之后（那里只保留
+ * `name` 与 `message`，因此不能用 `instanceof`）。
+ */
+function isRoundUnavailable(err: unknown): boolean {
+  if (err instanceof RoundUnavailable) return true;
+  return err instanceof Error && err.name.startsWith("RoundUnavailable");
+}
 
 /** How long the probe settings are cached inside the coordinator (milliseconds).
  *
@@ -169,11 +205,30 @@ export interface ProbeCoordinatorView {
   models: ProbeModelView[];
   cached: number;
   now: number;
+  /** The queue's health (state, failure streak, last success). */
+  /** 队列健康（状态、连续失败计数、最近成功时刻）。 */
+  health: ProbeHealth;
 }
 
 /** A list of (modelId, engine fingerprint) pairs, as sent over RPC. */
 /** 通过 RPC 传递的 (模型 id, 引擎指纹) 列表。 */
 type ModelRefs = Array<[string, string]>;
+
+/**
+ * Why the model list could not be fetched, or the list itself.
+ *
+ * The distinction is the whole point of the health feature: "the route exists and the
+ * session is dead" (401/403) is permanent and may suspend the queue, while "the upstream
+ * is having a bad minute" must keep retrying. Both used to collapse into a bare `null`.
+ *
+ * 模型列表为什么拉不到，或者列表本身。
+ *
+ * 这个区分正是健康功能的要点："路由存在、会话已死"（401/403）是永久性的、可以把队列挂起；
+ * 而"上游这一分钟不舒服"必须继续重试。此前两者都被压成一个 `null`。
+ */
+type ModelRefsOutcome =
+  | { ok: true; refs: ModelRefs }
+  | { ok: false; kind: ProbeFailureKind; error: string };
 
 /** Options for `present`. */
 /** `present` 的选项。 */
@@ -220,6 +275,12 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
   /** Whether a background /api/config refresh is in flight (see touchInstanceMeta). */
   /** 是否已有一次后台 /api/config 刷新在飞行中（见 touchInstanceMeta）。 */
   private instanceRefreshRunning = false;
+  /** The queue's health record, loaded lazily from meta and kept in sync on every write
+   *  (the console reads it through `view()`, and the alarm/suspend decisions read it
+   *  here). */
+  /** 队列的健康记录：从 meta 懒加载，每次写入都同步更新（控制台通过 `view()` 读它，
+   *  alarm 与挂起判定也读同一份）。 */
+  private healthRecord: ProbeHealth | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -283,6 +344,14 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
         : this.touchInstanceMeta(options.defaultModelCapabilities ?? null);
 
     if (!settings.enabled || models.length === 0) return { fields, instanceMeta };
+
+    // A stopped queue stays stopped even while clients keep asking: otherwise the wait
+    // path would restart a round on every /v1/models request and the suspension would
+    // simply not exist. Cached facts keep being served -- they are what the client gets.
+    //
+    // 停摆的队列在客户端持续请求下依然停摆：否则等待路径会在每个 /v1/models 请求上重新起一轮，
+    // 挂起就形同虚设。缓存事实照常对外——客户端拿到的就是它们。
+    if (isProbeQueueStopped(this.health())) return { fields, instanceMeta };
 
     const missing = models.filter(([modelId, fingerprint]) =>
       this.cache.needsProbe(modelId, fingerprint),
@@ -464,8 +533,16 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
   async refreshInBackground(modelId: string | null): Promise<void> {
     this.ensureLoaded();
     const settings = await this.probeSettingsCache();
-    const models = await this.fetchModelRefs(settings);
-    if (!models) throw new RoundUnavailable("models_failed");
+    const fetched = await this.fetchModelRefs(settings);
+    if (!fetched.ok) {
+      // This is an explicit operator action, so it always TRIES (a suspended queue does
+      // not block it) -- and its outcome is what can revive the queue.
+      //
+      // 这是运维的显式动作，因此**总是**尝试（挂起不影响它）——而它的结果正是能救活队列的东西。
+      await this.noteRoundFailure(fetched.kind, fetched.error);
+      throw new RoundUnavailable(roundUnavailableCodeFor(fetched.kind));
+    }
+    const models = fetched.refs;
     if (modelId !== null && !models.some(([id]) => id === modelId)) {
       // A dedicated error NAME, not just a message: Durable Object RPC keeps only
       // `name` and `message` across the boundary, so the admin API matches on the
@@ -509,8 +586,10 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
     return true;
   }
 
-  /** Everything the admin console needs to render the probe table. */
-  /** 管理控制台渲染探测表所需的全部数据。 */
+  /** Everything the admin console needs to render the probe table (plus the queue's
+   *  health, so one call answers "what is cached" and "is this queue even running"). */
+  /** 管理控制台渲染探测表所需的全部数据（外加队列健康——一次调用同时回答"缓存了什么"与
+   *  "这个队列还在跑吗"）。 */
   async view(): Promise<ProbeCoordinatorView> {
     this.ensureLoaded();
     const now = Date.now() / 1000;
@@ -518,7 +597,65 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
       .all()
       .map(([id, probe]) => toView(id, probe))
       .sort((a, b) => a.id.localeCompare(b.id));
-    return { models, cached: this.cache.size, now };
+    return { models, cached: this.cache.size, now, health: this.health(now) };
+  }
+
+  /** The health record plus the cache size -- what `/admin/api/status` needs without
+   *  paying for the whole model table (see `view`). */
+  /** 健康记录加上缓存条目数——`/admin/api/status` 需要的东西，而不必为整张模型表买单
+   *  （见 `view`）。 */
+  async healthView(): Promise<{ health: ProbeHealth; cached: number }> {
+    this.ensureLoaded();
+    return { health: this.health(), cached: this.cache.size };
+  }
+
+  /** The console deleted the session: stop the queue at once, and say why. A later round
+   *  could only re-learn what we already know, and the console should not keep showing
+   *  "ok" until one happens to run. */
+  /** 控制台删除了 session：立即停掉队列并说明原因。之后再跑一轮也只能重新得知我们已知的事，
+   *  而控制台不该一直显示 "ok" 直到恰好有一轮跑起来。 */
+  async noteSessionRemoved(): Promise<void> {
+    this.ensureLoaded();
+    const now = Date.now() / 1000;
+    this.saveHealth(
+      applyProbeFailure(this.health(now), "no_session", "the session was deleted", now),
+    );
+    await this.suspendProbes("no_session");
+  }
+
+  /**
+   * Clear a suspension and give the queue another chance.
+   *
+   * Called when the operator has done the one thing that can fix a rejected credential:
+   * imported a session again (the admin API calls this after a successful import and
+   * after a successful connectivity check). It does NOT start a round by itself -- it
+   * re-arms the alarm, and the next round decides the state for real.
+   *
+   * 解除挂起，给队列再一次机会。
+   *
+   * 由运维完成了唯一能修复"凭证被拒"的动作后调用：重新导入 session（管理端在导入成功与连通性
+   * 检测成功后各调一次）。它本身**不**发起轮次——只重新排下 alarm，由下一次轮次给出真实结论。
+   */
+  async resumeProbes(): Promise<void> {
+    this.ensureLoaded();
+    const now = Date.now() / 1000;
+    const current = this.health(now);
+    if (!isProbeQueueStopped(current) && current.consecutive_permanent_failures === 0) return;
+    console.log(
+      JSON.stringify({ message: "probe queue resumed", previous_state: current.state }),
+    );
+    this.saveHealth(
+      applyProbeSuccess(
+        { ...current, consecutive_permanent_failures: 0 },
+        // Keep "degraded" honest: we have not run a round yet, so the state says "ok"
+        // until one reports otherwise.
+        //
+        // 保持 "degraded" 的诚实：此刻还没跑过轮次，因此状态先记 "ok"，由下一次轮次改写。
+        false,
+        now,
+      ),
+    );
+    await this.ctx.storage.setAlarm(Date.now() + WAKE_MIN_MS);
   }
 
   // ------------------------------------------------------------------ //
@@ -561,7 +698,28 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
    */
   async alarm(): Promise<void> {
     this.ensureLoaded();
-    if (this.round) return; // a request-driven round is already working
+    // A stopped queue has no alarm by construction; this is the belt for a suspension
+    // that landed while a wake was already queued.
+    //
+    // 停摆的队列在构造上就没有 alarm；这里是给"挂起落地时已有唤醒在排队"情形准备的保险带。
+    if (isProbeQueueStopped(this.health())) return;
+    // A request-driven round is already working: do not start a second one -- but do
+    // not silently swallow this wake either. An admin "probe now" writes its request
+    // marker and arms this alarm; if the in-flight round then ends as
+    // RoundUnavailable (dead session, unreachable model list), nothing else would ever
+    // consume that marker and the queue would sit idle until a client happened to
+    // arrive. Re-arming keeps the marker's promise.
+    //
+    // 已有请求驱动的轮次在跑：不再起第二轮——但也不能把这个唤醒静默吞掉。管理端
+    // 「立即探测」会写下请求标记并排下本 alarm；若在途轮次随后以 RoundUnavailable
+    // 结束（会话失效、模型列表不可达），就再没有东西会去消费那个标记，队列会一直闲到
+    // 恰好有客户端到来。重新排程才是对那个标记的兑现。
+    if (this.round) {
+      if (this.hasOwedRound()) {
+        await this.ctx.storage.setAlarm(Date.now() + ALARM_CONTINUE_MS);
+      }
+      return;
+    }
     // Everything after the early exits runs inside the try: a KV failure while
     // reading the settings or fetching the model list is exactly the case this
     // handler must survive, and an exception escaping it would leave the queue with
@@ -632,16 +790,15 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
           error: err instanceof Error ? err.message : String(err),
         }),
       );
-      // A missing session is permanent until the operator re-imports: stop the
-      // alarm instead of looping every five minutes (a deleted/rotated session
-      // must not leave a zombie wake loop).
+      // A permanent failure (no session, or credentials the upstream rejects) is the one
+      // case that must NOT loop: `noteRoundFailure` already stopped the queue once the
+      // streak reached the threshold, and re-arming here would undo that. Everything
+      // else -- 5xx, timeouts, an unreadable model list -- retries on the usual delay.
       //
-      // session 缺失在运维重新导入前是永久状态：停止 alarm，而不是每五分钟循环
-      // （被删除/更换的 session 不能留下僵尸唤醒循环）。
-      if (err instanceof RoundUnavailable && err.code === "session_missing") {
-        await this.stopAlarmForMissingSession();
-        return;
-      }
+      // 永久类失败（无 session，或上游持续拒绝凭证）是唯一**不该**循环的情况：连续失败达到阈值
+      // 时 `noteRoundFailure` 已经停掉了队列，在这里重排会让它前功尽弃。其余一切——5xx、超时、
+      // 读不懂的模型列表——按常规延迟重试。
+      if (isProbeQueueStopped(this.health())) return;
       await this.ctx.storage.setAlarm(Date.now() + ALARM_RETRY_MS);
     }
   }
@@ -692,6 +849,79 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
     this.cache.load(this.store.loadAll());
   }
 
+  // ------------------------------------------------------------------ //
+  // Queue health (why the console shows "probing is paused")
+  // 队列健康（控制台为什么显示"探测已暂停"）
+  // ------------------------------------------------------------------ //
+
+  /** The persisted health record (loaded once per instance, updated on every write). */
+  /** 已落盘的健康记录（每实例加载一次，每次写入即更新）。 */
+  private health(now: number = Date.now() / 1000): ProbeHealth {
+    if (!this.healthRecord) {
+      this.healthRecord = probeHealthFromMeta(this.store.readMeta(META_HEALTH_KEY), now);
+    }
+    return this.healthRecord;
+  }
+
+  private saveHealth(next: ProbeHealth): void {
+    this.healthRecord = next;
+    this.store.writeMeta(META_HEALTH_KEY, JSON.stringify(next));
+  }
+
+  /**
+   * Record a round that actually ran. The credentials work, so the permanent-failure
+   * run ends here -- `degraded` only says the round itself left models unresolved.
+   *
+   * 记录一次真正跑完的轮次。凭证是好的，因此连续永久失败到此为止——`degraded` 只表示该轮
+   * 留下了未探清的模型。
+   */
+  private noteRoundSuccess(degraded: boolean): void {
+    this.saveHealth(applyProbeSuccess(this.health(), degraded, Date.now() / 1000));
+  }
+
+  /**
+   * Record a round that could not run (or ran and was rejected).
+   *
+   * A permanent failure that reaches the threshold suspends the queue right here: the
+   * alarm is deleted and the owed markers are dropped, so a dead credential stops costing
+   * subrequests until someone imports a session again.
+   *
+   * 记录一次无法启动（或启动后被拒绝）的轮次。
+   *
+   * 永久类失败达到阈值即**就地**挂起队列：删掉 alarm、丢弃欠账标记，使失效的凭证不再持续消耗
+   * 子请求，直到有人重新导入 session。
+   */
+  private async noteRoundFailure(kind: ProbeFailureKind, error: string): Promise<void> {
+    const now = Date.now() / 1000;
+    const next = applyProbeFailure(this.health(now), kind, error, now);
+    this.saveHealth(next);
+    if (next.state === "suspended" || next.state === "no_session") {
+      await this.suspendProbes(next.state === "suspended" ? "auth_rejected" : "no_session");
+    }
+  }
+
+  /**
+   * Stop the queue and drop whatever it owed.
+   *
+   * Two callers, one meaning: with no session, or with credentials the upstream keeps
+   * rejecting, the queue can do nothing until an operator acts. A surviving marker would
+   * only make the next alarm wake into the same dead end, and a live alarm would keep
+   * spending subrequests to re-learn it. `resumeProbes()` (import / connectivity check)
+   * is the way back.
+   *
+   * 停掉队列，并丢掉它欠下的工作。
+   *
+   * 两个调用方、同一个含义：没有 session，或凭证明明在上游一直被拒，队列在运维介入前什么也做
+   * 不了。残留的标记只会让下一次 alarm 撞进同一个死胡同，而一个活着的 alarm 会不断花子请求去
+   * 重新得知这件事。回头路是 `resumeProbes()`（导入 / 连通性检测）。
+   */
+  private async suspendProbes(reason: "no_session" | "auth_rejected"): Promise<void> {
+    this.store.writeMeta(META_REQUESTED_ROUND_KEY, "");
+    this.store.writeMeta(META_PENDING_ROUND_KEY, "");
+    await this.ctx.storage.deleteAlarm();
+    console.warn(JSON.stringify({ message: "probe queue suspended", reason }));
+  }
+
   /**
    * Start (or join) a round, deduplicating concurrent callers. `models: null`
    * means "fetch the list when the round actually executes" (see runRound);
@@ -723,6 +953,21 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
     let task: Promise<ProbeRoundStats>;
     task = (previous ? previous.catch(() => null) : Promise.resolve(null))
       .then(() => this.runRound(models, force, settings, options))
+      .catch(async (err: unknown) => {
+        // A round that never got to START (no session, unreachable model list) still
+        // owes the queue a look: an admin request marker or a budget-truncated
+        // continuation may be waiting for it, and the caller of `present()` swallows
+        // this rejection -- so without a re-arm here the marker would sit unread until
+        // a client happened to arrive. Only the probe-loop failure inside `runRound`
+        // schedules its own wake; this covers everything thrown before it.
+        //
+        // 连启动都没启动的轮次（无会话、模型列表不可达）仍欠队列一次查看：管理端的请求
+        // 标记或被预算截断的续跑可能正在等它，而 `present()` 的调用方会吞掉这个
+        // rejection——因此这里不重排，标记就会一直没人读，直到恰好有客户端到来。
+        // runRound 内部只有探测循环失败会自行排程；这里补上它之前的所有抛出。
+        if (isRoundUnavailable(err)) await this.scheduleRetryWake();
+        throw err;
+      })
       .finally(() => {
         // Only the newest link may clear the fields: an older link clearing them would
         // let the next caller start a second round alongside the queued one.
@@ -746,9 +991,15 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
     options: { only?: readonly string[]; prune?: boolean; requireOnlyInList?: boolean } = {},
   ): Promise<ProbeRoundStats> {
     const session = await getSession(this.env);
-    if (!session || !sessionIsUsable(session)) throw new RoundUnavailable("session_missing");
+    if (!session || !sessionIsUsable(session)) {
+      await this.noteRoundFailure("no_session", "no session credentials are imported");
+      throw new RoundUnavailable("session_missing");
+    }
     const prefix = await this.resolvePrefix(session, settings);
-    if (!prefix) throw new RoundUnavailable("models_failed");
+    if (!prefix) {
+      await this.noteRoundFailure("transient", "the upstream API prefix could not be resolved");
+      throw new RoundUnavailable("models_failed");
+    }
 
     // The model list is fetched HERE, when the round actually executes — not when
     // it was requested. A round queued behind another one used to run on the list
@@ -761,8 +1012,17 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
     // 之后的轮次会拿着请求时刻捕获的列表运行：陈旧指纹触发无谓重探，prune 开启时
     // 陈旧列表还会删掉上游仍在的模型条目。唯一例外是代理的 present() 路径——它
     // 传入刚为客户端响应读取的列表（prune:false）。
-    const modelRefs = models ?? (await this.fetchModelRefs(settings));
-    if (!modelRefs) throw new RoundUnavailable("models_failed");
+    let modelRefs: ModelRefs;
+    if (models) {
+      modelRefs = models;
+    } else {
+      const fetched = await this.fetchModelRefs(settings);
+      if (!fetched.ok) {
+        await this.noteRoundFailure(fetched.kind, fetched.error);
+        throw new RoundUnavailable(roundUnavailableCodeFor(fetched.kind));
+      }
+      modelRefs = fetched.refs;
+    }
     if (options.requireOnlyInList && options.only) {
       for (const modelId of options.only) {
         if (!modelRefs.some(([id]) => id === modelId)) {
@@ -817,7 +1077,20 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
       }),
     );
     if (stats.authExpired) {
+      // The round ran, and the upstream rejected the credentials part-way through: that
+      // is a permanent failure like a 401 on the model list, and it is counted the same
+      // way (three of these in a row suspend the queue).
+      //
+      // 轮次跑起来了，而上游在途中拒绝了凭证：这与模型列表上的 401 同属永久类失败，计数方式
+      // 也相同（连续三次即挂起队列）。
       console.error(JSON.stringify({ message: "probe round aborted: upstream rejected the credentials" }));
+      await this.noteRoundFailure("auth_rejected", "upstream rejected the credentials during a round");
+    } else {
+      // The credentials work (the round reached the engine); `degraded` only records that
+      // the round left models unresolved.
+      //
+      // 凭证是好的（轮次打到了引擎）；`degraded` 只记录该轮留下了未探清的模型。
+      this.noteRoundSuccess(stats.failed > 0 || stats.partial > 0);
     }
 
     if (stats.truncated) {
@@ -868,13 +1141,36 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
     const delayMs = retryWakeDelayMs(this.cache.all(), Date.now() / 1000);
     if (delayMs === null) {
       if (this.hasOwedRound()) {
-        await this.ctx.storage.setAlarm(Date.now() + ALARM_CONTINUE_MS);
-      } else {
-        await this.ctx.storage.deleteAlarm();
+        await this.armSooner(Date.now() + ALARM_CONTINUE_MS);
       }
+      // Nothing to wake for: any alarm already armed (a heartbeat tick, most likely)
+      // stays exactly as it is. Deleting it here would silently cancel the patrol --
+      // the tick is persisted, but an alarm that no longer exists is never re-derived.
+      //
+      // 无事可唤醒：已经排下的 alarm（多半是心跳刻度）原样保留。在这里删除它会静默取消
+      // 巡检——刻度虽已落盘，但一个不存在的 alarm 永远不会被重新推导出来。
       return;
     }
-    await this.ctx.storage.setAlarm(Date.now() + delayMs);
+    await this.armSooner(Date.now() + delayMs);
+  }
+
+  /**
+   * Arm an alarm at `targetMs`, but never push an existing alarm LATER.
+   *
+   * Every re-arm in this class competes for the single alarm slot, so a plain
+   * `setAlarm` from a "retry soon" path could postpone a heartbeat tick (or vice
+   * versa). Comparing against the currently armed time keeps the earliest intent.
+   *
+   * 把 alarm 排在 `targetMs`，但绝不把已有的 alarm 往后推。
+   *
+   * 本类里每一次重排都在争同一个 alarm 槽位，因此从"稍后重试"路径直接 `setAlarm`
+   * 可能把心跳刻度（或反之）推迟。与当前已排时刻比较，取最早的意图。
+   */
+  private async armSooner(targetMs: number): Promise<void> {
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || targetMs < current) {
+      await this.ctx.storage.setAlarm(targetMs);
+    }
   }
 
   /**
@@ -1021,11 +1317,15 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
    * 轮次内部。唯一的例外是代理的 present() 路径——它传入刚为客户端响应读取的列表
    * （prune:false），因此不会发生第二次拉取。
    */
-  private async fetchModelRefs(settings: ProbeSettings): Promise<ModelRefs | null> {
+  private async fetchModelRefs(settings: ProbeSettings): Promise<ModelRefsOutcome> {
     const session = await getSession(this.env);
-    if (!session || !sessionIsUsable(session)) return null;
+    if (!session || !sessionIsUsable(session)) {
+      return { ok: false, kind: "no_session", error: "no session credentials are imported" };
+    }
     const prefix = await this.resolvePrefix(session, settings);
-    if (!prefix) return null;
+    if (!prefix) {
+      return { ok: false, kind: "transient", error: "the upstream API prefix could not be resolved" };
+    }
 
     let response: Response;
     try {
@@ -1034,32 +1334,51 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
         { method: "GET", headers: sessionHeaders(session) },
         { timeoutMs: Math.max(1, settings.timeout) * 1000 },
       );
-    } catch {
-      return null;
+    } catch (err) {
+      return { ok: false, kind: "transient", error: `upstream request failed: ${String(err)}` };
     }
     try {
-      if (response.status !== 200) {
-        // The remembered prefix stopped answering: forget it so the NEXT round
-        // re-probes the candidates instead of pinning to a dead route forever.
-        //
-        // 记忆的前缀不再应答：遗忘它，让**下一轮**重新探测候选，而不是永远钉死在
-        // 失效路由上。
-        this.forgetPrefix();
-        return null;
-      }
-      const payload: unknown = await response.json().catch(() => null);
-      // A 200 we cannot read as a model list is NOT "the upstream has no models",
-      // and it is just as likely a sign the prefix is wrong: forget it and skip
-      // the round either way — reconciling against an HTML page or an empty list
-      // would corrupt the cache.
+      // The body is only worth reading when the route answered at all: a non-200 says
+      // what the prefix decision needs by itself (see shouldForgetPrefixAfterModels).
       //
-      // 读不成模型列表的 200 不等于"上游没有模型"，它同样可能是前缀错了：无论
-      // 哪种都遗忘前缀并跳过本轮——按 HTML 页面或空列表对齐都会污染缓存。
-      if (!isModelListPayload(payload)) {
+      // 只有路由确实应答了才需要读响应体：非 200 的状态码本身已给出前缀判定所需的全部
+      // 信息（见 shouldForgetPrefixAfterModels）。
+      const payload: unknown = response.status === 200 ? await response.json().catch(() => null) : null;
+      // Forget the remembered prefix ONLY when the answer says the route is not here.
+      // A 401/403 says the opposite (the route exists, the credentials are dead), and
+      // dropping the prefix then would make every later round re-run the candidate
+      // sweep to re-learn it -- the proxy keeps its cached prefix on the same answer.
+      //
+      // 只有"路由不在这里"的答复才遗忘已记忆的前缀：401/403 说的恰恰相反（路由存在、
+      // 凭证失效），此时丢弃前缀会让此后每一轮都要重跑候选探测才能重新得知它——代理侧在
+      // 同一种答复上保留缓存前缀。
+      if (shouldForgetPrefixAfterModels(response.status, payload)) {
         this.forgetPrefix();
-        return null;
       }
-      return await refsFromCards(extractModelList(payload));
+      // A 401/403 on the model list is a PERMANENT failure (the route is fine, the
+      // session is not) and is classified as such: only those can suspend the queue.
+      //
+      // 模型列表上的 401/403 属于**永久类**失败（路由没问题、会话有问题），因此照此归类：
+      // 只有永久类才能把队列挂起。
+      if (AUTH_FAILURE_CODES.includes(response.status)) {
+        return {
+          ok: false,
+          kind: "auth_rejected",
+          error: `the upstream rejected the credentials (HTTP ${response.status})`,
+        };
+      }
+      // A 200 we cannot read as a model list is NOT "the upstream has no models":
+      // reconciling against an HTML page or an empty list would corrupt the cache.
+      //
+      // 读不成模型列表的 200 不等于"上游没有模型"：按 HTML 页面或空列表对齐都会污染缓存。
+      if (response.status !== 200 || !isModelListPayload(payload)) {
+        return {
+          ok: false,
+          kind: "transient",
+          error: `the upstream model list could not be read (HTTP ${response.status})`,
+        };
+      }
+      return { ok: true, refs: await refsFromCards(extractModelList(payload)) };
     } finally {
       void response.body?.cancel().catch(() => {});
     }
@@ -1083,22 +1402,6 @@ export class ModelProbeCoordinator extends DurableObject<Env> {
   private hasOwedRound(): boolean {
     if (this.store.readMeta(META_REQUESTED_ROUND_KEY)) return true;
     return Boolean(pendingRoundFromMeta(this.store.readMeta(META_PENDING_ROUND_KEY)));
-  }
-
-  /**
-   * Stop the alarm because the session is gone. Any owed round (admin request or
-   * budget-truncated continuation) is dropped with it: with no session the queue
-   * could do nothing, and a surviving marker would only make the next alarm wake
-   * into the same dead end. A fresh import re-arms everything.
-   *
-   * 因 session 消失而停止 alarm。一切欠账（管理请求或截断续跑）随之丢弃：没有
-   * session 队列什么也做不了，残留的标记只会让下一次 alarm 撞进同一个死胡同。
-   * 重新导入 session 会重建一切。
-   */
-  private async stopAlarmForMissingSession(): Promise<void> {
-    this.store.writeMeta(META_REQUESTED_ROUND_KEY, "");
-    this.store.writeMeta(META_PENDING_ROUND_KEY, "");
-    await this.ctx.storage.deleteAlarm();
   }
 
   /**

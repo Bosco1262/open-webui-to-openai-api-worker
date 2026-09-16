@@ -12,6 +12,12 @@
  * 上游全部被 stub（fetch、KV、Durable Object），因此用例钉住的是**契约**——哪些字段
  * 可以出现、哪些刻意不出现、未知模型回什么。真实数字（Qwen/gpt-oss 真正接受哪些挡位）
  * 只能来自真实上游，在验收阶段核对。
+ *
+ * Contract anchors (docs/UPSTREAM-CONTRACTS.zh-CN.md):
+ *   #6  对外字段白名单    upstream/models.py:239-295
+ *   #8  偏差值键名（R9）  upstream/models.py:289-295
+ *   #14 错误体形状与错误码 upstream/app.py:283-330,595-616
+ * 契约锚点（见 docs/UPSTREAM-CONTRACTS.zh-CN.md）：改动这些形状前先看上游对应位置。
  */
 
 import { beforeEach, test } from "node:test";
@@ -19,7 +25,7 @@ import assert from "node:assert/strict";
 
 import { handleV1Request } from "../src/proxy.ts";
 import { modelFingerprint } from "../src/modelCatalog.ts";
-import { setSession } from "../src/kv.ts";
+import { putApiKey, setSession } from "../src/kv.ts";
 import { writeProbeSettings } from "../src/probeSettings.ts";
 import type { Env, InstanceMeta, ModelProbeFields, ProbeSettings } from "../src/types.ts";
 
@@ -199,6 +205,14 @@ interface HarnessOptions {
   /** Make the `/models` request reject the way a timed-out fetch does. */
   /** 让 `/models` 请求像超时那样 reject。 */
   modelsTimeout?: boolean;
+  /**
+   * Last chance to answer an upstream call with a bespoke response (headers, 3xx, odd
+   * bodies). Returning null hands the call to the default behaviour below.
+   *
+   * 用定制响应（响应头、3xx、奇怪响应体）作答上游调用的最后机会。返回 null 表示交给
+   * 下面的默认行为。
+   */
+  respond?: (url: string, init?: RequestInit) => Response | null;
 }
 
 async function makeHarness(options: HarnessOptions): Promise<Harness> {
@@ -216,12 +230,17 @@ async function makeHarness(options: HarnessOptions): Promise<Harness> {
     modelsTimeout: options.modelsTimeout === true,
   };
 
-  kv.seed(`apikey:${API_KEY}`, { name: "test", prefix: API_KEY, created_at: 0, last_used: 0 });
-
+  // The key is stored the way the console stores it now: `apikey:<sha256(key)>`, with
+  // the plaintext appearing nowhere. (The legacy plaintext-name lookup has its own
+  // test below.)
+  //
+  // Key 现在按控制台的方式存储：`apikey:<sha256(key)>`，明文不出现在任何地方。
+  // （旧明文键名的查找有单独的用例。）
   const env = {
     KV: kv as unknown as KVNamespace,
     PROBE: { getByName: () => coordinator } as unknown as DurableObjectNamespace,
   } as unknown as Env;
+  await putApiKey(env, API_KEY, { name: "test", prefix: API_KEY, created_at: 0, last_used: 0 });
 
   // `setSession` (rather than a raw KV seed) because `getSession` is served from a
   // module-level 60-second instance cache: the first harness in this file owns that
@@ -257,6 +276,8 @@ async function makeHarness(options: HarnessOptions): Promise<Harness> {
           ? await new Response(init.body).text()
           : "",
     );
+    const bespoke = options.respond?.(url, init);
+    if (bespoke) return bespoke;
     if (url.includes("/models")) {
       const pathname = new URL(url).pathname;
       const forced = upstream.modelsStatus.get(pathname);
@@ -389,13 +410,13 @@ test("the model list carries probe facts, the instance envelope and no template 
   //
   // 上游模板绝不泄进 capabilities。这里两个模型对 vision 的取值不一致，因此 vision
   // 不进共享模板，而是各自作为差异键输出自己的取值。
-  assert.deepEqual(shared.x_open_webui, { capabilities: { vision: true } });
+  assert.deepEqual(shared.x_open_webui_deviations, { capabilities: { vision: true } });
 
   // The other model disagrees with the template about `vision` too.
   // 另一个模型同样在 vision 上与模板不一致。
   const deviant = data.find((model) => model.id === "Deviant-2");
   assert.ok(deviant);
-  assert.deepEqual(deviant.x_open_webui, { capabilities: { vision: false } });
+  assert.deepEqual(deviant.x_open_webui_deviations, { capabilities: { vision: false } });
   assert.equal("capabilities" in deviant, false);
 
   const envelope = payload.x_open_webui as Record<string, unknown>;
@@ -512,6 +533,7 @@ test("a single model is retrieved by id, including ids that contain slashes", as
   assert.equal(model.id, "org/nested/Model-3");
   assert.equal(model.object, "model");
   assert.equal("x_open_webui" in model, false);
+  assert.equal("x_open_webui_deviations" in model, false);
   // A single-model read never waits, never triggers a round, and never asks for the
   // instance envelope (it returns a bare model object).
   //
@@ -937,13 +959,70 @@ test("upstream fetches carry a timeout signal, and a timeout maps to 502", async
   assert.ok(h.upstream.signals.every(Boolean));
 });
 
-test("the forwarded request keeps client headers but never accept-encoding or the client key", async () => {
+test("an upstream redirect is refused, never followed", async () => {
+  // With the default `redirect: "follow"`, the session Authorization/Cookie would be
+  // re-sent to whatever host the Location names -- a hijacked upstream or a CDN rule
+  // could redirect the operator's credentials elsewhere.
+  //
+  // 用默认的 `redirect: "follow"` 时，session 的 Authorization/Cookie 会被重新发给
+  // Location 指向的任意主机——被接管的上游或一条 CDN 规则就能把运维的凭证重定向到别处。
+  const h = await makeHarness({
+    settings: DEFAULT_SETTINGS,
+    baseUrl: "https://redirect.test",
+    respond: (url) =>
+      url.includes("/models")
+        ? new Response(null, { status: 302, headers: { location: "https://attacker.test/collect" } })
+        : null,
+  });
+  const response = await handleV1Request(h.env, requestFor("/v1/models"), ctx(h.waitUntil));
+  assert.equal(response.status, 502);
+  const body = (await response.json()) as { error: { code: string; message: string } };
+  assert.equal(body.error.code, "upstream_unavailable");
+  // The redirect target is logged, not echoed: the client gets a generic message.
+  // 重定向目标只进日志，不回显：客户端拿到的是通用文案。
+  assert.equal(body.error.message.includes("attacker.test"), false);
+});
+
+test("a 200 that is not a model list is an upstream error, not an empty list", async () => {
+  // The coordinator already refused to treat an unreadable 200 as an authoritative
+  // list; the proxy used to answer `{"object":"list","data":[]}` instead -- telling
+  // every client "you have no models" when the truth was "we could not read this".
+  //
+  // 协调者早已拒绝把读不懂的 200 当成权威列表；代理此前却回
+  // `{"object":"list","data":[]}`——在上游答复读不懂时告诉每个客户端"你没有模型"。
+  const h = await makeHarness({
+    settings: DEFAULT_SETTINGS,
+    baseUrl: "https://unreadable-list.test",
+    respond: (url) => (url.includes("/models") ? Response.json({ detail: "not a model list" }) : null),
+  });
+  const response = await handleV1Request(h.env, requestFor("/v1/models"), ctx(h.waitUntil));
+  assert.equal(response.status, 502);
+  const body = (await response.json()) as { error: { code: string } };
+  assert.equal(body.error.code, "upstream_error");
+});
+
+test("JSON endpoints forward only the allowlisted client headers", async () => {
+  // Allowlist, not denylist (operator decision 2026-09-15): the upstream only needs
+  // content negotiation plus tracing ids, so an unknown header -- SDK fingerprints, a
+  // renamed cookie, whatever gets invented later -- is dropped BY DEFAULT. A denylist
+  // had to be extended every time, which is how the client key and the caller's cookie
+  // used to travel north.
+  //
+  // 白名单而非黑名单（运维决策 2026-09-15）：上游只需要内容协商与追踪 id，因此未知头
+  // ——SDK 指纹、换了名字的 Cookie、以后新发明的任何东西——**默认**丢弃。黑名单则每出现
+  // 一种新的敏感头就要补一次，客户端 Key 与调用方 Cookie 此前正是这样飘上去的。
   const h = await makeHarness({ settings: DEFAULT_SETTINGS, baseUrl: "https://headers.test" });
   const response = await handleV1Request(
     h.env,
     requestFor("/v1/chat/completions", {
       method: "POST",
-      headers: { "accept-encoding": "gzip, br", "x-trace": "abc" },
+      headers: {
+        "accept-encoding": "gzip, br",
+        "accept-language": "zh-CN",
+        "x-request-id": "req-1",
+        "openai-beta": "assistants=v2",
+        "x-trace": "abc",
+      },
       body: JSON.stringify({
         model: "Shared-1",
         messages: [{ role: "user", content: "hi" }],
@@ -960,17 +1039,241 @@ test("the forwarded request keeps client headers but never accept-encoding or th
   // No compression is ever requested, so an upstream body can always be read as text.
   // 从不索取压缩，因此上游响应体总能当文本读取。
   assert.equal("accept-encoding" in sent, false);
-  assert.equal(sent["x-trace"], "abc");
+  // Allowlisted client headers ride along ...
+  // 白名单内的客户端头照常随行……
+  assert.equal(sent["accept-language"], "zh-CN");
+  assert.equal(sent["x-request-id"], "req-1");
+  assert.equal(sent["openai-beta"], "assistants=v2");
+  // ... everything else does not.
+  // ……其余一律不随行。
+  assert.equal("x-trace" in sent, false);
   // The session credential replaces whatever the client sent.
   // 会话凭证覆盖客户端自带的鉴权。
   assert.equal(sent.authorization, "Bearer upstream-token");
   assert.ok(h.upstream.signals[chatCall]);
 });
 
+test("client credentials and forwarding headers never reach the upstream", async () => {
+  // Three leaks used to be possible on the same request: `X-API-Key` (the caller's
+  // proxy key), the caller's own Cookie (sent whenever the imported session carried
+  // only an Authorization header), and client-controlled forwarding headers that let a
+  // caller forge its source address in the upstream's logs and rate limiting.
+  //
+  // 同一个请求上此前存在三处泄露：`X-API-Key`（调用方的代理 Key）、调用方自己的
+  // Cookie（只要导入的 session 只带 Authorization 就会被送上去），以及客户端可控的
+  // 转发头——它让调用方能在上游日志与限流中伪造自己的来源地址。
+  const h = await makeHarness({ settings: DEFAULT_SETTINGS, baseUrl: "https://strip-headers.test" });
+  await handleV1Request(
+    h.env,
+    requestFor("/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "x-api-key": `sk-${"f".repeat(48)}`,
+        cookie: "token=client-cookie",
+        "x-forwarded-for": "203.0.113.7",
+        forwarded: "for=203.0.113.7",
+        "x-real-ip": "203.0.113.7",
+        "x-trace": "keep-me",
+      },
+      body: JSON.stringify({ model: "Shared-1", messages: [{ role: "user", content: "hi" }] }),
+    }),
+    ctx(h.waitUntil),
+  );
+
+  const sent = h.upstream.headers.at(-1) as Record<string, string>;
+  assert.equal("x-api-key" in sent, false, "the proxy key must never be forwarded");
+  assert.equal("cookie" in sent, false, "the client cookie must never be forwarded");
+  assert.equal("x-forwarded-for" in sent, false);
+  assert.equal("forwarded" in sent, false);
+  assert.equal("x-real-ip" in sent, false);
+  // An unlisted header does not ride along either (the JSON endpoints are allowlisted
+  // now -- see the test above), and the session credential still wins.
+  //
+  // 未列入白名单的头同样不随行（JSON 端点现在是白名单——见上面的用例），而会话凭证依然
+  // 覆盖一切。
+  assert.equal("x-trace" in sent, false);
+  assert.equal(sent.authorization, "Bearer upstream-token");
+});
+
+test("an upstream Retry-After reaches the client, and its absence stays absent", async () => {
+  // The upstream's own Retry-After survives the error wrapping (the upstream project
+  // does the same): a 429 that told US "come back in 30s" must tell our client too, or
+  // every SDK retries immediately against an upstream that just asked for a pause.
+  //
+  // 上游自己的 Retry-After 在错误包装后依然保留（上游项目也如此）：对我们说了"30 秒后再
+  // 来"的 429，也必须告诉我们的客户端，否则每个 SDK 都会立刻重试一个刚请求过暂停的上游。
+  const withHeader = await makeHarness({
+    settings: DEFAULT_SETTINGS,
+    baseUrl: "https://retry-after.test",
+    respond: (url) =>
+      url.includes("/chat/completions")
+        ? new Response(JSON.stringify({ detail: "rate limited" }), {
+            status: 429,
+            headers: { "content-type": "application/json", "retry-after": "30" },
+          })
+        : null,
+  });
+  const throttled = await handleV1Request(
+    withHeader.env,
+    requestFor("/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ model: "Shared-1", messages: [{ role: "user", content: "hi" }] }),
+    }),
+    ctx(withHeader.waitUntil),
+  );
+  assert.equal(throttled.status, 429);
+  assert.equal(throttled.headers.get("retry-after"), "30");
+  // The body keeps its OpenAI shape: the header rides alongside, it is not folded in.
+  // 错误体保持 OpenAI 形状：该头只是随行，不折进 body。
+  const body = (await throttled.json()) as { error: { code: string } };
+  assert.equal(body.error.code, "upstream_error");
+
+  // No header upstream, no header downstream -- nothing is invented.
+  // 上游没带就不带——绝不凭空造一个。
+  const quiet = await makeHarness({
+    settings: DEFAULT_SETTINGS,
+    baseUrl: "https://retry-after-absent.test",
+    respond: (url) =>
+      url.includes("/chat/completions")
+        ? new Response(JSON.stringify({ detail: "rate limited" }), {
+            status: 429,
+            headers: { "content-type": "application/json" },
+          })
+        : null,
+  });
+  const plain = await handleV1Request(
+    quiet.env,
+    requestFor("/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ model: "Shared-1", messages: [{ role: "user", content: "hi" }] }),
+    }),
+    ctx(quiet.waitUntil),
+  );
+  assert.equal(plain.status, 429);
+  assert.equal(plain.headers.get("retry-after"), null);
+});
+
+test("a body above the 10 MiB ceiling is refused; a few MiB still goes through", async () => {
+  // The ceiling matches the upstream project's MAX_BODY_BYTES (10 MiB) so vision and
+  // batch payloads are not rejected -- but unlike upstream it is enforced on the bytes
+  // actually read, so a chunked body cannot slip past it.
+  //
+  // 上限与上游项目的 MAX_BODY_BYTES 一致（10 MiB），以免拦掉视觉与批量负载——但与上游不同
+  // 的是，它作用于**实际读到的字节**，因此 chunked 请求体绕不过去。
+  const h = await makeHarness({ settings: DEFAULT_SETTINGS, baseUrl: "https://body-limit.test" });
+
+  const tooBig = await handleV1Request(
+    h.env,
+    requestFor("/v1/chat/completions", { method: "POST", body: "x".repeat(10 * 1024 * 1024 + 1) }),
+    ctx(h.waitUntil),
+  );
+  assert.equal(tooBig.status, 413);
+  const error = (await tooBig.json()) as { error: { code: string } };
+  assert.equal(error.error.code, "payload_too_large");
+  assert.equal(
+    h.upstream.calls.some((call) => call.includes("/chat/completions")),
+    false,
+    "an oversized body must not be forwarded",
+  );
+
+  // A vision-sized body (a few MiB) is legitimate and still goes through.
+  // 视觉级负载（几 MiB）是合法的，照常放行。
+  const big = JSON.stringify({
+    model: "Shared-1",
+    messages: [{ role: "user", content: "y".repeat(3 * 1024 * 1024) }],
+  });
+  const accepted = await handleV1Request(
+    h.env,
+    requestFor("/v1/chat/completions", { method: "POST", body: big }),
+    ctx(h.waitUntil),
+  );
+  assert.equal(accepted.status, 400, "the stub's chat answer");
+  assert.ok(h.upstream.calls.some((call) => call.includes("/chat/completions")));
+});
+
+test("session and challenge headers from the upstream are not relayed to the client", async () => {
+  // A relayed `set-cookie` would hand the client a directly usable Open WebUI session,
+  // bypassing this proxy and its key checks entirely.
+  //
+  // 被转发的 `set-cookie` 会把一个可直接使用的 Open WebUI 会话交给客户端，从而完全绕开
+  // 本代理及其 Key 校验。
+  const h = await makeHarness({
+    settings: DEFAULT_SETTINGS,
+    baseUrl: "https://response-headers.test",
+    respond: (url) =>
+      url.includes("/files/")
+        ? new Response("file-bytes", {
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "set-cookie": "token=upstream-session; Path=/",
+              "www-authenticate": "Bearer",
+              "x-upstream-trace": "keep-me",
+            },
+          })
+        : null,
+  });
+  const response = await handleV1Request(h.env, requestFor("/v1/files/x"), ctx(h.waitUntil));
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("set-cookie"), null);
+  assert.equal(response.headers.get("www-authenticate"), null);
+  // Everything that is not session material is still passed through.
+  // 非会话物料依然原样透传。
+  assert.equal(response.headers.get("x-upstream-trace"), "keep-me");
+  assert.equal(await response.text(), "file-bytes");
+});
+
+test("a key stored under the legacy plaintext name still authenticates", async () => {
+  // Keys created before the hashed layout must keep working through the upgrade; the
+  // migration to the hashed name happens off the critical path (see verifyClientApiKey).
+  //
+  // 哈希布局之前创建的 Key 必须在升级后继续可用；迁移到哈希键名在关键路径之外完成
+  // （见 verifyClientApiKey）。
+  const h = await makeHarness({ settings: DEFAULT_SETTINGS, baseUrl: "https://legacy-key.test" });
+  h.kv.seed(`apikey:${API_KEY}`, { name: "legacy", prefix: API_KEY, created_at: 0, last_used: 0 });
+  const response = await handleV1Request(h.env, requestFor("/v1/models"), ctx(h.waitUntil));
+  assert.equal(response.status, 200);
+});
+
 // --------------------------------------------------------------------------- //
 // passthrough: generic headers and an untouched body (A2/N1)
 // 透传：通用请求头与原样 body（A2/N1）
 // --------------------------------------------------------------------------- //
+
+test("the passthrough refuses upstream admin and business routes before any request is made", async () => {
+  // The regression this pins: ANY `/v1/*` path used to be relayed with the operator's
+  // imported credentials, so a client holding a proxy key could reach `/auths`,
+  // `/users`, `/configs`, `/chats` ... -- the key was equivalent to the whole upstream
+  // account. Deny-by-default means those paths never reach the network at all.
+  //
+  // 这里钉住的回归：任意 `/v1/*` 路径此前都会用运维导入的凭证转发，因此持有代理 Key 的
+  // 客户端可以触达 `/auths`、`/users`、`/configs`、`/chats`……——Key 等价于整个上游
+  // 账号。默认拒绝意味着这些路径根本不会上网。
+  const h = await makeHarness({ settings: DEFAULT_SETTINGS, baseUrl: "https://allowlist.test" });
+  for (const path of ["/v1/auths/", "/v1/users/", "/v1/configs/export", "/v1/chats/", "/v1/knowledge/"]) {
+    const callsBefore = h.upstream.calls.length;
+    const response = await handleV1Request(h.env, requestFor(path), ctx(h.waitUntil));
+    assert.equal(response.status, 403, `${path} must be refused`);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, "endpoint_not_allowed");
+    assert.equal(h.upstream.calls.length, callsBefore, `${path} must not reach the upstream`);
+  }
+});
+
+test("the passthrough still forwards the documented media and file routes", async () => {
+  const h = await makeHarness({ settings: DEFAULT_SETTINGS, baseUrl: "https://allowlist-media.test" });
+  const response = await handleV1Request(
+    h.env,
+    requestFor("/v1/images/generations", { method: "POST", body: JSON.stringify({ prompt: "x" }) }),
+    ctx(h.waitUntil),
+  );
+  // The stub answers unknown upstream paths with 404 -- this asserts the request WAS
+  // forwarded, not what it answered.
+  //
+  // stub 对未知上游路径回 404——这里断言的是"请求确实被转发了"，而不是它答了什么。
+  assert.equal(response.status, 404);
+  assert.ok(h.upstream.calls.at(-1)?.includes("/api/v1/images/generations"));
+});
 
 test("the passthrough keeps the client's Content-Type and streams the body untouched", async () => {
   const h = await makeHarness({
@@ -985,6 +1288,12 @@ test("the passthrough keeps the client's Content-Type and streams the body untou
       headers: {
         "content-type": "multipart/form-data; boundary=xyz",
         accept: "application/octet-stream",
+        // Not on the JSON allowlist, but the passthrough keeps the denylist: a generic
+        // relay has to preserve client-specific headers or uploads/downloads break.
+        //
+        // 不在 JSON 白名单里，但透传保留黑名单：通用转发必须保留客户端特有的头，否则
+        // 上传/下载会坏。
+        "x-trace": "passthrough-keeps-it",
       },
     }),
     ctx(h.waitUntil),
@@ -1005,6 +1314,7 @@ test("the passthrough keeps the client's Content-Type and streams the body untou
   assert.equal(sent.authorization, "Bearer upstream-token");
   assert.equal(sent["content-type"], "multipart/form-data; boundary=xyz");
   assert.equal(sent.accept, "application/octet-stream");
+  assert.equal(sent["x-trace"], "passthrough-keeps-it");
 
   // The body arrives intact: streamed through, never round-tripped through
   // `request.text()`, which mangled binary payloads.

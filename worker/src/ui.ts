@@ -14,6 +14,17 @@ import { I18N } from "./ui-i18n.ts";
 
 const VERSION = "1.0.0";
 
+// The i18n dictionary is embedded as a JS literal. `<` is escaped to \u003c first:
+// JSON.stringify does not touch it, so a future translation containing "</script>"
+// would end the enclosing script block early and everything after it would be parsed
+// as markup (the dictionary already contains "</code>", so this is one wording change
+// away from being real).
+//
+// 国际化字典以 JS 字面量内嵌。先把 `<` 转义为 \u003c：JSON.stringify 不会处理它，
+// 因此未来某条含 "</script>" 的文案会提前结束所在脚本块，其后的一切都会被当成标记
+// 解析（字典里已经有 "</code>"，距离真实只差一次文案改动）。
+const I18N_JSON = JSON.stringify(I18N).replace(/</g, "\\u003c");
+
 export const ADMIN_UI = `<!DOCTYPE html>
 <html>
 <head>
@@ -227,6 +238,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
   /* ---------- Widgets ---------- */
   /* ---------- 通用组件 ---------- */
   .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  /* The dashboard got a fourth card (probe health); the session card keeps its own
+     two-column override inline. */
+  /* 仪表盘多了第四张卡（探测健康）；Session 卡片保留它自己的两列内联覆盖。 */
+  .stats-4 { grid-template-columns: repeat(4, 1fr); }
+  .health-line { font-size: 12.5px; color: var(--text-1); margin-top: 12px; line-height: 1.7; }
   .stat {
     background: rgba(26, 34, 51, 0.6); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 16px; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
@@ -387,7 +403,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     .side-item { width: auto; flex: none; padding: 9px 12px; white-space: nowrap; }
     .side-item .side-badge { display: none; }
     .content { padding: 18px 16px 40px; }
-    .stats { grid-template-columns: repeat(2, 1fr); }
+    .stats, .stats-4 { grid-template-columns: repeat(2, 1fr); }
     .grid2 { grid-template-columns: 1fr; }
   }
 </style>
@@ -519,7 +535,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
             <p data-i18n="dash.subtitle">代理服务整体运行状态一览。</p>
           </div>
 
-          <div class="stats" style="margin-bottom:18px;">
+          <div class="stats stats-4" style="margin-bottom:18px;">
             <div class="stat">
               <div class="label" data-i18n="stat.session">Session 凭证</div>
               <div class="value"><span id="st-session">—</span></div>
@@ -534,6 +550,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
               <div class="label" data-i18n="stat.keys">API Key 数量</div>
               <div class="value" id="st-keys">—</div>
               <div class="sub" data-i18n="stat.keys_sub">生成的客户端密钥</div>
+            </div>
+            <div class="stat">
+              <div class="label" data-i18n="health.title">探测健康</div>
+              <div class="value"><span id="st-health">—</span></div>
+              <div class="sub" id="st-health-sub"></div>
             </div>
           </div>
 
@@ -580,6 +601,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
                 <div class="sub" id="up-upstream-sub"></div>
               </div>
             </div>
+            <!-- Probe health, right after the "imported" badge: "imported" alone hides
+                 the case that matters most -- credentials the upstream is rejecting. -->
+            <!-- 探测健康，紧跟"已导入"之后：只显示"已导入"会掩盖最要紧的情形——上游正在
+                 拒绝这份凭证。 -->
+            <div class="health-line" id="up-health"></div>
             <div class="banner" id="status-banner"></div>
           </div>
 
@@ -850,7 +876,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
 
   // ---------- i18n ----------
   // ---------- 国际化 ----------
-  var I18N = ${JSON.stringify(I18N)};
+  var I18N = ${I18N_JSON};
 
   var _lang = 'en';
 
@@ -949,7 +975,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     toast(t('set.lang_saved'), 'ok');
   }
 
-  function toast(msg, type) {
+  function toast(msg, type, durationMs) {
     var toastEl = document.createElement('div');
     toastEl.className = 'toast ' + (type || '');
     toastEl.textContent = msg;
@@ -958,7 +984,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
     setTimeout(function () {
       toastEl.classList.remove('show');
       setTimeout(function () { toastEl.remove(); }, 350);
-    }, 3200);
+    }, durationMs || 3200);
   }
 
   // Banner render registry: lets switchLang() re-render visible banners in the new language
@@ -1486,6 +1512,11 @@ export const ADMIN_UI = `<!DOCTYPE html>
       // 缺字段的旧响应必须按"关闭"处理，而不是变成一个错误的选中项。
       fillHeartbeatSelect(data.settings.heartbeatInterval === undefined ? 0 : data.settings.heartbeatInterval, data.heartbeatOptions);
       renderProbeTable(data.models);
+      // Health first: it decides which wording the banner should use (see
+      // reportProbeFailures).
+      //
+      // 先渲染健康：横幅该用哪套措辞由它决定（见 reportProbeFailures）。
+      renderHealth(data.health);
       reportProbeFailures(data.models);
     }).catch(function (err) {
       // 401 is already handled by api(); skip to avoid duplicate toasts
@@ -1515,6 +1546,19 @@ export const ADMIN_UI = `<!DOCTYPE html>
     var failed = (models || []).filter(function (m) {
       return m.status === 'failed' && m.last_error;
     });
+    // When the queue itself is stopped, the reason is NOT "N models failed": it is one
+    // condition with one fix. One banner, one wording -- a per-model list next to
+    // "probing is paused" would just be two accounts of the same thing.
+    //
+    // 队列本身停摆时，原因不是"N 个模型失败"：它是一个条件、一个修法。一块横幅、一套措辞
+    // ——在"探测已暂停"旁边再列一堆单模型失败，只是同一件事的两种说法。
+    if (_probeHealth && (_probeHealth.state === 'suspended' || _probeHealth.state === 'no_session')) {
+      _probeRoundBanner = false;
+      setBanner('mp-banner', _probeHealth.state === 'suspended' ? 'err' : 'warn', function () {
+        return t('health.prefix') + t('health.' + _probeHealth.state);
+      });
+      return;
+    }
     if (failed.length > 0) {
       _probeRoundBanner = false;
       var error = String(failed[0].last_error || '');
@@ -1618,6 +1662,77 @@ export const ADMIN_UI = `<!DOCTYPE html>
     }
   }
 
+  // ---------- probe health ----------
+  // ---------- 探测健康 ----------
+  /** "3 minutes ago" / "从未成功", in the active language. */
+  /** 按当前语言输出"3 分钟前"/"从未成功"。 */
+  function agoText(unixSeconds) {
+    if (!unixSeconds) return t('health.never');
+    var seconds = Math.max(0, Math.floor(Date.now() / 1000 - unixSeconds));
+    if (seconds < 60) return t('health.ago_now');
+    if (seconds < 3600) return tfmt('health.ago_minutes', { n: Math.floor(seconds / 60) });
+    if (seconds < 86400) return tfmt('health.ago_hours', { n: Math.floor(seconds / 3600) });
+    return tfmt('health.ago_days', { n: Math.floor(seconds / 86400) });
+  }
+
+  var HEALTH_BADGE = {
+    ok: 'ok',
+    degraded: 'warn',
+    auth_rejected: 'warn',
+    no_session: 'gray',
+    suspended: 'err'
+  };
+
+  // The last health payload seen, kept for the probe page's banner (renderHealth is
+  // called on the dashboard too, so this is also the value the two pages agree on).
+  //
+  // 最近一次看到的健康负载，供探测页的横幅使用（仪表盘也会调 renderHealth，因此这也是两个
+  // 页面共同依据的那一份）。
+  var _probeHealth = null;
+
+  /** Render the queue's health into the dashboard card and the session card. One
+   *  function for both, so the two can never disagree. */
+  /** 把队列健康渲染到仪表盘卡片与 Session 卡片。两处共用一个函数，因此不可能各说各话。 */
+  function renderHealth(health) {
+    _probeHealth = health || null;
+    var dashValue = $('st-health');
+    var dashSub = $('st-health-sub');
+    var line = $('up-health');
+    if (!health) {
+      // No session yet, or the coordinator did not answer: say nothing rather than
+      // invent a state.
+      //
+      // 还没有 session，或协调者没有回应：什么都不说，绝不凭空造一个状态。
+      if (dashValue) dashValue.textContent = '—';
+      if (dashSub) dashSub.textContent = '';
+      if (line) line.innerHTML = '';
+      return;
+    }
+    var state = health.state || 'ok';
+    var badgeType = HEALTH_BADGE[state] || 'gray';
+    var label = t('health.' + state);
+    if (dashValue) dashValue.innerHTML = badge(badgeType, label);
+    var ago = agoText(health.last_success_at);
+    var sub;
+    if (state === 'suspended') {
+      sub = tfmt('health.sub_suspended', {
+        since: health.since ? new Date(health.since * 1000).toLocaleString() : '—'
+      });
+    } else if (state === 'no_session') {
+      sub = t('health.sub_no_session');
+    } else if (state === 'auth_rejected') {
+      sub = tfmt('health.sub_auth', { n: health.consecutive_permanent_failures || 0, max: health.suspend_threshold || 3 });
+    } else if (state === 'degraded') {
+      sub = tfmt('health.sub_degraded', { ago: ago });
+    } else {
+      sub = tfmt('health.sub_ok', { ago: ago });
+    }
+    if (dashSub) {
+      dashSub.textContent = sub + (health.cached_models ? ' · ' + tfmt('health.cached', { n: health.cached_models }) : '');
+    }
+    if (line) line.innerHTML = t('health.prefix') + badge(badgeType, label) + ' ' + esc(sub);
+  }
+
   function loadStatus() {
     api('/admin/api/status').then(function (status) {
       // chip
@@ -1632,6 +1747,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
       // upstream page status
       // 上游页面状态
       fillSessionStatus('up', status);
+
+      // probe health (dashboard card + the session card's line)
+      // 探测健康（仪表盘卡片 + Session 卡片那一行）
+      renderHealth(status.health);
 
       // The key count is intentionally NOT rendered here: it comes from the
       // eventually-consistent KV list and would briefly lag behind creates.
@@ -1648,6 +1767,20 @@ export const ADMIN_UI = `<!DOCTYPE html>
       // 使用记录粒度选择器
       _touchInterval = status.touchInterval;
       fillTouchSelect(status.touchInterval, status.touchIntervalOptions);
+
+      // Operator-facing configuration warnings (e.g. a too-short SESSION_SECRET).
+      // Each is shown at most once per page load and stays up longer than a
+      // confirmation toast: loadStatus() runs after every action, so repeating them
+      // would only add noise, and a 3-second flash is not a notice.
+      //
+      // 面向运维的配置告警（例如过短的 SESSION_SECRET）。每条每次页面加载最多提示一次，
+      // 且比普通确认提示停留更久：loadStatus() 会在每次操作后重新运行，反复弹窗只会变成
+      // 噪音，而闪 3 秒也不足以叫"提示"。
+      (status.warnings || []).forEach(function (code) {
+        if (_warnedWarnings.indexOf(code) >= 0) return;
+        _warnedWarnings.push(code);
+        toast(etext(code), 'warn', 12000);
+      });
     }).catch(function (err) {
     // 401 is already handled by api(); skip to avoid duplicate toasts
     // 401 已由 api() 统一提示（仅会话过期时），此处跳过避免重复弹窗
@@ -1763,7 +1896,7 @@ export const ADMIN_UI = `<!DOCTYPE html>
         // 在本地插入新 Key 而非重新拉取列表：KV list 索引是最终一致的，
         // 立即重新拉取可能还看不到它；下次 loadKeys() 同步后自然覆盖。
         _keys.unshift({
-          key: data.key,
+          id: data.id,
           name: data.name,
           prefix: data.prefix,
           created_at: data.created_at,
@@ -1788,6 +1921,10 @@ export const ADMIN_UI = `<!DOCTYPE html>
   // 而不是（可能过时的）时间戳。
   var _touchInterval = null;
 
+  // Configuration warnings already shown in this page load (see loadStatus).
+  // 本次页面加载中已提示过的配置告警（见 loadStatus）。
+  var _warnedWarnings = [];
+
   // Render the key table from the local _keys snapshot. The dashboard key
   // count reads the same local snapshot, so it updates immediately on
   // create/delete — including consecutive adds — without waiting for the
@@ -1804,13 +1941,17 @@ export const ADMIN_UI = `<!DOCTYPE html>
       tbody.innerHTML = '<tr><td colspan="5" class="empty">' + t('keys.empty') + '</td></tr>';
       return;
     }
-    // Buttons bind to the key VALUE via a data attribute instead of the array
+    // Buttons bind to the key's public ID via a data attribute instead of the array
     // index: a second tab mutating _keys between render and click would otherwise
-    // make "row 2" point at a different key. esc() escapes quotes too, so the
-    // value cannot break out of the attribute.
+    // make "row 2" point at a different key. The API no longer returns the secret at
+    // all -- only this id and the pre-rendered masked form -- so nothing usable can
+    // leak through the DOM. esc() escapes quotes too, so the value cannot break out
+    // of the attribute.
     //
-    // 按钮经 data 属性绑定**键值**而不是数组下标：否则另一个标签页在渲染与点击之间
-    // 改动 _keys 时，"第 2 行"会指向另一把 Key。esc() 连引号也转义，取值逃不出属性。
+    // 按钮经 data 属性绑定**公开 id**而不是数组下标：否则另一个标签页在渲染与点击之间
+    // 改动 _keys 时，"第 2 行"会指向另一把 Key。API 现在完全不再返回密钥——只有这个
+    // id 与预先渲染的脱敏形式——因此 DOM 里没有任何可用凭证可泄露。esc() 连引号也
+    // 转义，取值逃不出属性。
     tbody.innerHTML = _keys.map(function (k) {
       var created = new Date(k.created_at * 1000).toLocaleString();
       // Tracking off hides even historical timestamps: the column must never
@@ -1827,8 +1968,8 @@ export const ADMIN_UI = `<!DOCTYPE html>
         '<td>' + created + '</td>' +
         '<td>' + used + '</td>' +
         '<td style="text-align:right; white-space:nowrap;">' +
-          '<button class="btn btn-ghost btn-sm" data-key="' + esc(k.key) + '" onclick="rotateKey(this)">' + t('keys.rotate') + '</button> ' +
-          '<button class="btn btn-danger btn-sm" data-key="' + esc(k.key) + '" onclick="deleteKey(this)">' + t('common.delete') + '</button>' +
+          '<button class="btn btn-ghost btn-sm" data-id="' + esc(k.id) + '" onclick="rotateKey(this)">' + t('keys.rotate') + '</button> ' +
+          '<button class="btn btn-danger btn-sm" data-id="' + esc(k.id) + '" onclick="deleteKey(this)">' + t('common.delete') + '</button>' +
         '</td>' +
         '</tr>';
     }).join('');
@@ -1847,16 +1988,16 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   function deleteKey(btn) {
-    var key = btn && btn.getAttribute ? btn.getAttribute('data-key') : '';
-    // Resolve by value, not by position: another tab may have changed _keys since
+    var id = btn && btn.getAttribute ? btn.getAttribute('data-id') : '';
+    // Resolve by id, not by position: another tab may have changed _keys since
     // this row was rendered.
     //
-    // 按值解析而不是按位置：渲染之后另一个标签页可能已改动 _keys。
-    var idx = _keys.findIndex(function (k) { return k.key === key; });
+    // 按 id 解析而不是按位置：渲染之后另一个标签页可能已改动 _keys。
+    var idx = _keys.findIndex(function (k) { return k.id === id; });
     if (idx < 0) return;
     var keyRecord = _keys[idx];
     if (!confirm(t('keys.del_confirm') + '[' + keyRecord.name + ']' + t('keys.del_confirm_end'))) return;
-    api('/admin/api/keys', { method: 'DELETE', body: { key: keyRecord.key } })
+    api('/admin/api/keys', { method: 'DELETE', body: { id: keyRecord.id } })
       .then(function () {
         toast(t('keys.deleted'), 'ok');
         // Remove locally first: the KV list index is eventually consistent and
@@ -1873,20 +2014,21 @@ export const ADMIN_UI = `<!DOCTYPE html>
   }
 
   function rotateKey(btn) {
-    var key = btn && btn.getAttribute ? btn.getAttribute('data-key') : '';
-    var idx = _keys.findIndex(function (k) { return k.key === key; });
+    var id = btn && btn.getAttribute ? btn.getAttribute('data-id') : '';
+    var idx = _keys.findIndex(function (k) { return k.id === id; });
     if (idx < 0) return;
     var keyRecord = _keys[idx];
     if (!confirm(t('keys.rotate_confirm') + '[' + keyRecord.name + ']' + t('keys.rotate_confirm_end'))) return;
-    api('/admin/api/keys/rotate', { method: 'POST', body: { key: keyRecord.key } })
+    api('/admin/api/keys/rotate', { method: 'POST', body: { id: keyRecord.id } })
       .then(function (data) {
         // Replace the row locally (same write-after-read compensation as
         // create/delete), then force the one-time copy modal for the new key.
+        // The row is keyed by the NEW id from here on.
         //
         // 本地替换该行（与创建/删除相同的写后读补偿机制），随后弹出
-        // 新 Key 的一次性复制弹窗。
+        // 新 Key 的一次性复制弹窗。此后该行以**新** id 为键。
         _keys[idx] = {
-          key: data.key,
+          id: data.id,
           name: data.name,
           prefix: data.prefix,
           created_at: data.created_at,

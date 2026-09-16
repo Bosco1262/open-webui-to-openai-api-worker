@@ -129,21 +129,57 @@ export interface UpstreamFetchOptions {
 }
 
 /**
+ * Refuse a redirect answer instead of following it.
+ *
+ * The default fetch mode (`redirect: "follow"`) would re-send this request -- session
+ * `Authorization` and `Cookie` included -- to whatever host the `Location` names. A
+ * hijacked upstream, a CDN rule, or a misconfigured reverse proxy in front of it could
+ * therefore redirect the operator's credentials somewhere else entirely. The local
+ * capture tool already treats a 3xx as invalid (login.py sets
+ * `follow_redirects=False`); this makes the Worker agree with it instead of silently
+ * doing the opposite.
+ *
+ * 把重定向答复判为失败，而不是跟随它。
+ *
+ * 默认的 fetch 模式（`redirect: "follow"`）会把这个请求——连同 session 的
+ * `Authorization` 与 `Cookie`——原样重发给 `Location` 指向的任意主机。因此被接管的上游、
+ * 一条 CDN 规则、或它前面配置错误的反向代理，都可能把运维的凭证重定向到别处。本地捕获
+ * 工具早已把 3xx 判为无效（login.py 设置 `follow_redirects=False`）；这里让 Worker 与它
+ * 保持一致，而不是悄悄反着做。
+ */
+function rejectRedirect(response: Response): void {
+  // `opaqueredirect` is what a manual-mode fetch yields for a filtered redirect;
+  // Cloudflare's typings narrow `Response["type"]` to the two values it can return for
+  // non-manual fetches, hence the widening cast.
+  //
+  // `opaqueredirect` 是手动模式下被过滤的重定向所返回的类型；Cloudflare 的类型把
+  // `Response["type"]` 收窄成非手动抓取可能返回的两个取值，因此这里放宽后再比较。
+  const redirected = (response.type as string) === "opaqueredirect";
+  if (!redirected && !(response.status >= 300 && response.status < 400)) return;
+  const location = response.headers.get("location");
+  void response.body?.cancel().catch(() => {});
+  throw new Error(
+    `upstream answered a redirect (HTTP ${response.status || "?"}${location ? ` to ${location}` : ""}); refusing to follow it`,
+  );
+}
+
+/**
  * `fetch` towards the upstream with a bounded wait.
  *
  * Throws whatever `fetch` throws (including the abort error when the ceiling is
- * reached); callers already map that to their own error shape.
+ * reached); callers already map that to their own error shape. Redirects are never
+ * followed -- see `rejectRedirect`.
+ *
+ * 带上限地向上游发起 `fetch`。
+ *
+ * `fetch` 抛什么就抛什么（包括到达上限时的中止错误）；各调用方已把它映射成自己的
+ * 错误形状。重定向一律不跟随——见 `rejectRedirect`。
  *
  * Note on the non-streaming path: `AbortSignal.timeout` bounds the WHOLE exchange —
  * headers AND body reads. A response whose body is still arriving when the ceiling
  * hits is cut off mid-read. The body ceiling is deliberately generous (300s), but
  * this is a real cutoff, unlike the streaming path below which bounds only the
  * wait for the response headers.
- *
- * 带上限地向上游发起 `fetch`。
- *
- * `fetch` 抛什么就抛什么（包括到达上限时的中止错误）；各调用方已把它映射成自己的
- * 错误形状。
  *
  * 关于非流式路径的说明：`AbortSignal.timeout` 限定的是整个交换过程——响应头**与**
  * 响应体的读取。到达上限时仍在传输的响应体会被拦腰切断。响应体上限刻意给得宽松
@@ -156,9 +192,12 @@ export async function fetchUpstream(
 ): Promise<Response> {
   const timeoutMs =
     options.timeoutMs ?? (options.metadata ? UPSTREAM_METADATA_TIMEOUT_MS : UPSTREAM_TIMEOUT_MS);
+  const requestInit: RequestInit = { ...init, redirect: "manual" };
 
   if (!options.stream) {
-    return fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+    const response = await fetch(url, { ...requestInit, signal: AbortSignal.timeout(timeoutMs) });
+    rejectRedirect(response);
+    return response;
   }
 
   // Streaming: bound only the wait for the response headers, then hand the untouched
@@ -170,7 +209,9 @@ export async function fetchUpstream(
     controller.abort(new Error("upstream did not answer within the header timeout"));
   }, timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const response = await fetch(url, { ...requestInit, signal: controller.signal });
+    rejectRedirect(response);
+    return response;
   } finally {
     clearTimeout(timer);
   }

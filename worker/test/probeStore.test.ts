@@ -17,10 +17,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createModelProbe, ModelProbeCache } from "../src/modelProbe.ts";
+import { CACHE_VERSION, createModelProbe, ModelProbeCache } from "../src/modelProbe.ts";
 import {
   MemoryProbeStore,
-  SQL_MAX_BIND_PARAMETERS,
   SqliteProbeStore,
   parseProbeCacheFile,
   serializeProbeCacheFile,
@@ -42,7 +41,7 @@ test("the cache file round-trips through the upstream shape", () => {
     ["a", { ...probeWith("fp-a"), supported_efforts: ["none", "low"], efforts_verified: true }],
   ];
   const text = serializeProbeCacheFile(entries);
-  assert.deepEqual(JSON.parse(text).version, 2);
+  assert.deepEqual(JSON.parse(text).version, CACHE_VERSION);
   const parsed = parseProbeCacheFile(text);
   assert.equal(parsed.length, 1);
   assert.equal(parsed[0][0], "a");
@@ -63,8 +62,14 @@ test("a version-1 cache is ignored wholesale so every model is re-probed", () =>
 test("corrupt and unusable cache files degrade to an empty cache", () => {
   assert.deepEqual(parseProbeCacheFile("{ not json"), []);
   assert.deepEqual(parseProbeCacheFile("null"), []);
-  assert.deepEqual(parseProbeCacheFile(JSON.stringify({ version: 2, models: [] })), []);
-  assert.deepEqual(parseProbeCacheFile({ version: 2, models: { a: "nope" } }), []);
+  // An empty model map, a non-object entry, and a version we cannot verify: all empty.
+  // 空模型表、非对象条目、以及无法验证的版本：一律回空。
+  assert.deepEqual(parseProbeCacheFile(JSON.stringify({ version: CACHE_VERSION, models: [] })), []);
+  assert.deepEqual(parseProbeCacheFile({ version: CACHE_VERSION, models: { a: "nope" } }), []);
+  assert.deepEqual(
+    parseProbeCacheFile({ version: CACHE_VERSION + 1, models: { a: { status: "ok" } } }),
+    [],
+  );
 });
 
 // --------------------------------------------------------------------------- //
@@ -140,7 +145,7 @@ test("the sqlite store creates its schema, records its version and round-trips e
   const sql = new FakeSql();
   const store = new SqliteProbeStore(sql);
   store.migrate();
-  assert.equal(sql.meta.get("version"), "2");
+  assert.equal(sql.meta.get("version"), String(CACHE_VERSION));
   assert.equal(store.count(), 0);
 
   store.apply({
@@ -170,7 +175,7 @@ test("an older-version store is wiped so every model is re-probed", () => {
   sql.meta.set("version", "1");
   const store = new SqliteProbeStore(sql);
   store.migrate();
-  assert.equal(sql.meta.get("version"), "2");
+  assert.equal(sql.meta.get("version"), String(CACHE_VERSION));
   assert.equal(store.count(), 0);
 });
 
@@ -185,22 +190,6 @@ test("rows without a version key are wiped too (unknown provenance)", () => {
   sql.models.set("a", JSON.stringify({ fingerprint: "fp-a", status: "ok" }));
   const store = new SqliteProbeStore(sql);
   store.migrate();
-  assert.equal(sql.meta.get("version"), "2");
+  assert.equal(sql.meta.get("version"), String(CACHE_VERSION));
   assert.equal(store.count(), 0);
-});
-
-test("lookups are chunked to stay under the bound-parameter limit", () => {
-  const sql = new FakeSql();
-  const store = new SqliteProbeStore(sql);
-  store.migrate();
-  const ids = Array.from({ length: SQL_MAX_BIND_PARAMETERS + 7 }, (_, index) => `m${index}`);
-  store.apply({ upserts: ids.map((id) => [id, probeWith(`fp-${id}`)]), deletes: [] });
-
-  const found = store.getMany([...ids, "missing"]);
-  assert.equal(found.size, ids.length);
-  assert.ok(found.has(`m${SQL_MAX_BIND_PARAMETERS + 6}`));
-  assert.equal(found.has("missing"), false);
-  // Two statements: one full chunk plus the remainder.
-  const lookups = sql.statements.filter((query) => query.includes("WHERE id IN"));
-  assert.equal(lookups.length, 2);
 });

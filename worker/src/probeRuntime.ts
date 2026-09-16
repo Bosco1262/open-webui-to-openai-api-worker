@@ -38,9 +38,9 @@ import type { ModelProbe } from "./types.ts";
  * 能在普通 Node 下被测试。
  */
 export class RoundUnavailable extends Error {
-  readonly code: "session_missing" | "models_failed";
+  readonly code: "session_missing" | "models_failed" | "auth_rejected";
 
-  constructor(code: "session_missing" | "models_failed") {
+  constructor(code: "session_missing" | "models_failed" | "auth_rejected") {
     super(code);
     // Embed the code in the NAME as well: Durable Object RPC keeps only `name`
     // and `message` across the boundary, and the admin router parses the code
@@ -51,6 +51,27 @@ export class RoundUnavailable extends Error {
     this.name = `RoundUnavailable:${code}`;
     this.code = code;
   }
+}
+
+/**
+ * The `RoundUnavailable` code for a failure kind.
+ *
+ * The two permanent kinds get their own codes (`session_missing`, `auth_rejected`) so the
+ * admin API can say WHICH credential problem it is; everything transient stays
+ * `models_failed`, which is what the console already words as "cannot fetch the upstream
+ * model list".
+ *
+ * 失败类别对应的 `RoundUnavailable` 代码。
+ *
+ * 两种永久失败各有自己的代码（`session_missing`、`auth_rejected`），使管理端能说清是哪种凭证
+ * 问题；瞬时类一律保持 `models_failed`，控制台对它的既有措辞是"无法获取上游模型列表"。
+ */
+export function roundUnavailableCodeFor(
+  kind: ProbeFailureKind,
+): "session_missing" | "models_failed" | "auth_rejected" {
+  if (kind === "no_session") return "session_missing";
+  if (kind === "auth_rejected") return "auth_rejected";
+  return "models_failed";
 }
 
 /** What a caller wants probed, reduced to what "can I join?" needs to know. */
@@ -94,7 +115,16 @@ export function canJoinRound(running: RoundRequest, request: RoundRequest): bool
   if (!runningOnly) return true;
   const wanted = request.only;
   if (!wanted) return false;
-  return runningOnly.every((modelId) => wanted.includes(modelId));
+  // The running round must cover AT LEAST the models this request wants
+  // (`wanted ⊆ running`). The comparison used to be the other way round
+  // (`running ⊆ wanted`), which let a request for the whole list join a single-model
+  // round and then wait for a result that could never contain most of its models --
+  // a wasted wait, with fields a request cycle late.
+  //
+  // 在途轮次必须**至少**覆盖本请求想要的模型（`wanted ⊆ running`）。此前的比较方向是
+  // 反的（`running ⊆ wanted`），于是"要全部模型"的请求会加入一个单模型轮次，然后等着
+  // 一个永远不可能包含大部分模型的结果——白等一场，字段还要晚一个请求周期。
+  return wanted.every((modelId) => runningOnly.includes(modelId));
 }
 
 /**
@@ -143,6 +173,185 @@ export function pendingRoundFromMeta(raw: string | null): RoundRequest | null {
     ? record.only.filter((id): id is string => typeof id === "string")
     : [];
   return { force: record.force === true, only: only.length > 0 ? only : undefined };
+}
+
+// --------------------------------------------------------------------------- //
+// Probe health (what the console shows about the queue itself)
+// 探测健康（控制台看到的"队列自身"状态）
+// --------------------------------------------------------------------------- //
+
+/**
+ * How many CONSECUTIVE permanent failures suspend probing.
+ *
+ * Only permanent failures count (see `isPermanentFailure`): a transient outage must keep
+ * retrying, or one 5xx storm would stop the queue until a human notices -- and the alarm
+ * is the only thing that would have noticed.
+ *
+ * 连续多少次**永久类**失败后挂起探测。
+ *
+ * 只统计永久类失败（见 `isPermanentFailure`）：瞬时故障必须继续重试，否则一次 5xx 风暴就会
+ * 让队列停摆到有人发现为止——而 alarm 本来是唯一能发现它恢复的东西。
+ */
+export const AUTH_FAIL_SUSPEND_THRESHOLD = 3;
+
+/** Why a round could not run (or ran and was rejected). */
+/** 轮次无法启动（或启动了但被拒绝）的原因。 */
+export type ProbeFailureKind = "auth_rejected" | "no_session" | "transient";
+
+/** The state the console displays. */
+/** 控制台展示的状态。 */
+export type ProbeHealthState = "ok" | "degraded" | "auth_rejected" | "no_session" | "suspended";
+
+/** Everything the console needs to explain the queue's health. */
+/** 控制台解释"队列健康状况"所需的全部信息。 */
+export interface ProbeHealth {
+  state: ProbeHealthState;
+  /** Unix seconds when the current state began. */
+  /** 进入当前状态的 Unix 秒。 */
+  since: number;
+  /** Unix seconds of the last round, successful or not. */
+  /** 最近一次轮次的 Unix 秒（无论成败）。 */
+  last_round_at: number;
+  last_success_at: number | null;
+  /** Run of permanent failures; reset by any successful round. */
+  /** 连续永久失败的计数；任何一次成功轮次清零。 */
+  consecutive_permanent_failures: number;
+  /** The last failure, truncated like every other stored error (300 chars). */
+  /** 最近一次失败原因，与其它存储的错误一样截断到 300 字符。 */
+  last_error: string;
+}
+
+export function newProbeHealth(now: number): ProbeHealth {
+  return {
+    state: "ok",
+    since: now,
+    last_round_at: 0,
+    last_success_at: null,
+    consecutive_permanent_failures: 0,
+    last_error: "",
+  };
+}
+
+/** Whether a failure is permanent (i.e. counts toward suspension). */
+/** 该失败是否属于永久类（即计入挂起阈值）。 */
+export function isPermanentFailure(kind: ProbeFailureKind): boolean {
+  return kind !== "transient";
+}
+
+/**
+ * Fold one failure into the health record.
+ *
+ * A permanent failure counts up and, at the threshold, moves the state to `suspended` --
+ * the caller then stops the alarm. A transient failure only marks the queue `degraded`
+ * and LEAVES THE RUN ALONE: a flapping upstream must not creep toward suspension.
+ *
+ * 把一次失败并入健康记录。
+ *
+ * 永久类失败累加计数，达到阈值即把状态置为 `suspended`——调用方随后停掉 alarm。瞬时类只把
+ * 队列标为 `degraded` 且**不动计数**：抖动的上游不能慢慢把队列推入挂起。
+ */
+export function applyProbeFailure(
+  health: ProbeHealth,
+  kind: ProbeFailureKind,
+  error: string,
+  now: number,
+): ProbeHealth {
+  const message = error.slice(0, 300);
+  if (!isPermanentFailure(kind)) {
+    const state: ProbeHealthState = health.state === "suspended" ? "suspended" : "degraded";
+    return {
+      ...health,
+      state,
+      since: health.state === state ? health.since : now,
+      last_round_at: now,
+      last_error: message,
+    };
+  }
+  const failures = health.consecutive_permanent_failures + 1;
+  const state: ProbeHealthState =
+    kind === "no_session"
+      ? "no_session"
+      : failures >= AUTH_FAIL_SUSPEND_THRESHOLD
+        ? "suspended"
+        : "auth_rejected";
+  return {
+    ...health,
+    state,
+    since: health.state === state ? health.since : now,
+    last_round_at: now,
+    consecutive_permanent_failures: failures,
+    last_error: message,
+  };
+}
+
+/**
+ * Fold one successful round into the health record: the run is over (the credentials
+ * work), so the streak resets. `degraded` records that the round itself left models
+ * unresolved -- that is a fact about the models, not about the credentials.
+ *
+ * 把一次成功的轮次并入健康记录：连续失败到此结束（凭证是好的），计数清零。`degraded` 记录
+ * 该轮本身留下了未探清的模型——那是关于模型的事实，不是关于凭证的。
+ */
+export function applyProbeSuccess(health: ProbeHealth, degraded: boolean, now: number): ProbeHealth {
+  const state: ProbeHealthState = degraded ? "degraded" : "ok";
+  return {
+    ...health,
+    state,
+    since: health.state === state ? health.since : now,
+    last_round_at: now,
+    last_success_at: now,
+    consecutive_permanent_failures: 0,
+    last_error: "",
+  };
+}
+
+/** Whether the queue is stopped until someone imports a session or resumes it. */
+/** 队列是否已停摆，直到有人（重新）导入 session 或显式恢复。 */
+export function isProbeQueueStopped(health: ProbeHealth): boolean {
+  return health.state === "suspended" || health.state === "no_session";
+}
+
+/**
+ * Parse the persisted health record. Anything unreadable degrades to a fresh record:
+ * a corrupt bookkeeping value must never stop the queue (`isProbeQueueStopped` treats
+ * "suspended" as authoritative, so it is the one value that must not be invented).
+ *
+ * 解析已落盘的健康记录。任何读不懂的内容都退化为一条全新记录：损坏的记账值绝不能把队列
+ * 停掉（`isProbeQueueStopped` 把 "suspended" 当作权威，因此它恰恰是最不能被凭空造出来的值）。
+ */
+export function probeHealthFromMeta(raw: string | null, now: number): ProbeHealth {
+  if (!raw) return newProbeHealth(now);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return newProbeHealth(now);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return newProbeHealth(now);
+  const record = parsed as Record<string, unknown>;
+  const states: readonly ProbeHealthState[] = ["ok", "degraded", "auth_rejected", "no_session", "suspended"];
+  const state =
+    typeof record.state === "string" && (states as readonly string[]).includes(record.state)
+      ? (record.state as ProbeHealthState)
+      : "ok";
+  const successes = typeof record.last_success_at === "number" && Number.isFinite(record.last_success_at)
+    ? record.last_success_at
+    : null;
+  return {
+    state,
+    since: numberOr(record.since, now),
+    last_round_at: numberOr(record.last_round_at, 0),
+    last_success_at: successes,
+    consecutive_permanent_failures: Math.max(
+      0,
+      Math.trunc(numberOr(record.consecutive_permanent_failures, 0)),
+    ),
+    last_error: typeof record.last_error === "string" ? record.last_error.slice(0, 300) : "",
+  };
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 /** Never wake sooner than this (milliseconds): an alarm that fires immediately in a

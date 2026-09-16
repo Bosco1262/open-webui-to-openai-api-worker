@@ -22,6 +22,7 @@ model probe cache*) and its follow-up refinement commit.
 | Cache storage | `model_probe_cache.json` (version 2) | The `ModelProbeCoordinator` DO's SQLite (one row per model), exportable in the same JSON shape |
 | Refresh orchestration | `app.py::_refresh_model_probe` (concurrency + Semaphore) | DO serial + budget sharding + self-continuing alarm |
 | Re-probe triggers | Fingerprint change / backoff expiry / manual | Same (**no time-based TTL**; plus an optional scheduled patrol, off by default) |
+| Queue health | None (a dead session retries forever) | **Permanent failures suspend the queue** after `AUTH_FAIL_SUSPEND_THRESHOLD=3` consecutive rejections (only permanent kinds count: no session / upstream 401-403); the console shows the state on the dashboard and next to the session summary, and re-importing a session or a green connectivity check resumes it |
 | Served contract | `/v1/models` fields, the `x_open_webui` envelope, `GET /v1/models/{id}`, 400 self-heal | Same |
 
 Renames are hard, with no compatibility layer (decision D11), so old file names / KV keys /
@@ -36,7 +37,7 @@ admin endpoints are all gone.
 | D3 | Timeouts | Per-request timeout is tunable (1–120s, default 30) + a 45s per-model wall clock, an internal constant |
 | D4 | Cron Trigger | **Not added** (no `triggers.crons` in `wrangler.jsonc`); the DO alarm keeps the queue going |
 | D5 | Cross-colo coordination | **A single Durable Object coordinator**, and the **DO itself holds the probe cache** |
-| D6 | Instance metadata | `exposeInstanceMeta=true` by default, `features` passed through verbatim; a model's own `x_open_webui.capabilities` is **not** governed by this switch (same as Python) |
+| D6 | Instance metadata | `exposeInstanceMeta=true` by default, `features` passed through verbatim; a model's own `x_open_webui_deviations.capabilities` is **not** governed by this switch (same as Python) |
 | D7 | Unestablished capabilities | **Omitted**, never filled in from the OWUI template |
 | D8 | `reasoning.default_*` | **Omitted** unless the engine says otherwise |
 | D9 | Error bodies | This worker's own wording (structurally isomorphic to Python) |
@@ -128,7 +129,8 @@ wins).
 
 - **Per model**: `id/object/created/owned_by` + optional `name`,
   `max_model_len`/`max_context_length`/`context_length`, `quantization`, `description`,
-  `x_open_webui.capabilities` (the **diff keys** against the shared template) + probe-added
+  `x_open_webui_deviations.capabilities` (the **diff keys** against the shared template; the
+  plain `x_open_webui` name is reserved for the envelope's instance metadata, upstream R9) + probe-added
   `capabilities`, `supported_parameters`, `reasoning`, `architecture`.
   Rule: **omit what is not established, never fill in a default**; levels follow the OpenRouter
   ordering from the largest effort down, `max → none` (unknown levels sort last).
@@ -152,7 +154,7 @@ wins).
 |---|---|
 | `settings:probe` (KV) | `{enabled, timeout, wait, budget, exposeInstanceMeta}` |
 | `settings:touch_interval` (KV) | `last_used` write-throttle granularity (seconds) |
-| session / apikey / admin (KV) | Low-rate credentials and configuration |
+| session / `apikey:<sha256>` / `usage:<sha256>` / admin (KV) | Low-rate credentials and configuration (the key material is never stored, only its digest and display metadata; usage records live under their own key so they can never rewrite a credential record) |
 | `ModelProbeCoordinator` (DO SQLite) | `models(id, data)` one row per model; `meta(key, value)` bookkeeping (cache version 2, upstream prefix, the `instance_meta` snapshot + shared capability template) |
 
 **The instance snapshot is not in KV**: the `/api/config` snapshot and

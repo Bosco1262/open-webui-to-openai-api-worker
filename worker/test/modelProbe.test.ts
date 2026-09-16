@@ -14,6 +14,14 @@
  * 包括旧实现完全读不懂的那些：外层 pydantic 枚举是超集，而模型自带解析器
  * （Harmony / Qwen）会以另一种措辞拒绝其中的子集。
  *
+ * Contract anchors (docs/UPSTREAM-CONTRACTS.zh-CN.md):
+ *   #1  挡位顺序         upstream/model_probe.py:79
+ *   #2  能力键四项       upstream/model_probe.py:89-94
+ *   #10 状态机四态与语义 upstream/model_probe.py:114-131,904-939
+ *   #11 退避公式与上限   upstream/model_probe.py:131-132,678-686
+ *   #12 证伪挡位跨轮继承 upstream/model_probe.py:880-911
+ * 契约锚点（见 docs/UPSTREAM-CONTRACTS.zh-CN.md）：改动这些行为前先看上游对应位置。
+ *
  * Run: node --test --test-isolation=none test/*.test.ts
  */
 
@@ -503,6 +511,45 @@ test("a live 400 that names a level disproves it and re-arms the model", () => {
   assert.equal(cache.invalidateEffort("a", "max"), false);
   assert.equal(cache.invalidateEffort("nope", "low"), false);
   assert.equal(cache.invalidateEffort("a", null), false);
+});
+
+test("a level a live request disproved is not resurrected by a later probe", () => {
+  // The probe that just finished may have been STARTED before the client's 400, so its
+  // "the engine accepts `low`" is older evidence than the rejection. The disproved set
+  // therefore survives re-probes for as long as the engine fingerprint is unchanged --
+  // and is dropped when the engine actually changes.
+  //
+  // 刚结束的那次探测可能是**在客户端的 400 之前**启动的，它那句"引擎接受 low"是比那次拒绝
+  // 更旧的证据。因此证伪集合会在指纹不变期间跨重探延续，并在引擎真的变了时清空。
+  const cache = seededCache();
+  assert.equal(cache.invalidateEffort("a", "low"), true);
+  assert.deepEqual(cache.entry("a")?.invalidated_efforts, ["low"]);
+
+  // A later probe that "accepts" the level again must not win.
+  // 之后某次探测即便又"接受"了该挡位，也不能翻案。
+  cache.recordResult("a", {
+    ...createModelProbe("fp-a", 5),
+    status: "ok",
+    supported_efforts: ["none", "low", "medium"],
+    efforts_verified: true,
+  });
+  const after = cache.entry("a");
+  assert.deepEqual(after?.supported_efforts, ["none", "medium"]);
+  assert.equal(after?.efforts_verified, false, "the merged list is no longer fully verified");
+  assert.deepEqual(after?.invalidated_efforts, ["low"]);
+
+  // A different engine starts from a clean slate.
+  // 换了引擎则从零开始。
+  cache.recordResult("a", {
+    ...createModelProbe("fp-a2", 6),
+    status: "ok",
+    supported_efforts: ["none", "low"],
+    efforts_verified: true,
+  });
+  const swapped = cache.entry("a");
+  assert.deepEqual(swapped?.supported_efforts, ["none", "low"]);
+  assert.deepEqual(swapped?.invalidated_efforts, []);
+  assert.equal(swapped?.efforts_verified, true);
 });
 
 test("an id repeated in the upstream list is probed once", () => {

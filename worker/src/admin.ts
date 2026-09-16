@@ -22,25 +22,29 @@ import {
   setAdminCookie,
 } from "./auth.ts";
 import { fetchUpstream, sessionHeaders, sessionIsUsable } from "./session.ts";
-import { PREFIX_CANDIDATES, confirmUpstreamPrefix } from "./upstream.ts";
+import { PREFIX_CANDIDATES, checkUpstreamBaseUrl, confirmUpstreamPrefix } from "./upstream.ts";
 import {
   parseProbeSettingsInput,
   readProbeSettings,
   writeProbeSettings,
 } from "./probeSettings.ts";
-import { RoundUnavailable } from "./probeRuntime.ts";
+import { AUTH_FAIL_SUSPEND_THRESHOLD, RoundUnavailable } from "./probeRuntime.ts";
+import type { ProbeHealth } from "./probeRuntime.ts";
 import type { ModelProbeCoordinator, ProbeCoordinatorView } from "./probeCoordinator.ts";
-import { clearTouchMarker, getTouchInterval, setTouchInterval } from "./touch.ts";
+import { clearTouchMarker, deleteApiKeyUsage, getTouchInterval, readApiKeyUsages, setTouchInterval } from "./touch.ts";
 import { INTERVAL_OPTIONS } from "./intervals.ts";
 import {
+  apiKeyId,
   bytesToBase64Url,
-  deleteApiKey,
+  deleteApiKeyById,
   deleteSession,
-  getApiKeyMeta,
+  getApiKeyEntryById,
   getSession,
+  listApiKeyEntries,
   listApiKeys,
   putApiKey,
   randomBytes,
+  sessionSecretWarnings,
   setSession,
 } from "./kv.ts";
 
@@ -50,16 +54,52 @@ interface JsonResult {
   [key: string]: unknown;
 }
 
+/**
+ * Headers every admin response carries.
+ *
+ * Admin responses include one-time plaintext API keys and the credential summary, so
+ * they must never be cached by the browser or an intermediary; `nosniff` keeps a
+ * mislabelled response from being re-interpreted as HTML, and the CSP (also applied
+ * to the console page itself, see index.ts) bounds what any future injection could do.
+ *
+ * 所有管理端响应携带的响应头。
+ *
+ * 管理端响应包含一次性明文 API Key 与凭证摘要，因此绝不能被浏览器或中间层缓存；
+ * `nosniff` 阻止被错误标注的响应被重新解释成 HTML；CSP（控制台页面本身也带，见
+ * index.ts）则限定未来任何注入能做到的事。
+ */
+export const ADMIN_SECURITY_HEADERS: Record<string, string> = {
+  "cache-control": "no-store, private",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
+  "content-security-policy":
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'",
+};
+
 // Build a JSON response for the admin API.
 // 构造管理 API 的 JSON 响应。
 function json(data: JsonResult, status = 200): Response {
-  return Response.json(data, { status });
+  return Response.json(data, { status, headers: ADMIN_SECURITY_HEADERS });
 }
 
 // Shorthand for a failed admin API response.
 // 管理 API 失败响应的简写形式。
 function fail(error: string, status = 400): Response {
   return json({ ok: false, error }, status);
+}
+
+// A JSON response carrying security headers plus any number of Set-Cookie values.
+// Signing out expires BOTH admin cookie names (see clearAdminCookie), which a plain
+// object cannot express -- `Headers.append` is what keeps the second one.
+//
+// 携带安全响应头与任意数量 Set-Cookie 的 JSON 响应。登出会使**两个**管理 Cookie 名
+// 一起过期（见 clearAdminCookie），这是普通对象无法表达的——靠 `Headers.append` 才能
+// 保住第二个。
+function jsonWithCookies(data: unknown, cookies: readonly string[], status = 200): Response {
+  const headers = new Headers(ADMIN_SECURITY_HEADERS);
+  headers.set("content-type", "application/json");
+  for (const cookie of cookies) headers.append("set-cookie", cookie);
+  return new Response(JSON.stringify(data), { status, headers });
 }
 
 // Safely parse the JSON body, falling back to an empty object.
@@ -73,15 +113,22 @@ async function readBody(request: Request): Promise<Record<string, unknown>> {
   }
 }
 
-// A base URL is valid if it parses and uses http/https.
-// 能解析且协议为 http/https 的 base URL 即为合法。
+// A base URL is valid when the upstream policy accepts it (HTTPS, no private or
+// metadata literal host, standard port; loopback exempt). See `checkUpstreamBaseUrl`.
+// base URL 的合法性由上游策略判定（HTTPS、非私网/元数据字面主机、标准端口；回环例外）。
+// 见 `checkUpstreamBaseUrl`。
 function isValidBaseUrl(url: string): boolean {
-  try {
-    const parsedUrl = new URL(url);
-    return parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:";
-  } catch {
-    return false;
-  }
+  return checkUpstreamBaseUrl(url).ok;
+}
+
+/** The i18n error code for a refused base URL. */
+/** 被拒绝的 base URL 对应的 i18n 错误码。 */
+function baseUrlErrorCode(url: string): string {
+  const check = checkUpstreamBaseUrl(url);
+  if (check.ok) return "";
+  if (check.reason === "https_required") return "err.base_url_https_required";
+  if (check.reason === "forbidden_host") return "err.base_url_forbidden_host";
+  return "err.session_bad_base_url";
 }
 
 /** Redacted credential summary, safe for the UI. */
@@ -98,6 +145,30 @@ function describeSession(session: StoredSession): string {
 // 生成随机客户端 API Key（36 随机字节，base64url，sk- 前缀）。
 function generateApiKey(): string {
   return `sk-${bytesToBase64Url(randomBytes(36))}`;
+}
+
+/** The only display form of a key that is ever stored or listed. */
+/** 一把 Key 唯一会被存储或列出的展示形式。 */
+function maskApiKey(key: string): string {
+  return `${key.slice(0, 12)}…${key.slice(-4)}`;
+}
+
+/**
+ * The key a mutating request addresses, as its public id.
+ *
+ * The console sends `id` (the key's digest). A plaintext `key` is still accepted -- and
+ * immediately hashed -- so a console page cached from before this change keeps working;
+ * the plaintext is never stored, compared or echoed.
+ *
+ * 变更类请求所指向的 Key，以其公开 id 表示。
+ *
+ * 控制台发送 `id`（Key 的摘要）。明文 `key` 仍被接受——并立即哈希——使本改动之前
+ * 缓存的页面继续可用；明文本身绝不会被存储、比较或回显。
+ */
+async function keyIdFromBody(body: Record<string, unknown>): Promise<string> {
+  if (typeof body.id === "string" && body.id) return body.id;
+  if (typeof body.key === "string" && body.key) return apiKeyId(body.key);
+  return "";
 }
 
 // --------------------------------------------------------------------------- //
@@ -137,6 +208,12 @@ async function handleStatus(env: Env, request: Request): Promise<Response> {
     passwordSource: source,
     touchInterval,
     touchIntervalOptions: INTERVAL_OPTIONS,
+    // Operator-facing configuration warnings (i18n keys); the console shows each one
+    // once per page load. Currently: a bound SESSION_SECRET that is too short.
+    //
+    // 面向运维的配置告警（i18n 键）；控制台每次页面加载各提示一次。目前是：绑定的
+    // SESSION_SECRET 过短。
+    warnings: sessionSecretWarnings(env),
     session: session
       ? {
           imported: true,
@@ -146,6 +223,13 @@ async function handleStatus(env: Env, request: Request): Promise<Response> {
           usable: sessionIsUsable(session),
         }
       : { imported: false },
+    // The queue's health rides along with the session summary: the console shows both in
+    // the same card, and "imported" alone would hide the case that matters most --
+    // credentials the upstream is rejecting.
+    //
+    // 队列健康与 session 摘要同行：控制台把它们放在同一张卡片里，而只显示"已导入"会掩盖最
+    // 要紧的那种情形——上游正在拒绝这份凭证。
+    health: await probeHealthFor(env, session),
     apiKeys: { count: keys.length },
     baseUrl: `${origin}/v1`,
   });
@@ -160,9 +244,7 @@ async function issueSession(
 ): Promise<Response> {
   const token = await createAdminToken(env);
   const isHttps = new URL(request.url).protocol === "https:";
-  return new Response(JSON.stringify({ ...data, ok: true }), {
-    headers: { "content-type": "application/json", "set-cookie": setAdminCookie(token, isHttps) },
-  });
+  return jsonWithCookies({ ...data, ok: true }, [setAdminCookie(token, isHttps)]);
 }
 
 // POST /admin/api/login — verify the password under lockout protection.
@@ -185,6 +267,7 @@ async function handleLogin(env: Env, request: Request): Promise<Response> {
       return new Response(JSON.stringify({ ok: false, error: "err.too_many" }), {
           status: 429,
           headers: {
+            ...ADMIN_SECURITY_HEADERS,
             "content-type": "application/json",
             "retry-after": String(lock.retryAfterSec),
           },
@@ -232,9 +315,7 @@ async function handleSetup(env: Env, request: Request): Promise<Response> {
 // POST /admin/api/logout —— 清除管理会话 Cookie。
 async function handleLogout(env: Env, request: Request): Promise<Response> {
   const isHttps = new URL(request.url).protocol === "https:";
-  return new Response(JSON.stringify({ ok: true }), {
-    headers: { "content-type": "application/json", "set-cookie": clearAdminCookie(isHttps) },
-  });
+  return jsonWithCookies({ ok: true }, clearAdminCookie(isHttps));
 }
 
 // POST /admin/api/password — change the admin password (requires the old one).
@@ -255,9 +336,7 @@ async function handleChangePassword(env: Env, request: Request): Promise<Respons
   //
   // 纪元自增使所有会话（含当前会话）失效：清除 Cookie，让 UI 回到登录视图。
   const isHttps = new URL(request.url).protocol === "https:";
-  return new Response(JSON.stringify({ ok: true, reauthenticate: true }), {
-    headers: { "content-type": "application/json", "set-cookie": clearAdminCookie(isHttps) },
-  });
+  return jsonWithCookies({ ok: true, reauthenticate: true }, clearAdminCookie(isHttps));
 }
 
 // Probe the upstream /models endpoint with the candidate prefixes and return
@@ -325,6 +404,25 @@ async function testUpstreamSession(
   return { ok: false, code: "up.test_not_models" };
 }
 
+/**
+ * Size ceilings for an imported session.
+ *
+ * A stored session is read on the import path, on every `/admin/api/session/check`
+ * and by the probe coordinator -- so an unvalidated blob is re-read (and re-parsed)
+ * forever. Real captures are a few kilobytes at most; these caps are generous for
+ * them and still bounded.
+ *
+ * 导入 session 的大小上限。
+ *
+ * 已存储的 session 会在导入路径、每次 `/admin/api/session/check` 以及探测协调者中被
+ * 读取——因此一个不受校验的巨型负载会被**反复**读出并解析。真实捕获最多几 KB；这些
+ * 上限对它足够宽松，同时仍是有限的。
+ */
+const MAX_SESSION_JSON_CHARS = 64 * 1024;
+const MAX_CREDENTIAL_CHARS = 8 * 1024;
+const MAX_USER_AGENT_CHARS = 512;
+const MAX_BASE_URL_CHARS = 2048;
+
 // POST /admin/api/session — validate (`test`) and/or store (`save`) a session.
 // POST /admin/api/session —— 校验（test）和/或保存（save）session。
 async function handleImportSession(env: Env, request: Request): Promise<Response> {
@@ -334,6 +432,7 @@ async function handleImportSession(env: Env, request: Request): Promise<Response
   const shouldSave = body.save === true;
 
   if (!rawJson) return fail("err.session_empty");
+  if (rawJson.length > MAX_SESSION_JSON_CHARS) return fail("err.session_too_large");
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawJson);
@@ -357,11 +456,26 @@ async function handleImportSession(env: Env, request: Request): Promise<Response
     captured_at: Number(lower.captured_at ?? lower.capturedat ?? 0) || 0,
     base_url: typeof lower.base_url === "string" ? lower.base_url : "",
   };
+  if (
+    session.authorization.length > MAX_CREDENTIAL_CHARS ||
+    session.cookie.length > MAX_CREDENTIAL_CHARS ||
+    session.user_agent.length > MAX_USER_AGENT_CHARS ||
+    session.base_url.length > MAX_BASE_URL_CHARS
+  ) {
+    return fail("err.session_too_large");
+  }
   if (!sessionIsUsable(session)) {
     return fail("err.session_missing_credentials");
   }
+  // The upstream URL policy is enforced here, at import time: HTTPS unless the host
+  // is loopback, no private/link-local/metadata literal host, standard port. See
+  // `checkUpstreamBaseUrl` for why (cleartext credentials, request forgery).
+  //
+  // 上游地址策略在这里、即导入时就强制执行：除回环主机外必须是 HTTPS，不接受私网/
+  // 链路本地/元数据字面主机，端口须为标准端口。理由见 `checkUpstreamBaseUrl`
+  // （明文凭证、请求伪造）。
   if (!session.base_url || !isValidBaseUrl(session.base_url)) {
-    return fail("err.session_bad_base_url");
+    return fail(baseUrlErrorCode(session.base_url) || "err.session_bad_base_url");
   }
 
   // Structured test result; the UI composes the localized message.
@@ -379,6 +493,11 @@ async function handleImportSession(env: Env, request: Request): Promise<Response
       return json({ ok: false, error: "err.session_test_failed", needForce: true, test }, 409);
     }
     await setSession(env, session);
+    // A fresh import is exactly the thing that fixes a rejected credential: let the queue
+    // move again (best effort -- the save has already happened).
+    //
+    // 重新导入正是修复"凭证被拒"的那件事：让队列重新动起来（尽力而为——保存已经完成了）。
+    await resumeProbesFor(env, session);
   }
 
   return json({ ok: true, saved: shouldSave, test, summary: describeSession(session) });
@@ -398,6 +517,13 @@ async function handleSettings(env: Env, request: Request): Promise<Response> {
 // DELETE /admin/api/session — remove the stored session credentials.
 // DELETE /admin/api/session —— 删除已存储的 session 凭证。
 async function handleDeleteSession(env: Env): Promise<Response> {
+  // The coordinator is told BEFORE the session disappears from KV, because it needs the
+  // base_url to find its own instance (and because "the queue is stopped, no session" is
+  // the truth from that moment on -- a later round would only re-learn it).
+  //
+  // 先告诉协调者、再删 KV 里的 session：它需要 base_url 找到自己的实例（也因为从那一刻起
+  // "队列已停、没有 session"就是事实——之后再跑一轮也只能重新得知它）。
+  await suspendProbesForDeletedSession(env, await getSession(env));
   await deleteSession(env);
   return json({ ok: true });
 }
@@ -411,22 +537,42 @@ async function handleCheckSession(env: Env): Promise<Response> {
   const session = await getSession(env);
   if (!session) return fail("err.session_not_imported");
   const test = await testUpstreamSession(session);
+  // A green check is a second proof (besides a fresh import) that the credentials work:
+  // resume a suspended queue instead of leaving the operator to wonder why probing is
+  // still paused. A red one changes nothing -- the next round will record it anyway.
+  //
+  // 检测通过是"凭证可用"的第二个证据（除了重新导入）：解除挂起，别让运维纳闷探测为什么还是
+  // 停着。检测不通过则什么都不改——下一轮自然会记录。
+  if (test.ok) await resumeProbesFor(env, session);
   return json({ ok: true, test, summary: describeSession(session) });
 }
 
-// GET /admin/api/keys — list keys with masked display values.
-// GET /admin/api/keys —— 列出 Key，附带脱敏展示值。
+// GET /admin/api/keys — list keys as id + display metadata, never the secret.
+//
+// The full key is unavailable by construction: only its digest (the id) and the
+// pre-rendered masked form are stored, so this endpoint cannot leak a usable
+// credential even to a caller holding the admin session.
+//
+// GET /admin/api/keys —— 以 id + 展示元数据列出 Key，绝不含密钥。
+//
+// 完整 Key 在构造上就取不到：存储的只有它的摘要（即 id）与预先渲染的脱敏形式，
+// 因此本端点即便对持有管理会话的调用方也无法泄露可用凭证。
 async function handleListKeys(env: Env): Promise<Response> {
-  const keys = await listApiKeys(env);
+  const entries = await listApiKeyEntries(env);
+  const usage = await readApiKeyUsages(env, entries.map((entry) => entry.id));
   return json({
     ok: true,
-    keys: keys.map(({ key, meta }) => ({
-      key,
+    keys: entries.map(({ id, meta }) => ({
+      id,
       prefix: meta.prefix,
       name: meta.name,
       created_at: meta.created_at,
-      last_used: meta.last_used,
-      masked: `${key.slice(0, 12)}…${key.slice(-4)}`,
+      // Usage records are the live source; `meta.last_used` is what keys created
+      // before this change still carry.
+      //
+      // 使用记录是实时来源；`meta.last_used` 是本改动之前创建的 Key 仍然携带的值。
+      last_used: usage[id] || meta.last_used || 0,
+      masked: meta.masked ?? `${meta.prefix || "sk-"}…`,
     })),
   });
 }
@@ -445,7 +591,7 @@ async function handleCreateKey(env: Env, request: Request): Promise<Response> {
   // 拒绝与已有 Key 重名的名称（不区分大小写）。`name` 是 KV 返回的任意值，因此先做
   // 强制转换：否则一条手改的或外来的、name 为数字的条目会在这里抛 TypeError，运维就
   // 一个 Key 都建不了了。
-  const existing = await listApiKeys(env);
+  const existing = await listApiKeyEntries(env);
   if (existing.some(({ meta }) => String(meta.name ?? "").toLowerCase() === name.toLowerCase())) {
     return fail("err.key_name_duplicate");
   }
@@ -455,26 +601,35 @@ async function handleCreateKey(env: Env, request: Request): Promise<Response> {
     prefix: key.slice(0, 8),
     created_at: Math.floor(Date.now() / 1000),
     last_used: 0,
+    masked: maskApiKey(key),
   };
-  await putApiKey(env, key, meta);
-  // Echo `masked` so the console can render the new row immediately without
-  // re-listing (KV list is eventually consistent and may lag a fresh write).
+  const id = await putApiKey(env, key, meta);
+  // The plaintext is echoed exactly ONCE, here: nothing storeable can produce it again.
+  // `id`/`masked` let the console render the new row without re-listing (KV list is
+  // eventually consistent and may lag a fresh write).
   //
-  // 回传 `masked`，让控制台无需重新 list 即可立即渲染新行
-  // （KV list 是最终一致的，可能滞后于刚完成的写入）。
-  return json({ ok: true, key, masked: `${key.slice(0, 12)}…${key.slice(-4)}`, ...meta });
+  // 明文只在这里回显**一次**：任何可存储的内容都无法再产生它。`id`/`masked` 让控制台
+  // 无需重新 list 即可渲染新行（KV list 是最终一致的，可能滞后于刚完成的写入）。
+  return json({ ok: true, id, key, masked: meta.masked, ...meta });
 }
 
-// DELETE /admin/api/keys — revoke a client API key by its plaintext value.
-// DELETE /admin/api/keys —— 按 Key 明文撤销客户端 API Key。
+// DELETE /admin/api/keys — revoke a client API key by its public id.
+// DELETE /admin/api/keys —— 按公开 id 撤销客户端 API Key。
 async function handleDeleteKey(env: Env, request: Request): Promise<Response> {
   const body = await readBody(request);
-  const key = typeof body.key === "string" ? body.key : "";
-  if (!key) return fail("err.key_missing");
-  await deleteApiKey(env, key);
+  const id = await keyIdFromBody(body);
+  if (!id) return fail("err.key_missing");
+  await deleteApiKeyById(env, id);
+  // The usage record goes with the key: it is the key's own bookkeeping, and leaving
+  // it behind would make the next key that happens to reuse the id inherit a
+  // last-used timestamp out of nowhere.
+  //
+  // 使用记录随 Key 一起删除：它属于该 Key 自己的记账，残留会让"恰好复用同一 id"的
+  // 下一把 Key 凭空继承一个最近使用时刻。
+  await deleteApiKeyUsage(env, id);
   // Drop the in-instance touch marker: the key no longer exists.
   // 清除实例内的写入标记：这个 Key 已不存在。
-  clearTouchMarker(key);
+  clearTouchMarker(id);
   return json({ ok: true });
 }
 
@@ -488,9 +643,9 @@ async function handleDeleteKey(env: Env, request: Request): Promise<Response> {
 // 导致新旧并存，绝不会两者皆失。
 async function handleRotateKey(env: Env, request: Request): Promise<Response> {
   const body = await readBody(request);
-  const key = typeof body.key === "string" ? body.key : "";
-  if (!key) return fail("err.key_missing");
-  const existing = await getApiKeyMeta(env, key);
+  const id = await keyIdFromBody(body);
+  if (!id) return fail("err.key_missing");
+  const existing = await getApiKeyEntryById(env, id);
   if (!existing) return fail("err.key_missing");
   const newKey = generateApiKey();
   const meta: ApiKeyMeta = {
@@ -500,20 +655,23 @@ async function handleRotateKey(env: Env, request: Request): Promise<Response> {
     //
     // 名称与 last_used 原样保留（运维决策）：轮转是为同一客户端换发凭证，因此
     // "这个客户端是否被用过、何时" 在换发后延续；被替换的只是密钥本身。
-    name: existing.name,
+    name: existing.meta.name,
     prefix: newKey.slice(0, 8),
-    created_at: existing.created_at,
-    last_used: existing.last_used,
+    created_at: existing.meta.created_at,
+    last_used: existing.meta.last_used,
+    masked: maskApiKey(newKey),
   };
-  await putApiKey(env, newKey, meta);
-  await deleteApiKey(env, key);
+  const newId = await putApiKey(env, newKey, meta);
+  await env.KV.delete(existing.kvName);
+  await deleteApiKeyUsage(env, id);
   // Drop the in-instance touch marker of the OLD key: it no longer exists.
   // 清除**旧** Key 的实例内写入标记：它已不存在。
-  clearTouchMarker(key);
+  clearTouchMarker(id);
   return json({
     ok: true,
+    id: newId,
     key: newKey,
-    masked: `${newKey.slice(0, 12)}…${newKey.slice(-4)}`,
+    masked: meta.masked,
     ...meta,
   });
 }
@@ -528,7 +686,7 @@ async function handleRotateKey(env: Env, request: Request): Promise<Response> {
 async function handleProbeInfo(env: Env): Promise<Response> {
   const settings = await readProbeSettings(env, { useCache: false });
   const coordinator = probeCoordinatorFor(env, await getSession(env));
-  let view: ProbeCoordinatorView = { models: [], cached: 0, now: Date.now() / 1000 };
+  let view: ProbeCoordinatorView | null = null;
   if (coordinator) {
     try {
       view = await coordinator.view();
@@ -550,9 +708,15 @@ async function handleProbeInfo(env: Env): Promise<Response> {
     // 心跳档位就是共享刻度表本身（与「使用记录粒度」下拉框同源），控制台绝不自行
     // 硬编码节奏。
     heartbeatOptions: INTERVAL_OPTIONS,
-    models: view.models,
-    cached: view.cached,
-    now: view.now,
+    // Health travels with the table so the console can explain an empty one ("probing is
+    // paused: the upstream rejected the credentials") instead of showing nothing.
+    //
+    // 健康状态与表格同行：空表时控制台才能解释原因（"探测已暂停：上游拒绝了凭证"），而不是
+    // 什么都不显示。
+    health: view ? healthPayload(view.health, view.cached) : null,
+    models: view?.models ?? [],
+    cached: view?.cached ?? 0,
+    now: view?.now ?? Date.now() / 1000,
   });
 }
 
@@ -610,7 +774,11 @@ async function handleProbeRefresh(env: Env, request: Request): Promise<Response>
     const roundCode = roundUnavailableCode(err);
     if (roundCode) {
       return fail(
-        roundCode === "session_missing" ? "err.probe_session_missing" : "err.probe_models_failed",
+        roundCode === "session_missing"
+          ? "err.probe_session_missing"
+          : roundCode === "auth_rejected"
+            ? "err.probe_auth_rejected"
+            : "err.probe_models_failed",
         502,
       );
     }
@@ -651,7 +819,9 @@ async function handleProbeRefresh(env: Env, request: Request): Promise<Response>
  * 构造函数把 code 当作 message 传入，因此幸存的 message 足以判定；其余情况继续走
  * 通用的 500 路径。
  */
-function roundUnavailableCode(err: unknown): "session_missing" | "models_failed" | null {
+function roundUnavailableCode(
+  err: unknown,
+): "session_missing" | "models_failed" | "auth_rejected" | null {
   if (err instanceof RoundUnavailable) return err.code;
   if (err instanceof Error) {
     // Across the RPC boundary only `name` and `message` survive. The coordinator
@@ -663,9 +833,14 @@ function roundUnavailableCode(err: unknown): "session_missing" | "models_failed"
     // （"RoundUnavailable:<code>"，见 RoundUnavailable）；裸 name + message 的匹配
     // 作为仍在运行旧格式的已部署实例的兜底。
     const named = /^RoundUnavailable:(.+)$/.exec(err.name);
-    if (named) return named[1] === "session_missing" ? "session_missing" : "models_failed";
+    if (named) {
+      const code = named[1];
+      return code === "session_missing" || code === "auth_rejected" ? code : "models_failed";
+    }
     if (err.name === "RoundUnavailable") {
-      return err.message.includes("session_missing") ? "session_missing" : "models_failed";
+      if (err.message.includes("session_missing")) return "session_missing";
+      if (err.message.includes("auth_rejected")) return "auth_rejected";
+      return "models_failed";
     }
   }
   return null;
@@ -678,6 +853,92 @@ function roundUnavailableCode(err: unknown): "session_missing" | "models_failed"
 function probeCoordinatorFor(env: Env, session: StoredSession | null): DurableObjectStub<ModelProbeCoordinator> | null {
   if (!session || !session.base_url) return null;
   return env.PROBE.getByName(session.base_url);
+}
+
+/** The health payload the console renders: the coordinator's record plus the two values
+ *  the UI would otherwise have to guess (how many models are cached, and after how many
+ *  consecutive rejections probing pauses). */
+/** 控制台渲染的健康负载：协调者的记录，外加两个否则要由 UI 猜的值（缓存了多少模型、连续被拒
+ *  多少次后暂停探测）。 */
+export interface ProbeHealthPayload extends ProbeHealth {
+  cached_models: number;
+  suspend_threshold: number;
+}
+
+function healthPayload(health: ProbeHealth, cached: number): ProbeHealthPayload {
+  return { ...health, cached_models: cached, suspend_threshold: AUTH_FAIL_SUSPEND_THRESHOLD };
+}
+
+/** The health for `/admin/api/status` (one cheap RPC; null when there is nothing to ask --
+ *  no session, or the coordinator did not answer). */
+/** `/admin/api/status` 用的健康数据（一次廉价 RPC；无对象可问时返回 null——没有 session，
+ *  或协调者没有回应）。 */
+async function probeHealthFor(env: Env, session: StoredSession | null): Promise<ProbeHealthPayload | null> {
+  // The lookup is inside the try on purpose: a binding that cannot even name the object
+  // (no session, a stub namespace in a test, a binding mistake) must degrade to "unknown
+  // health", never break the status page.
+  //
+  // 查找刻意放在 try 内：连对象都指不出来的绑定（没有 session、测试里的占位命名空间、绑定写错）
+  // 必须退化为"健康未知"，绝不能让状态页整体失败。
+  try {
+    const coordinator = probeCoordinatorFor(env, session);
+    if (!coordinator) return null;
+    const snapshot = await coordinator.healthView();
+    return healthPayload(snapshot.health, snapshot.cached);
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        message: "probe health unavailable",
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+    return null;
+  }
+}
+
+/**
+ * Tell the coordinator the credentials may be back (a session was imported, or a
+ * connectivity check just succeeded) so a suspended queue starts moving again.
+ *
+ * Best effort on purpose: the operator's own result (a saved session, a green check)
+ * must not fail because a Durable Object was busy.
+ *
+ * 告诉协调者凭证可能回来了（导入了 session，或连通性检测刚刚通过），让挂起的队列重新动起来。
+ *
+ * 刻意做成尽力而为：运维自己的结果（保存成功、检测通过）绝不能因为 Durable Object 忙而失败。
+ */
+async function resumeProbesFor(env: Env, session: StoredSession | null): Promise<void> {
+  try {
+    const coordinator = probeCoordinatorFor(env, session);
+    if (!coordinator) return;
+    await coordinator.resumeProbes();
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        message: "probe resume failed",
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }
+}
+
+/** Tell the coordinator the session is gone, so it stops at once and the console can say
+ *  why (see noteSessionRemoved). Best effort, same reasoning as above. */
+/** 告诉协调者 session 没了，让它立刻停下、并让控制台能说明原因（见 noteSessionRemoved）。
+ *  同样尽力而为，理由同上。 */
+async function suspendProbesForDeletedSession(env: Env, session: StoredSession | null): Promise<void> {
+  try {
+    const coordinator = probeCoordinatorFor(env, session);
+    if (!coordinator) return;
+    await coordinator.noteSessionRemoved();
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        message: "probe suspend failed",
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    );
+  }
 }
 
 // --------------------------------------------------------------------------- //

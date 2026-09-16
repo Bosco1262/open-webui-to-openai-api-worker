@@ -15,6 +15,11 @@
  * 默认挡位、有时不会。只有真实的 200 才能对外声明，因此下面每个用例考的都是
  * "数请求"，而不是"信枚举"。
  *
+ * Contract anchors (docs/UPSTREAM-CONTRACTS.zh-CN.md):
+ *   #3 9 个受测参数      upstream/model_probe.py:102-112
+ *   #4 探测五步与 20 次上限 upstream/probe_runner.py:328-500
+ * 契约锚点（见 docs/UPSTREAM-CONTRACTS.zh-CN.md）：改动探测步骤/请求上限前先看上游对应位置。
+ *
  * Run: node --test --test-isolation=none test/*.test.ts
  */
 

@@ -1,20 +1,33 @@
 /**
  * API-key `last_used` write throttle ("usage tracking granularity").
  *
- * Split out of kv.ts: this is feature logic (when to write `last_used`), not
- * generic KV plumbing. Granularity steps come from intervals.ts and are shared
- * with the reasoning-effort auto-refresh; the persisted value lives in its own
- * KV key and only governs this throttle.
+ * Usage is recorded under its OWN key (`usage:<sha256(key)>`, see kv.ts), never in
+ * the credential record. That separation is the point: the previous implementation
+ * rewrote the whole credential record (`apikey:<key>`) from `ctx.waitUntil` to bump
+ * `last_used`, so a write racing a revoke could RE-CREATE a key that had just been
+ * deleted -- an undo of a security action, with permanent effect. Writing to a
+ * separate namespace makes that class of race structurally impossible.
+ *
+ * Granularity steps come from intervals.ts and are shared with the reasoning-effort
+ * auto-refresh; the persisted value lives in its own KV key and only governs this
+ * throttle. `last_used` on the console is now read from the usage records; the
+ * `last_used` field still present in old credential records is shown as a fallback.
  *
  * API Key `last_used` 写入节流（"使用记录粒度"）。
  *
- * 从 kv.ts 拆分而来：这里属于功能逻辑（何时写入 last_used），而非通用 KV
- * 基础设施。粒度档位来自 intervals.ts，与思考挡位自动刷新共用；持久化的
- * 配置值存放在独立的 KV 键中，仅约束本节流逻辑。
+ * 使用记录写在**自己的**键下（`usage:<sha256(key)>`，见 kv.ts），绝不写进凭据记录。
+ * 这一分离正是要点：旧实现会从 `ctx.waitUntil` 里重写整条凭据记录（`apikey:<key>`）
+ * 来刷新 `last_used`，因此一次与"撤销"并发的写入可以把刚被删除的 Key **重建**出来
+ * ——一次安全操作的撤销被回滚，且后果永久。写到独立命名空间使这类竞态在结构上不可能
+ * 发生。
+ *
+ * 粒度档位来自 intervals.ts，与思考挡位自动刷新共用；持久化的配置值存放在独立的 KV
+ * 键中，仅约束本节流逻辑。控制台上的 `last_used` 现在从使用记录读出；旧凭据记录里
+ * 仍存在的 `last_used` 字段作为回退展示。
  */
 
-import type { ApiKeyMeta, Env } from "./types.ts";
-import { apiKeyKVKey, cacheGet, cacheSet } from "./kv.ts";
+import type { Env } from "./types.ts";
+import { cacheGet, cacheSet, usageKVName } from "./kv.ts";
 import { DEFAULT_INTERVAL, isIntervalOption } from "./intervals.ts";
 
 /** KV key storing the configured `last_used` refresh interval (seconds). */
@@ -42,50 +55,54 @@ export async function setTouchInterval(env: Env, seconds: number): Promise<boole
   return true;
 }
 
-// In-instance write markers: key -> last write time (ms). Keeps the throttle
-// effective between the KV write and its eventual read-back.
+// In-instance write markers: key id -> last write time (ms). Keeps the throttle
+// effective between the KV write and its eventual read-back, and (with the stored
+// usage record) avoids a KV read on the steady-state hot path.
 //
-// 实例内写入标记：Key -> 最近写入时间（毫秒）。在 KV 写入与其最终读回之间
-// 保持节流有效。
+// 实例内写入标记：Key id -> 最近写入时间（毫秒）。在 KV 写入与其最终读回之间保持节流
+// 有效，并且（配合已存储的使用记录）让稳态热路径省掉一次 KV 读取。
 const lastTouched = new Map<string, number>();
+
+/** The stored last-used timestamp (unix seconds) of a key, 0 when never recorded. */
+/** 某把 Key 已存储的最近使用时刻（Unix 秒）；从未记录时为 0。 */
+export async function readApiKeyUsage(env: Env, id: string): Promise<number> {
+  const raw = await env.KV.get(usageKVName(id));
+  if (raw === null) return 0;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/** Usage records for many keys at once (the console's key table). */
+/** 一次性读取多把 Key 的使用记录（控制台的 Key 表）。 */
+export async function readApiKeyUsages(
+  env: Env,
+  ids: readonly string[],
+): Promise<Record<string, number>> {
+  const pairs = await Promise.all(
+    ids.map(async (id) => [id, await readApiKeyUsage(env, id)] as const),
+  );
+  return Object.fromEntries(pairs);
+}
 
 /**
  * Throttled asynchronous update of `last_used`, executed within `ctx.waitUntil`.
  *
- * - A granularity of 0 switches the feature off: nothing is written, and whatever
- *   history a key has stays in KV but is no longer refreshed or shown;
- * - For a never-used Key (last_used === 0), an immediate write is performed on the first call;
- * - Afterwards, each Key is written at most once per configured granularity (default: daily, adjustable in the management console).
+ * - A granularity of 0 switches the feature off: nothing is written at all;
+ * - For a never-used key, the first call records immediately;
+ * - Afterwards each key is written at most once per configured granularity
+ *   (default: daily, adjustable in the management console).
  *
- * The write timestamp takes the greater value between the in-instance record and `last_used` in KV;
- * throttling remains in effect after an isolate restart.
- */
-/**
+ * Nothing here can ever touch a credential record -- see this module's header.
+ *
  * 节流的 `last_used` 异步更新，在 `ctx.waitUntil` 内执行。
  *
- * - 粒度为 0 表示关闭该功能：什么都不写，Key 既有的历史数据仍留在 KV 里，但不再
- *   刷新、也不再显示；
- * - 从未使用的 Key（last_used === 0）首次调用立即写入一次；
- * - 之后每个 Key 至多按配置粒度写一次（默认每天，可在管理控制台调整）。
- * 写入时间取「实例内记录」与「KV 中 last_used」的较大者，isolate 重启后依然节流。
+ * - 粒度为 0 表示关闭该功能：一次都不写；
+ * - 从未使用的 Key 在首次调用时立即记录一次；
+ * - 之后每把 Key 至多按配置粒度写一次（默认每天，可在管理控制台调整）。
+ *
+ * 这里的一切都不可能碰到凭据记录——见本模块头部说明。
  */
-export async function touchApiKey(env: Env, key: string, meta: ApiKeyMeta): Promise<void> {
-  // One read serves the whole call; the second read this replaces was pure
-  // redundancy (the instance cache makes it cheap, but not free).
-  //
-  // 一次读取服务整个调用；被替换的第二次读取纯属冗余（实例缓存让它便宜，但不免费）。
-  // Claim the marker synchronously BEFORE the first await: two concurrent calls
-  // for a never-used key would otherwise both pass the throttle check below and
-  // both write the same KV key (KV allows ~1 write/sec per key). The caller that
-  // claimed the marker writes immediately; the other one sees the fresh marker
-  // and skips. The claim itself is not a write, hence the `claimedByMe` flag.
-  //
-  // 在首个 await 之前同步占位标记：否则同一"从未使用"Key 的两个并发调用都会通过
-  // 下面的节流检查、各写一次同一个 KV 键（KV 同键约每秒 1 次写入上限）。占位到的
-  // 调用立即写入；后到的调用看到新标记即跳过。占位本身不算写入，因此需要
-  // `claimedByMe` 标志。
-  const claimedByMe = !lastTouched.has(key);
-  if (claimedByMe) lastTouched.set(key, Date.now());
+export async function touchApiKey(env: Env, id: string): Promise<void> {
   const interval = await getTouchInterval(env);
   // The off switch is checked before the first-use write: "off" must mean no write
   // at all, not "one write and then never again".
@@ -93,32 +110,32 @@ export async function touchApiKey(env: Env, key: string, meta: ApiKeyMeta): Prom
   // 关闭开关要在"首次使用写入"之前判断：关就是一次都不写，而不是"写一次以后再也不写"。
   if (interval === 0) return;
   const now = Date.now();
-  const updated: ApiKeyMeta = { ...meta, last_used: Math.floor(now / 1000) };
-  // A never-used key is recorded immediately on its first call — including the
-  // call that just claimed the marker above (that claim is not a write).
+  const marker = lastTouched.get(id) ?? 0;
+  if (marker !== 0 && now - marker < interval * 1000) return;
+  // Not recently written BY THIS ISOLATE: the persisted record decides, so a fresh
+  // isolate does not rewrite what a previous one wrote a moment ago.
   //
-  // 从未使用的 Key 在首次调用时立即记录——包括刚刚占位标记的那次调用
-  // （占位本身不是写入）。
-  if (meta.last_used === 0 && claimedByMe) {
-    lastTouched.set(key, now);
-    await env.KV.put(apiKeyKVKey(key), JSON.stringify(updated), { metadata: updated });
+  // 本 isolate 最近没写过：由已落盘的记录决定，避免新 isolate 重写上一个刚刚写过的值。
+  const stored = await readApiKeyUsage(env, id);
+  if (stored !== 0 && now / 1000 - stored < interval) {
+    lastTouched.set(id, now);
     return;
   }
-  // Skip if the key was written within the throttle window; the persisted
-  // last_used also counts so a fresh isolate does not rewrite early.
-  //
-  // 若 Key 在节流窗口内已写入则跳过；持久化的 last_used 同样计入，
-  // 避免新 isolate 提前重写。
-  const lastWrite = Math.max(lastTouched.get(key) ?? 0, meta.last_used * 1000);
-  if (now - lastWrite < interval * 1000) return;
-  lastTouched.set(key, now);
+  lastTouched.set(id, now);
   // Write off the critical path so the response is not delayed.
   // 写入不阻塞关键路径，避免拖慢响应。
-  await env.KV.put(apiKeyKVKey(key), JSON.stringify(updated), { metadata: updated });
+  await env.KV.put(usageKVName(id), String(Math.floor(now / 1000)));
 }
 
 /** Drop the in-instance write marker (the key was deleted or rotated). */
 /** 清除实例内的写入标记（Key 已删除或轮转）。 */
-export function clearTouchMarker(key: string): void {
-  lastTouched.delete(key);
+export function clearTouchMarker(id: string): void {
+  lastTouched.delete(id);
+}
+
+/** Drop a revoked key's usage record along with its in-instance marker. */
+/** 撤销 Key 时一并清除其使用记录与实例内标记。 */
+export async function deleteApiKeyUsage(env: Env, id: string): Promise<void> {
+  clearTouchMarker(id);
+  await env.KV.delete(usageKVName(id));
 }

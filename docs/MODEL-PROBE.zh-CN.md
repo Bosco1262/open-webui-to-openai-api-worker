@@ -21,6 +21,7 @@ README 只描述最终行为，本文档记录"**为什么**是这样"。
 | 缓存存放 | `model_probe_cache.json`（version 2） | DO `ModelProbeCoordinator` 的 SQLite（每模型一行），可导出为同样的 JSON 形状 |
 | 刷新编排 | `app.py::_refresh_model_probe`（并发 + Semaphore） | DO 串行 + 预算分片 + alarm 自续 |
 | 重探判据 | 指纹变化 / 退避到期 / 手动 | 同（**无时间型 TTL**；另有可选「定时巡检」，默认关闭） |
+| 队列健康 | 无（会话失效后会一直重试） | **永久类失败连续 `AUTH_FAIL_SUSPEND_THRESHOLD=3` 次后挂起队列**（只统计永久类：无 session / 上游 401-403）；控制台在仪表盘与 Session 摘要旁显示状态；重新导入 session 或连通性检测通过即恢复 |
 | 对外契约 | `/v1/models` 字段、`x_open_webui` 信封、`GET /v1/models/{id}`、400 自愈 | 同 |
 
 命名硬改名、不做兼容层（决策 D11），因此旧文件名 / 旧 KV 键 / 旧管理端点全部失效。
@@ -34,7 +35,7 @@ README 只描述最终行为，本文档记录"**为什么**是这样"。
 | D3 | 超时 | 单请求超时可调（1–120 秒，默认 30）+ 单模型墙钟内部常量 45 秒 |
 | D4 | Cron Trigger | **不加**（`wrangler.jsonc` 无 `triggers.crons`）；改由 DO alarm 自续 |
 | D5 | 跨机房协调 | **Durable Object 单点协调**，且 **DO 直接持有探测缓存** |
-| D6 | 实例元信息 | 默认 `exposeInstanceMeta=true`，`features` 原样透出；**模型内 `x_open_webui.capabilities` 不受该开关控制**（与 Python 一致） |
+| D6 | 实例元信息 | 默认 `exposeInstanceMeta=true`，`features` 原样透出；**模型内 `x_open_webui_deviations.capabilities` 不受该开关控制**（与 Python 一致） |
 | D7 | 未确立的能力 | **省略**，不回落到 OWUI 模板 |
 | D8 | `reasoning.default_*` | 引擎没说就**省略** |
 | D9 | 错误体文案 | 保持 worker 原文案（结构与 Python 同构） |
@@ -100,7 +101,7 @@ Worker（薄）                                  Durable Object: ModelProbeCoord
 
 ## 5. 对外契约
 
-- **每模型**：`id/object/created/owned_by` + 可选 `name`、`max_model_len`/`max_context_length`/`context_length`、`quantization`、`description`、`x_open_webui.capabilities`（相对共享模板的**差异键**）+ 探测附加的 `capabilities`、`supported_parameters`、`reasoning`、`architecture`。
+- **每模型**：`id/object/created/owned_by` + 可选 `name`、`max_model_len`/`max_context_length`/`context_length`、`quantization`、`description`、`x_open_webui_deviations.capabilities`（相对共享模板的**差异键**；裸名 `x_open_webui` 保留给信封上的实例元信息，见上游 R9）+ 探测附加的 `capabilities`、`supported_parameters`、`reasoning`、`architecture`。
   规则：**拿不准就省略，绝不填默认值**；挡位按 OpenRouter 的排列从大到小 `max → none`（未知挡位排在末尾）。
 - **信封**：`{object:"list", data:[…], x_open_webui:{name?, version?, features?, default_model_capabilities?}}`；
   `default_model_capabilities` = **所有上报模型都一致同意的键**（由 Worker 计算并随同一次 RPC 交给协调者）；
@@ -118,7 +119,7 @@ Worker（薄）                                  Durable Object: ModelProbeCoord
 |---|---|
 | `settings:probe`（KV） | `{enabled, timeout, wait, budget, exposeInstanceMeta}` |
 | `settings:touch_interval`（KV） | `last_used` 写入节流粒度（秒） |
-| session / apikey / admin（KV） | 低频凭证与配置 |
+| session / `apikey:<sha256>` / `usage:<sha256>` / admin（KV） | 低频凭证与配置（**密钥本身不落盘**，只存摘要与展示元数据；使用记录独立成键，避免回写凭据记录） |
 | `ModelProbeCoordinator`（DO SQLite） | `models(id, data)` 每模型一行；`meta(key, value)` 记账（缓存版本 2、上游前缀、`instance_meta` 实例快照 + 共享能力模板） |
 
 **实例元信息不在 KV**：`/api/config` 快照与 `default_model_capabilities` 存放在 DO 的 `meta` 表

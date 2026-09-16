@@ -20,16 +20,21 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  apiKeyId,
+  deleteApiKeyById,
   deleteSession,
-  getApiKeyMeta,
   getOrCreateSessionSecret,
   getPasswordHash,
   getSession,
+  listApiKeys,
+  lookupApiKey,
+  migrateLegacyApiKey,
+  putApiKey,
   readKvJson,
   setSession,
 } from "../src/kv.ts";
 import { parseProbeSettingsInput, readProbeSettings } from "../src/probeSettings.ts";
-import type { Env } from "../src/types.ts";
+import type { ApiKeyMeta, Env } from "../src/types.ts";
 
 /**
  * A KV namespace that behaves like Cloudflare's: raw strings in, and a `"json"` read
@@ -37,11 +42,13 @@ import type { Env } from "../src/types.ts";
  */
 class RawKV {
   private readonly store = new Map<string, string>();
+  private readonly metadata = new Map<string, unknown>();
   /** Key prefixes whose reads FAIL, to model an unreachable namespace. */
   readonly failOn = new Set<string>();
 
-  raw(key: string, value: string): void {
+  raw(key: string, value: string, meta?: unknown): void {
     this.store.set(key, value);
+    if (meta !== undefined) this.metadata.set(key, meta);
   }
 
   async get(key: string, type?: unknown): Promise<unknown> {
@@ -54,12 +61,32 @@ class RawKV {
     return value;
   }
 
-  async put(key: string, value: string): Promise<void> {
+  async put(key: string, value: string, options?: { metadata?: unknown }): Promise<void> {
     this.store.set(key, value);
+    if (options?.metadata !== undefined) this.metadata.set(key, options.metadata);
   }
 
   async delete(key: string): Promise<void> {
     this.store.delete(key);
+    this.metadata.delete(key);
+  }
+
+  async list(options: { prefix?: string; cursor?: string } = {}): Promise<{
+    keys: Array<{ name: string; metadata: unknown }>;
+    list_complete: boolean;
+    cursor: string;
+  }> {
+    const prefix = options.prefix ?? "";
+    const keys = [...this.store.keys()]
+      .filter((name) => name.startsWith(prefix))
+      .sort()
+      .map((name) => ({ name, metadata: this.metadata.get(name) ?? null }));
+    return { keys, list_complete: true, cursor: "" };
+  }
+
+  /** Every key name currently stored (assertions about what is NOT stored). */
+  names(): string[] {
+    return [...this.store.keys()];
   }
 }
 
@@ -111,9 +138,113 @@ test("a corrupt session reads as 'not imported' instead of failing every request
 test("other parsed keys degrade the same way", async () => {
   const { env, kv } = makeEnv();
   kv.raw("apikey:sk-broken", "not json");
-  assert.equal(await getApiKeyMeta(env, "sk-broken"), null);
+  assert.equal(await lookupApiKey(env, "sk-broken"), null);
   kv.raw("admin:password_hash", "[1,2,");
   assert.equal(await getPasswordHash(env), null);
+});
+
+// --------------------------------------------------------------------------- //
+// Client API keys: hashed storage, legacy migration, revocation
+// 客户端 API Key：哈希存储、旧条目迁移、撤销
+// --------------------------------------------------------------------------- //
+
+/** A stored-key record of the shape the console writes. */
+function keyMeta(name: string): ApiKeyMeta {
+  return { name, prefix: "sk-abcdef", created_at: 1_700_000_000, last_used: 0, masked: "sk-abcdefghijkl…wxyz" };
+}
+
+test("a key is stored under its digest, never under its plaintext", async () => {
+  // The old layout used the key itself as the KV name, so anyone with the namespace
+  // (dashboard, `wrangler kv key list`, a backup) could read every working credential
+  // back -- which made "the full key is shown only once" untrue.
+  //
+  // 旧布局用 Key 本身作 KV 键名，因此拿到命名空间的任何人（Dashboard、
+  // `wrangler kv key list`、备份）都能把每一把可用凭证读回来——这让"完整 Key 只在创建时
+  // 显示一次"变成假话。
+  const { env, kv } = makeEnv();
+  const key = "sk-super-secret-value";
+  const id = await putApiKey(env, key, keyMeta("client"));
+
+  assert.equal(id, await apiKeyId(key));
+  assert.deepEqual(kv.names(), [`apikey:${id}`]);
+  assert.equal(
+    kv.names().some((name) => name.includes(key)),
+    false,
+    "the plaintext must appear in no KV name",
+  );
+
+  // And the digest still resolves the key in one lookup, with its metadata intact.
+  // 摘要依然让它一次查询即可解析，元数据完好。
+  const entry = await lookupApiKey(env, key);
+  assert.equal(entry?.id, id);
+  assert.equal(entry?.legacy, false);
+  assert.equal(entry?.meta.name, "client");
+});
+
+test("a legacy plaintext-named key still works and is migrated onto its digest", async () => {
+  const { env, kv } = makeEnv();
+  const key = "sk-legacy-key";
+  kv.raw(`apikey:${key}`, JSON.stringify(keyMeta("legacy")));
+
+  const found = await lookupApiKey(env, key);
+  assert.equal(found?.legacy, true, "a pre-change entry must still authenticate");
+  assert.equal(found?.meta.name, "legacy");
+
+  await migrateLegacyApiKey(env, found!);
+  assert.deepEqual(kv.names(), [`apikey:${await apiKeyId(key)}`], "the plaintext name is gone");
+  assert.equal((await lookupApiKey(env, key))?.legacy, false);
+});
+
+test("a malformed credential record counts as no such key", async () => {
+  // `{}` used to be accepted as a valid credential (any truthy JSON did), which then
+  // crashed the console's key table with a TypeError.
+  //
+  // `{}` 此前会被当成有效凭证接受（任何 truthy 的 JSON 都算），随后在控制台的 Key 表
+  // 上抛成 TypeError。
+  const { env, kv } = makeEnv();
+  kv.raw(`apikey:${await apiKeyId("sk-empty")}`, "{}");
+  assert.equal(await lookupApiKey(env, "sk-empty"), null);
+
+  kv.raw(`apikey:${await apiKeyId("sk-bad-name")}`, JSON.stringify({ name: 42, created_at: 1 }));
+  assert.equal(await lookupApiKey(env, "sk-bad-name"), null);
+});
+
+test("listing reports ids only -- never a plaintext name, even for legacy entries", async () => {
+  const { env, kv } = makeEnv();
+  const modern = "sk-modern";
+  const legacy = "sk-legacy";
+  await putApiKey(env, modern, keyMeta("modern"));
+  kv.raw(`apikey:${legacy}`, JSON.stringify(keyMeta("legacy")));
+
+  const listed = await listApiKeys(env);
+  assert.deepEqual(
+    listed.map(({ meta }) => meta.name).sort(),
+    ["legacy", "modern"],
+  );
+  assert.deepEqual(
+    listed.map(({ id }) => id).sort(),
+    [await apiKeyId(modern), await apiKeyId(legacy)].sort(),
+  );
+  assert.equal(
+    JSON.stringify(listed).includes("sk-legacy"),
+    false,
+    "the legacy plaintext must not reach the caller",
+  );
+});
+
+test("revoking by id removes the hashed record and any legacy record for the same key", async () => {
+  const { env, kv } = makeEnv();
+  const key = "sk-to-revoke";
+  const id = await putApiKey(env, key, keyMeta("to-revoke"));
+  // A half-migrated deployment can hold both; resolving only the hashed one would
+  // leave a working plaintext entry behind.
+  //
+  // 迁移进行到一半的部署可能同时存在两条；只解析哈希那条会留下一个仍然可用的明文条目。
+  kv.raw(`apikey:${key}`, JSON.stringify(keyMeta("to-revoke")));
+
+  await deleteApiKeyById(env, id);
+  assert.deepEqual(kv.names(), []);
+  assert.equal(await lookupApiKey(env, key), null);
 });
 
 test("a FAILING read still propagates (it is not the same as a missing key)", async () => {

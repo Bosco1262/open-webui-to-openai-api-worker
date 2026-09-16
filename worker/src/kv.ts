@@ -24,6 +24,11 @@ import type { ApiKeyMeta, Env, PasswordHash, StoredSession } from "./types.ts";
 /** KV 键名常量。 */
 const K_SESSION = "session";
 const K_API_KEY_PREFIX = "apikey:";
+/** Usage records live under their own namespace so a `last_used` write can never
+ *  touch (and therefore never restore) a credential record -- see touch.ts. */
+/** 使用记录位于独立命名空间，因此 `last_used` 的写入永远不会碰到（从而不会复活）
+ *  凭据记录——见 touch.ts。 */
+const K_USAGE_PREFIX = "usage:";
 const K_PASSWORD_HASH = "admin:password_hash";
 const K_SESSION_SECRET = "admin:session_secret";
 const K_SESSION_EPOCH = "admin:session_epoch";
@@ -65,12 +70,6 @@ function cacheDelete(key: string): void {
   cache.delete(key);
 }
 
-/** KV key for a client API key (the plaintext is the key name, O(1) lookup). */
-/** 客户端 API Key 的 KV 键名（Key 明文即键名，O(1) 查询）。 */
-export function apiKeyKVKey(key: string): string {
-  return K_API_KEY_PREFIX + key;
-}
-
 /**
  * Read a JSON value from KV, treating anything unparseable as absent.
  *
@@ -106,6 +105,25 @@ export async function readKvJson<T>(kv: KVNamespace, key: string): Promise<T | n
   } catch {
     return null;
   }
+}
+
+/**
+ * Look up a JSON-shaped record by its KV key, degrading anything unexpected to
+ * "absent" (see readKvJson). Used for values whose shape must be validated before
+ * they are trusted.
+ *
+ * 按键名读取形状为 JSON 的记录，任何意外内容都退化为"不存在"（见 readKvJson）。
+ * 用于"信任之前必须先校验形状"的值。
+ */
+async function readKvRecord(kv: KVNamespace, key: string): Promise<Record<string, unknown> | null> {
+  const raw = await readKvJson<unknown>(kv, key);
+  return isPlainRecord(raw) ? raw : null;
+}
+
+/** A plain (non-array, non-null) object. */
+/** 普通对象（非数组、非 null）。 */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // --------------------------------------------------------------------------- //
@@ -176,51 +194,220 @@ export async function deleteSession(env: Env): Promise<void> {
 // Client API keys
 // 客户端 API Key
 // --------------------------------------------------------------------------- //
+//
+// The key material itself is NEVER stored: the KV name is `apikey:<sha256(key)>` and
+// the value carries display metadata only. Verification stays O(1) (one hash + one
+// read), and -- this is the point -- listing the namespace, opening the dashboard or
+// restoring a backup no longer hands out working credentials. Previously the
+// plaintext key WAS the KV name, so "the full key is shown only once at creation"
+// (README) was simply untrue: anyone with the KV namespace could read every key back.
+//
+// 密钥本身**绝不存储**：KV 键名是 `apikey:<sha256(key)>`，值里只有展示用元数据。
+// 校验依然是 O(1)（一次哈希 + 一次读取）；而关键在于：遍历命名空间、打开 Dashboard
+// 或恢复备份，都不再等于交出一批可用凭证。此前明文本身即键名，于是"完整 Key 只在创建
+// 时显示一次"（README）根本不成立——拿到 KV 命名空间的任何人都能把每一把 Key 读回来。
 
-// O(1) lookup: the key plaintext is the KV key name.
-// O(1) 查询：Key 明文即 KV 键名。
-export async function getApiKeyMeta(env: Env, key: string): Promise<ApiKeyMeta | null> {
-  return readKvJson<ApiKeyMeta>(env.KV, apiKeyKVKey(key));
+/** One API key as stored: its public id, its metadata, and where it lives. */
+/** 存储中的一把 API Key：公开 id、元数据，以及它当前所在的键名。 */
+export interface ApiKeyEntry {
+  /** Stable, non-secret identifier: the hex SHA-256 of the key. */
+  /** 稳定且非机密的标识：Key 的十六进制 SHA-256。 */
+  id: string;
+  meta: ApiKeyMeta;
+  /** The KV name this entry currently lives under. */
+  /** 该条目当前所在的 KV 键名。 */
+  kvName: string;
+  /** True while the entry still sits under its pre-hashing plaintext name. */
+  /** 条目仍位于哈希之前的明文键名下时为 true。 */
+  legacy: boolean;
 }
 
-export async function putApiKey(env: Env, key: string, meta: ApiKeyMeta): Promise<void> {
-  // metadata mirrors the value: KV.list returns it inline, so listing keys no
-  // longer costs one GET per key (the name-uniqueness check and the console's
-  // key table both list). Entries written before this change carry no metadata —
-  // listApiKeys falls back to a GET for those.
+const API_KEY_ID_RE = /^[0-9a-f]{64}$/;
+
+/** The public id of a client key. Stable, and useless without the key itself. */
+/** 客户端 Key 的公开 id。稳定，且脱离 Key 本身毫无用处。 */
+export async function apiKeyId(key: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function apiKeyKVName(id: string): string {
+  return K_API_KEY_PREFIX + id;
+}
+
+/** The pre-hashing name of a legacy entry: the plaintext key was the KV name. */
+/** 旧条目的哈希之前键名：明文 Key 即 KV 键名。 */
+function legacyApiKeyKVName(key: string): string {
+  return K_API_KEY_PREFIX + key;
+}
+
+/** KV name of a key's usage record (see touch.ts). */
+/** Key 使用记录的 KV 键名（见 touch.ts）。 */
+export function usageKVName(id: string): string {
+  return K_USAGE_PREFIX + id;
+}
+
+/**
+ * Validate a stored credential record before trusting it.
+ *
+ * Anything of the wrong shape (an empty object, a hand-written value, an entry left
+ * by an older layout) counts as "no such key" rather than crashing the caller -- a
+ * `{}` used to be accepted as a valid credential and then blew up as a TypeError while
+ * rendering the key table.
+ *
+ * 信任之前先校验存储的凭据记录。
+ *
+ * 形状不对的一律按"没有这把 Key"处理，而不是让调用方崩溃——此前一个 `{}` 会被当成
+ * 有效凭证接受，随后在渲染 Key 表格时抛成 TypeError。
+ */
+function normalizeApiKeyMeta(raw: Record<string, unknown> | null): ApiKeyMeta | null {
+  if (!raw) return null;
+  if (typeof raw.name !== "string") return null;
+  if (typeof raw.created_at !== "number" || !Number.isFinite(raw.created_at)) return null;
+  return {
+    name: raw.name,
+    prefix: typeof raw.prefix === "string" ? raw.prefix : "",
+    created_at: raw.created_at,
+    last_used:
+      typeof raw.last_used === "number" && Number.isFinite(raw.last_used) ? raw.last_used : 0,
+    masked: typeof raw.masked === "string" ? raw.masked : undefined,
+  };
+}
+
+/**
+ * Resolve a client key to its stored entry, hashed name first, legacy name second.
+ *
+ * 把客户端 Key 解析为它的存储条目：先查哈希键名，再查旧明文键名。
+ */
+export async function lookupApiKey(env: Env, key: string): Promise<ApiKeyEntry | null> {
+  const id = await apiKeyId(key);
+  const kvName = apiKeyKVName(id);
+  const hashed = normalizeApiKeyMeta(await readKvRecord(env.KV, kvName));
+  if (hashed) return { id, meta: hashed, kvName, legacy: false };
+  // Legacy: written before this change, when the plaintext key was the KV name.
+  // 旧条目：本改动之前写入，那时明文 Key 就是 KV 键名。
+  const legacyName = legacyApiKeyKVName(key);
+  const legacy = normalizeApiKeyMeta(await readKvRecord(env.KV, legacyName));
+  if (legacy) return { id, meta: legacy, kvName: legacyName, legacy: true };
+  return null;
+}
+
+/**
+ * Move a legacy entry onto its hashed name (best effort, off the critical path).
+ *
+ * The re-read before writing is deliberate: the operator may have deleted the key
+ * while this migration was in flight, and writing unconditionally would restore the
+ * credential that was just revoked.
+ *
+ * 把旧条目迁移到哈希键名（尽力而为，远离关键路径）。
+ *
+ * 写入前的重新读取是刻意的：迁移在飞行中时运维可能已经删除了这把 Key，无条件写入会
+ * 把刚撤销的凭证复活。
+ */
+export async function migrateLegacyApiKey(env: Env, entry: ApiKeyEntry): Promise<void> {
+  if (!entry.legacy) return;
+  if ((await env.KV.get(entry.kvName)) === null) return;
+  await env.KV.put(apiKeyKVName(entry.id), JSON.stringify(entry.meta), { metadata: entry.meta });
+  await env.KV.delete(entry.kvName);
+}
+
+/** Store a key's metadata under its hashed name; returns the public id. */
+/** 在哈希键名下保存 Key 元数据；返回公开 id。 */
+export async function putApiKey(env: Env, key: string, meta: ApiKeyMeta): Promise<string> {
+  // metadata mirrors the value: KV.list returns it inline, so listing keys costs no
+  // extra GET per key (the name-uniqueness check and the console's key table both
+  // list). Entries written before this change carry no metadata -- listApiKeyEntries
+  // falls back to a GET for those.
   //
   // metadata 与值互为镜像：KV.list 会内联返回它，列 Key 不再需要每键一次 GET
   // （重名检查与控制台的 Key 表都会触发列表）。本改动之前写入的条目没有
-  // metadata——listApiKeys 对它们回退 GET。
-  await env.KV.put(apiKeyKVKey(key), JSON.stringify(meta), { metadata: meta });
+  // metadata——listApiKeyEntries 对它们回退 GET。
+  const id = await apiKeyId(key);
+  await env.KV.put(apiKeyKVName(id), JSON.stringify(meta), { metadata: meta });
+  return id;
 }
 
-export async function deleteApiKey(env: Env, key: string): Promise<void> {
-  await env.KV.delete(apiKeyKVKey(key));
+/** Revoke a key by its public id (the plaintext is never needed, nor known). */
+/** 按公开 id 撤销一把 Key（既不需要、也不知道明文）。 */
+export async function deleteApiKeyById(env: Env, id: string): Promise<void> {
+  await env.KV.delete(apiKeyKVName(id));
+  // A legacy plaintext-named entry for the same key would otherwise keep working --
+  // and would be migrated back into place later. Remove it too when one still exists.
+  //
+  // 同一把 Key 若还存在旧明文键名条目，撤销就不算完成——而且它之后还会被迁移回来。
+  // 因此存在时一并删除。
+  const legacyName = await findLegacyKVNameForId(env, id);
+  if (legacyName) await env.KV.delete(legacyName);
 }
 
-// List all keys by paginating the KV namespace under the key prefix.
-// 按 Key 前缀分页遍历 KV 命名空间，列出全部 Key。
-export async function listApiKeys(
-  env: Env,
-): Promise<Array<{ key: string; meta: ApiKeyMeta }>> {
-  const out: Array<{ key: string; meta: ApiKeyMeta }> = [];
+/** The legacy KV name of the entry whose id is `id`, or null. */
+/** id 对应条目的旧明文键名；不存在时为 null。 */
+async function findLegacyKVNameForId(env: Env, id: string): Promise<string | null> {
   let cursor: string | undefined;
   do {
     const page = await env.KV.list({ prefix: K_API_KEY_PREFIX, cursor });
     for (const item of page.keys) {
+      const suffix = item.name.slice(K_API_KEY_PREFIX.length);
+      if (API_KEY_ID_RE.test(suffix)) continue;
+      if ((await apiKeyId(suffix)) === id) return item.name;
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return null;
+}
+
+/** Every stored key, with its legacy/hashed location resolved. */
+/** 全部已存储的 Key，同时给出它位于旧键名还是哈希键名。 */
+export async function listApiKeyEntries(env: Env): Promise<ApiKeyEntry[]> {
+  const out: ApiKeyEntry[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await env.KV.list({ prefix: K_API_KEY_PREFIX, cursor });
+    for (const item of page.keys) {
+      const suffix = item.name.slice(K_API_KEY_PREFIX.length);
+      const legacy = !API_KEY_ID_RE.test(suffix);
       // Prefer the inline metadata (zero extra reads); entries written before
       // metadata mirroring exist only as values and fall back to a GET.
       //
       // 优先用内联 metadata（零额外读取）；镜像上线前写入的旧条目只有值，
       // 对它们回退 GET。
       const meta =
-        (item.metadata as ApiKeyMeta | undefined) ?? (await readKvJson<ApiKeyMeta>(env.KV, item.name));
-      if (meta) out.push({ key: item.name.slice(K_API_KEY_PREFIX.length), meta });
+        normalizeApiKeyMeta(isPlainRecord(item.metadata) ? item.metadata : null) ??
+        normalizeApiKeyMeta(await readKvRecord(env.KV, item.name));
+      if (!meta) continue;
+      out.push({
+        id: legacy ? await apiKeyId(suffix) : suffix,
+        meta,
+        kvName: item.name,
+        legacy,
+      });
     }
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
   return out;
+}
+
+/** Every stored key, as the admin API sees it (id + metadata, never the secret). */
+/** 全部已存储的 Key，按管理 API 的视角（id + 元数据，绝不含密钥）。 */
+export async function listApiKeys(env: Env): Promise<Array<{ id: string; meta: ApiKeyMeta }>> {
+  const entries = await listApiKeyEntries(env);
+  return entries.map(({ id, meta }) => ({ id, meta }));
+}
+
+/**
+ * Resolve a public id back to its stored entry, hashed name first, legacy second.
+ *
+ * 把公开 id 解析回它的存储条目：先查哈希键名，再查旧明文键名。
+ */
+export async function getApiKeyEntryById(env: Env, id: string): Promise<ApiKeyEntry | null> {
+  if (!API_KEY_ID_RE.test(id)) return null;
+  const kvName = apiKeyKVName(id);
+  const hashed = normalizeApiKeyMeta(await readKvRecord(env.KV, kvName));
+  if (hashed) return { id, meta: hashed, kvName, legacy: false };
+  const legacyName = await findLegacyKVNameForId(env, id);
+  if (!legacyName) return null;
+  const legacy = normalizeApiKeyMeta(await readKvRecord(env.KV, legacyName));
+  return legacy ? { id, meta: legacy, kvName: legacyName, legacy: true } : null;
 }
 
 // The `last_used` write throttle (getTouchInterval / setTouchInterval /
@@ -285,9 +472,50 @@ export async function getSessionSecretReadonly(env: Env): Promise<string | null>
   return secret;
 }
 
+/**
+ * Minimum length for an explicitly bound `SESSION_SECRET`.
+ *
+ * The secret is the HMAC key behind every admin session cookie; a short one is
+ * guessable offline from a single captured cookie+signature pair, which is exactly the
+ * kind of thing that ends up in a screenshot or a log. The auto-derived secret is
+ * always 32 random bytes, so this only ever concerns an operator-provided value.
+ *
+ * 显式绑定的 `SESSION_SECRET` 的最小长度。
+ *
+ * 该密钥是每个管理会话 Cookie 背后的 HMAC 密钥；过短的密钥可以仅凭一对捕获到的
+ * Cookie+签名离线爆破出来，而这类东西恰恰容易出现在截图或日志里。自动派生的密钥
+ * 始终是 32 个随机字节，因此这一条只针对运维自己提供的值。
+ */
+export const MIN_SESSION_SECRET_CHARS = 32;
+
+/**
+ * Configuration warnings for the console (i18n keys). Empty when everything is fine.
+ *
+ * Currently one check: a bound `SESSION_SECRET` shorter than
+ * `MIN_SESSION_SECRET_CHARS`. It is reported rather than enforced -- an existing
+ * deployment must not lose its console because an operator typed eleven characters
+ * once -- and the console shows it once per page load.
+ *
+ * 供控制台展示的配置告警（i18n 键）。一切正常时为空。
+ *
+ * 目前只有一条检查：绑定的 `SESSION_SECRET` 短于 `MIN_SESSION_SECRET_CHARS`。它只做提示
+ * 而不强制——已有部署不该因为运维当初随手敲了十一个字符就丢掉控制台——控制台每次页面
+ * 加载提示一次。
+ */
+export function sessionSecretWarnings(env: Env): string[] {
+  if (env.SESSION_SECRET && env.SESSION_SECRET.length < MIN_SESSION_SECRET_CHARS) {
+    return ["warn.session_secret_short"];
+  }
+  return [];
+}
+
 export async function getOrCreateSessionSecret(env: Env): Promise<string> {
-  // An explicitly bound secret always wins.
-  // 显式绑定的 Secret 始终优先。
+  // An explicitly bound secret always wins -- and it is also the way to remove the
+  // residual race described below: a bound value is the same on every isolate, so
+  // there is never anything to converge.
+  //
+  // 显式绑定的 Secret 始终优先——它同时也是消除下述残余竞态的办法：绑定的值在每个
+  // isolate 上都相同，根本不存在需要收敛的东西。
   if (env.SESSION_SECRET) return env.SESSION_SECRET;
   const cached = cachedSessionSecret();
   if (cached) return cached;
@@ -302,9 +530,24 @@ export async function getOrCreateSessionSecret(env: Env): Promise<string> {
     // our value would fail verification on the next read -- an admin signed out for
     // no visible reason.
     //
+    // Residual limit (operator decision, documented in the README): KV reads are
+    // served from the location's own cache, so an isolate in a DIFFERENT location can
+    // still read its own value back for up to ~60s and keep signing with it. The
+    // effect is bounded -- at worst an admin has to sign in again during that window
+    // -- and it is the reason the README tells operators to bind `SESSION_SECRET`
+    // (the console also warns when a bound value is too short). Making this a single
+    // value everywhere would need a strongly consistent store (a Durable Object) on
+    // every verification path, which is not worth it for this consequence.
+    //
     // 两个 isolate 可能在同一瞬间走进"无 secret"分支，而 KV 是后写者胜：回读并采用
     // 真正生效的那个值，否则用我们这份签发的令牌在下一次读取时就会验签失败——管理员
     // 会莫名其妙地掉线。
+    //
+    // 残余限制（运维决策，README 已写明）：KV 读取由各机房自己的缓存提供，因此位于
+    // **其它机房**的 isolate 最长约 60 秒内仍会读回它自己的值并继续用它签发。后果有限
+    // ——最坏情况是管理员在这段窗口里重新登录一次——这也正是 README 建议绑定
+    // `SESSION_SECRET` 的原因（绑定的值过短时控制台也会提示）。要让所有机房取值一致，
+    // 就得在每条校验路径上引入强一致存储（Durable Object），为这点后果不值得。
     secret = (await env.KV.get(K_SESSION_SECRET)) || generated;
   }
   sessionSecretCache = { value: secret, expireAt: Date.now() + SESSION_SECRET_CACHE_TTL_MS };

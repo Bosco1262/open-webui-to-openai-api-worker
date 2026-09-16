@@ -17,6 +17,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import {
+  AUTH_FAIL_SUSPEND_THRESHOLD,
+  applyProbeFailure,
+  applyProbeSuccess,
+  isProbeQueueStopped,
+  newProbeHealth,
+  probeHealthFromMeta,
+  roundUnavailableCodeFor,
+} from "../src/probeRuntime.ts";
+
 import { createModelProbe } from "../src/modelProbe.ts";
 import {
   WAKE_MAX_MS,
@@ -164,16 +174,116 @@ test("a caller joins only a round that is at least as thorough and covers its mo
   // 反方向没问题（更强的轮次本就覆盖更弱的请求）。
   assert.equal(canJoinRound(forcedFull, full), true);
 
-  // Coverage: a whole-list request may only join a whole-list round ...
-  // 覆盖范围：全量请求只能加入全量轮次……
+  // Coverage: a request for the whole list may only join a whole-list round (a
+  // subset round can never answer it) ...
+  //
+  // 覆盖范围：全量请求只能加入全量轮次（子集轮次永远答不了它）……
   assert.equal(canJoinRound({ force: false, only: ["a"] }, full), false);
   assert.equal(canJoinRound(full, { force: false, only: ["a"] }), true);
-  // ... while a request for specific models may join a round covering them, and must
-  // queue behind one that covers something else.
-  // ……而指定模型的请求可以加入覆盖它们的轮次，对覆盖别处的轮次则必须排队。
-  assert.equal(canJoinRound({ force: false, only: ["a"] }, { force: false, only: ["a", "b"] }), true);
-  assert.equal(canJoinRound({ force: false, only: ["a", "b"] }, { force: false, only: ["a"] }), false);
+  // ... while a request for specific models may join a round that covers AT LEAST
+  // those models, and must queue behind one that covers less (joining it would mean
+  // waiting for a result that cannot contain the requested models -- the wasted wait
+  // this comparison used to allow, because the subset test pointed the wrong way).
+  //
+  // ……而指定模型的请求可以加入**至少**覆盖这些模型的轮次，对覆盖更少的轮次则必须排队
+  // （加入它等于等一个不可能包含所请求模型的结果——正是此前因方向写反而被放行的白等）。
+  assert.equal(canJoinRound({ force: false, only: ["a", "b"] }, { force: false, only: ["a"] }), true);
+  assert.equal(canJoinRound({ force: false, only: ["a"] }, { force: false, only: ["a", "b"] }), false);
   assert.equal(canJoinRound({ force: false, only: ["a"] }, { force: false, only: ["b"] }), false);
+});
+
+// --------------------------------------------------------------------------- //
+// Probe health (state machine behind "probing is paused")
+// 探测健康（"探测已暂停"背后的状态机）
+// --------------------------------------------------------------------------- //
+
+test("only permanent failures count toward suspension", () => {
+  const now = 1_000;
+  let health = newProbeHealth(now);
+
+  // Two transient failures: the queue is degraded, nothing more.
+  // 两次瞬时失败：队列只是 degraded，仅此而已。
+  health = applyProbeFailure(health, "transient", "HTTP 503", now + 1);
+  health = applyProbeFailure(health, "transient", "timeout", now + 2);
+  assert.equal(health.state, "degraded");
+  assert.equal(health.consecutive_permanent_failures, 0, "a flapping upstream must not creep toward suspension");
+  assert.equal(health.last_error, "timeout");
+
+  // Permanent ones count up and suspend at the threshold.
+  // 永久类逐次累加，达到阈值即挂起。
+  health = applyProbeFailure(health, "auth_rejected", "HTTP 401", now + 3);
+  assert.equal(health.state, "auth_rejected");
+  assert.equal(health.consecutive_permanent_failures, 1);
+  assert.equal(isProbeQueueStopped(health), false);
+
+  health = applyProbeFailure(health, "auth_rejected", "HTTP 403", now + 4);
+  assert.equal(health.state, "auth_rejected");
+  assert.equal(health.consecutive_permanent_failures, 2);
+  assert.equal(isProbeQueueStopped(health), false);
+
+  health = applyProbeFailure(health, "auth_rejected", "HTTP 401", now + 5);
+  assert.equal(health.state, "suspended");
+  assert.equal(health.consecutive_permanent_failures, 3);
+  assert.equal(isProbeQueueStopped(health), true);
+  assert.equal(health.since, now + 5, "the state's clock starts when it is entered");
+
+  // The threshold is a constant the console is told about, not a magic number here.
+  assert.equal(AUTH_FAIL_SUSPEND_THRESHOLD, 3);
+});
+
+test("a missing session stops the queue immediately, and a success clears the run", () => {
+  const now = 2_000;
+  let health = newProbeHealth(now);
+  health = applyProbeFailure(health, "no_session", "no session", now + 1);
+  assert.equal(health.state, "no_session");
+  assert.equal(isProbeQueueStopped(health), true, "no session is permanent: there is nothing to retry with");
+
+  // A successful round ends the run -- the credentials demonstrably work.
+  // 一次成功轮次结束这段连续失败——凭证确实可用。
+  health = applyProbeSuccess(health, false, now + 2);
+  assert.equal(health.state, "ok");
+  assert.equal(health.consecutive_permanent_failures, 0);
+  assert.equal(health.last_success_at, now + 2);
+  assert.equal(isProbeQueueStopped(health), false);
+
+  // A round that ran but left models unresolved is degraded, not healthy.
+  // 跑完但留下未探清模型的轮次是 degraded，不是健康。
+  health = applyProbeSuccess(health, true, now + 3);
+  assert.equal(health.state, "degraded");
+  assert.equal(health.consecutive_permanent_failures, 0);
+});
+
+test("a corrupt health record degrades to a fresh one (never to 'suspended')", () => {
+  const now = 3_000;
+  const fresh = newProbeHealth(now);
+  for (const raw of [null, "", "{ not json", "null", "[]", '"suspended"']) {
+    const parsed = probeHealthFromMeta(raw, now);
+    assert.deepEqual(parsed, fresh, `raw=${String(raw)}`);
+  }
+  // A readable record round-trips, unknown states included (they read as "ok").
+  // 可读的记录照常往返，未知状态也一样（按 "ok" 读取）。
+  const stored = probeHealthFromMeta(
+    JSON.stringify({
+      state: "suspended",
+      since: 42,
+      last_round_at: 41,
+      last_success_at: null,
+      consecutive_permanent_failures: 4,
+      last_error: "HTTP 401",
+    }),
+    now,
+  );
+  assert.equal(stored.state, "suspended");
+  assert.equal(stored.since, 42);
+  assert.equal(stored.last_success_at, null);
+  assert.equal(stored.consecutive_permanent_failures, 4);
+  assert.equal(probeHealthFromMeta(JSON.stringify({ state: "wat" }), now).state, "ok");
+});
+
+test("the failure kind maps to the round code the admin API reports", () => {
+  assert.equal(roundUnavailableCodeFor("no_session"), "session_missing");
+  assert.equal(roundUnavailableCodeFor("auth_rejected"), "auth_rejected");
+  assert.equal(roundUnavailableCodeFor("transient"), "models_failed");
 });
 
 // --------------------------------------------------------------------------- //

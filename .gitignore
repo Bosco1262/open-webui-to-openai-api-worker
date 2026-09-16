@@ -5,16 +5,21 @@ dist/
 .dev.vars
 
 # Local login tool
+# 本地登录工具
 __pycache__/
 *.pyc
 local/session.json
 
-# Credentials — never commit
+# Sensitive data (captured cookies and tokens)
+# 敏感数据 (抓取到的 Cookie 和 Token)
 session.json
+*.session.json
 
-# curl cookie jars may capture upstream login cookies
-cookies.txt
-
-# OS
+# System
+# 系统
 .DS_Store
 Thumbs.db
+
+# Local workbench data (memory / config, not committed)
+# 本地工作台数据（记忆 / 配置，不入库）
+.commandcode/

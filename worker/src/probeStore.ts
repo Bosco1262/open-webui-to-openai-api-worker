@@ -102,11 +102,6 @@ export interface SqlStorageLike {
   exec(query: string, ...bindings: unknown[]): SqlCursorLike;
 }
 
-/** SQLite's maximum number of bound parameters per statement (Durable Objects
- *  limit); batch lookups are chunked to stay under it. */
-/** SQLite 单条语句的最大绑定参数数量（Durable Objects 的限制）；批量查询按此分片。 */
-export const SQL_MAX_BIND_PARAMETERS = 100;
-
 /**
  * One JSON payload per model. A single row per model keeps the write count at
  * "one row per model probed" and the mapping identical to `to_dict`/`from_dict`,
@@ -198,25 +193,6 @@ export class SqliteProbeStore implements ProbeStore {
     for (const id of changes.deletes) {
       this.sql.exec("DELETE FROM models WHERE id = ?", id);
     }
-  }
-
-  /** Look up a subset of models (used by the /v1/models RPC path). */
-  /** 查询部分模型（供 /v1/models 的 RPC 路径使用）。 */
-  getMany(ids: readonly string[]): Map<string, ModelProbe> {
-    const found = new Map<string, ModelProbe>();
-    for (let offset = 0; offset < ids.length; offset += SQL_MAX_BIND_PARAMETERS) {
-      const chunk = ids.slice(offset, offset + SQL_MAX_BIND_PARAMETERS);
-      if (chunk.length === 0) continue;
-      const placeholders = chunk.map(() => "?").join(", ");
-      const rows = this.sql
-        .exec(`SELECT id, data FROM models WHERE id IN (${placeholders})`, ...chunk)
-        .toArray() as Array<{ id?: unknown; data?: unknown }>;
-      for (const row of rows) {
-        if (typeof row.id !== "string") continue;
-        found.set(row.id, modelProbeFromDict(parseJson(row.data)));
-      }
-    }
-    return found;
   }
 
   count(): number {

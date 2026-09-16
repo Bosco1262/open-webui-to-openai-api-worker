@@ -3,7 +3,11 @@
  * 
  * Storage layout in the KV namespace:
  *   - "session"                    -> StoredSession (imported from the local login tool)
- *   - "apikey:{key}"               -> ApiKeyMeta (key itself is the KV key, O(1) lookup)
+ *   - "apikey:<sha256(key)>"       -> ApiKeyMeta; the key itself is never stored, and the
+ *                                     digest in the name is what keeps O(1) verification
+ *   - "usage:<sha256(key)>"        -> last-used timestamp (seconds), written by the
+ *                                     throttled usage tracking; a separate namespace so a
+ *                                     usage write can never restore a revoked key
  *   - "admin:password_hash"        -> { salt, hash } (PBKDF2 via WebCrypto)
  *   - "admin:session_secret"       -> auto-derived HMAC secret for admin cookies
  *   - "admin:session_epoch"        -> number; bumped on every password change so all
@@ -118,15 +122,31 @@ export interface StoredSession {
   base_url: string;
 }
 
-/** Metadata for a generated client API key (KV key: "apikey:{key}"). */
-/** 生成的客户端 API Key 元数据（KV 键名："apikey:{key}"）。 */
+/** Metadata for a generated client API key (KV key: "apikey:<sha256(key)>").
+ *
+ *  The key material itself is never stored: the KV name is the SHA-256 of the key and
+ *  this record only carries display metadata, so listing or backing up the namespace
+ *  does not hand out working credentials.
+ *
+ *  生成的客户端 API Key 元数据（KV 键名："apikey:<sha256(key)>"）。
+ *
+ *  密钥本身从不存储：KV 键名是 Key 的 SHA-256，本条记录只承载展示用元数据，因此
+ *  遍历或备份命名空间不会交出一批可用凭证。
+ */
 export interface ApiKeyMeta {
   name: string;
   /** First 8 chars of the key, for display. */
   /** Key 的前 8 个字符，用于展示。 */
   prefix: string;
   created_at: number;
+  /** Last-used timestamp kept for keys created before usage records existed; new
+   *  usage lives under "usage:<sha256(key)>" (see touch.ts). */
+  /** 为使用记录出现之前创建的 Key 保留的 last_used；新的使用记录位于
+   *  "usage:<sha256(key)>"（见 touch.ts）。 */
   last_used: number;
+  /** Pre-rendered `sk-abcdefghijkl…wxyz` display form, when known. */
+  /** 预先渲染好的 `sk-abcdefghijkl…wxyz` 展示形式（已知时）。 */
+  masked?: string;
 }
 
 /** Stored admin password hash. */
@@ -227,6 +247,23 @@ export interface ModelProbe {
    * 全量重探），只为一个命名细节不值得。
    */
   efforts_verified: boolean;
+  /**
+   * Effort levels a LIVE request disproved (the upstream answered 400/422 and named
+   * the level the client had just sent).
+   *
+   * Carried across re-probes for as long as the engine fingerprint is unchanged, and
+   * stripped from any later probe result: a probe that was started BEFORE the
+   * rejection -- or one that simply accepts the level again -- must not resurrect a
+   * level the live engine refused. Cleared when the fingerprint changes, because a
+   * different engine is entitled to a different answer.
+   *
+   * 被**线上请求**证伪的挡位（上游以 400/422 点名了客户端刚发去的挡位）。
+   *
+   * 只要引擎指纹不变就跨重探延续，并从之后任何一次结果里剔除：一次在证伪**之前**启动的
+   * 探测——或者又一次"接受"了该挡位的探测——都不能让引擎刚拒掉的挡位复活。指纹变化时
+   * 清空：换了引擎就有资格得到不同的答案。
+   */
+  invalidated_efforts: string[];
   /** Engine-declared default level, when it names one. */
   /** 引擎自己声明的默认挡位（说了才有）。 */
   default_effort: string | null;

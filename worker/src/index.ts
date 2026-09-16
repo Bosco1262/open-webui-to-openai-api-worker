@@ -22,7 +22,7 @@
  * Durable Object 类。
  */
 
-import { handleAdminApiRequest } from "./admin.ts";
+import { ADMIN_SECURITY_HEADERS, handleAdminApiRequest } from "./admin.ts";
 import { handleV1Request } from "./proxy.ts";
 import { ADMIN_UI } from "./ui.ts";
 import type { Env } from "./types.ts";
@@ -49,11 +49,14 @@ export default {
         if (path.startsWith("/admin/api")) {
           return await handleAdminApiRequest(env, request);
         }
+        // The console carries the same hardening as the admin API: never cached (it
+        // renders credentials-adjacent state), never sniffed, and a CSP that limits
+        // what the inline page is allowed to reach (see ADMIN_SECURITY_HEADERS).
+        //
+        // 控制台与管理 API 使用同样的加固：绝不缓存（它渲染与凭证相邻的状态）、
+        // 不做类型嗅探，并用 CSP 限制这个内联页面能触达的范围（见 ADMIN_SECURITY_HEADERS）。
         return new Response(ADMIN_UI, {
-          headers: {
-            "content-type": "text/html; charset=utf-8",
-            "cache-control": "no-store",
-          },
+          headers: { ...ADMIN_SECURITY_HEADERS, "content-type": "text/html; charset=utf-8" },
         });
       }
 
@@ -74,17 +77,16 @@ export default {
       // ---- Meta ----
       // ---- 元信息 ----
       if (path === "/" || path === "/index.html") {
+        // Deliberately no endpoint inventory: `/` is unauthenticated, and a list of
+        // this deployment's routes is reconnaissance an anonymous visitor has no need
+        // for. The console and the README document them.
+        //
+        // 刻意不列举端点清单：`/` 无需鉴权，而本部署的路由清单属于匿名访问者不需要的
+        // 侦察信息。控制台与 README 里都有说明。
         return json({
           service: "open-webui-to-openai-api-worker",
           version: VERSION,
           admin: "/admin",
-          endpoints: [
-            "GET  /healthz",
-            "GET  /v1/models",
-            "POST /v1/chat/completions",
-            "POST /v1/embeddings",
-            "ANY  /v1/{path}  (passthrough)",
-          ],
         });
       }
       if (path === "/healthz" || path === "/healthz/") {

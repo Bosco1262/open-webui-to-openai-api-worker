@@ -74,9 +74,10 @@ The `--help` output follows `--lang` as well, e.g. `python login.py --lang en --
 
 ## Notes
 
-- Credentials are only considered valid after passing a real upstream authentication check, avoiding saving "expired-token probing requests" or "unauthenticated campus portal redirects" as valid credentials.
+- Credentials are only considered valid after passing a real upstream authentication check, avoiding saving "expired-token probing requests" or "unauthenticated campus portal redirects" as valid credentials. The check runs on the **enriched** capture (localStorage token + cookie jar), i.e. on exactly the values that get written out.
 - `session.json` is in `.gitignore`; do not commit it to version control.
-- File permissions are tightened to `0600` on POSIX; on **Windows** the file inherits the output directory's ACL — avoid saving it to a shared or publicly readable location.
+- **`session.json` is a live credential** (a JWT plus session cookies). Delete it as soon as the import into the Worker console has succeeded; re-run this tool when you need a fresh one. If it ever leaves your machine, treat the upstream session as compromised and sign in again to rotate it.
+- File permissions are tightened to `0600` on POSIX; on **Windows** the file inherits the output directory's ACL (the tool prints a warning) — save it inside a private folder rather than a shared one.
 - When the Open WebUI JWT expires (typically a few days, depending on the server's `JWT_EXPIRES_IN`), simply rerun this tool to refresh it.
 
 ## License

@@ -147,7 +147,7 @@ npx wrangler secret put ADMIN_PASSWORD
 
 1. **本地获取凭证**：按 `local/README.md` 运行 `python login.py --base-url <Open WebUI 地址>`，完成浏览器登录，复制终端输出的 JSON。
 2. **导入 Session**：打开 `/admin` → **导入 Session** 卡片 → 粘贴 JSON → 点「校验并测试连通」→「导入 Session」。
-3. **生成 API Key**：在 **管理 API Key** 卡片生成 `sk-` 开头的密钥（完整 Key 仅创建时显示一次）。
+3. **生成 API Key**：在 **管理 API Key** 卡片生成 `sk-` 开头的密钥（完整 Key 仅创建时显示一次；KV 中只保存其摘要与脱敏串）。
 4. **客户端接入**：
 
 ```
@@ -160,7 +160,7 @@ curl https://<你的worker域名>/v1/models \
   -H "Authorization: Bearer sk-xxxxxxxx"
 ```
 
-> `/v1/models` 会把上游模型对象收敛成标准的 OpenAI 结构 `{id, object, created, owned_by}`，并按白名单透出通用模板字段：`name`、`max_context_length` / `context_length`（`max_model_len` 作为兼容别名保留）、`quantization`（从模型名解析，如 `NVFP4`）与 `description`；模型相对部署级模板的偏离值放在 `x_open_webui.capabilities`。**上游的 `info.meta.capabilities` 不再透传**——`capabilities` 只承载探测实证的结论。上游私有字段（`user_id`、`access_grants`、`permission`、`urlIdx` 等）一律不透出。
+> `/v1/models` 会把上游模型对象收敛成标准的 OpenAI 结构 `{id, object, created, owned_by}`，并按白名单透出通用模板字段：`name`、`max_context_length` / `context_length`（`max_model_len` 作为兼容别名保留）、`quantization`（从模型名解析，如 `NVFP4`）与 `description`；模型相对部署级模板的偏离值放在 `x_open_webui_deviations.capabilities`（信封上的 `x_open_webui` 另有含义，专门承载实例元信息）。**上游的 `info.meta.capabilities` 不再透传**——`capabilities` 只承载探测实证的结论。上游私有字段（`user_id`、`access_grants`、`permission`、`urlIdx` 等）一律不透出。
 
 ### 模型探测（Model Probe）
 
@@ -190,10 +190,11 @@ curl https://<你的worker域名>/v1/models \
 4. **视觉**：`content` 换成 `[text, image_url(1×1 PNG)]`；
 5. **默认行为**：省略 `reasoning_effort`，看返回是否带思考文本（看不出来时不下结论）。
 
-- **实证与模板分离**：上游 `info.meta.capabilities` 是**部署级默认模板**，不再透传进 `capabilities`；所有上报模型一致同意的键作为实例级事实放进信封的 `x_open_webui.default_model_capabilities`，某模型自己的偏离值放在该模型的 `x_open_webui.capabilities`。
+- **实证与模板分离**：上游 `info.meta.capabilities` 是**部署级默认模板**，不再透传进 `capabilities`；所有上报模型一致同意的键作为实例级事实放进信封的 `x_open_webui.default_model_capabilities`，某模型自己的偏离值放在该模型的 `x_open_webui_deviations.capabilities`。
 - **实例元信息**：信封带 `x_open_webui{name, version, features, default_model_capabilities}`，读自上游 `/api/config`（只存在于旧前缀 `/api`；现代前缀 `/api/v1/config` 会回 200 + 一页 HTML，因此这里硬编码旧前缀并校验 JSON）。
 - **开关与调参**：管理控制台 → **上游服务端 → 模型探测** 卡片——功能开关、每轮子请求预算（预设：免费层 40 / 付费层 2000）、单请求超时（默认 30 秒）、`/v1/models` 有限等待（默认 5 秒，0 为不等待）。
 - **状态机**：`ok`（结论完整）/ `partial`（有请求未得出答案，按退避重试）/ `unprobeable`（上游从不校验该字段：永久结论，不给 `reasoning` 但仍给能力）/ `failed`（本轮失败，按退避重试）。重探失败**绝不丢弃**已确立的事实。
+- **健康与挂起**：控制台在仪表盘（「探测健康」卡）与 Session 摘要旁显示队列状态。**永久类**失败（无 session，或上游以 401/403 拒绝凭证）连续 3 次后探测**暂停**——瞬时类失败继续按退避重试，因为只有它们能靠等待自愈。暂停期间不再消耗任何子请求，直到运维动作：重新导入 Session、跑一次连通性检测、或点「立即探测」（三者都会恢复）。
 - **重探判据**：引擎指纹变化（指纹取自模型列表，零请求成本，刻意不含每次响应都变的顶层 `created`）、退避到期或手动触发；**没有时间型 TTL**。上游列表里重复出现的 id 只探一次（以首个指纹为准）。另有可选的**定时巡检**（默认关闭，间隔取共享刻度表的档位：每三十分钟到每天，与「使用记录粒度」同一套刻度）：由 DO alarm 心跳实现，到期时拉一次模型列表对齐、有指纹变化才探测，空闲部署也能更早发现模型增减与凭证过期。
 - **前缀判定**：只有当答复确实是模型列表、或上游以 401/403 拒绝凭证（路由存在但会话已死）时，候选前缀才算正确；404、5xx 与 SPA 的 "200 + HTML" 都会继续试下一个。因此"坏掉的现代前缀"不会再被缓存成"可用"。
 - **上游超时**：本 Worker 发往上游的每个请求都带上限——元信息（模型列表、前缀探测）15 秒，需要响应体的请求 300 秒，流式请求只限制等待响应头的时间（SSE 响应体绝不被截断）。因此"接了连接却永不答复"的上游无法再永久占住 Worker 请求。
@@ -222,7 +223,7 @@ for chunk in resp:
 
 ## API 端点
 
-本 Worker 实现下面列出的 OpenAI 兼容端点（其余上游路由走通用透传），**不实现**图片 / 音频 / 文件类端点：这类请求会原样转发给上游，能否可用完全取决于上游部署。
+本 Worker 实现下面列出的 OpenAI 兼容端点，另有**白名单内**的兜底透传（默认拒绝，见下），**不实现**图片 / 音频 / 文件类端点：这类请求会原样转发给上游，能否可用完全取决于上游部署。
 
 | 方法            | 路径                                    | 鉴权     | 说明                               |
 | --------------- | --------------------------------------- | -------- | ---------------------------------- |
@@ -242,6 +243,8 @@ for chunk in resp:
 
 客户端鉴权支持 `Authorization: Bearer <key>` 与 `X-API-Key: <key>` 两种方式。
 
+> **透传白名单（Key 的权限边界）。** `/v1/{path}` 兜底透传**默认拒绝**：只转发 `/images`、`/audio`、`/files` 三个前缀（含其子树），其余路径一律返回 403 `endpoint_not_allowed`，且**不会发出任何上游请求**。此前任意 `/v1/*` 都会以运维导入的凭证原样转发，等于让每把客户端 Key 拥有上游账号的全权（`/auths`、`/users`、`/configs`、`/chats` 等业务与管理 API 全部可达）。需要放开其它路由时，请同时改 `worker/src/proxy.ts` 的 `PASSTHROUGH_ALLOWLIST` 与本节的说明——每加一条都等于把运维在上游的权限交给 Key 持有者。
+
 > **仅面向服务端客户端。** `/v1` 代理不返回 CORS 头、也不应答 `OPTIONS` 预检，浏览器端页面无法直接调用——请将 OpenAI 兼容的服务端客户端（SDK、CLI、网关）接入本代理。
 
 ## 配置说明
@@ -249,19 +252,19 @@ for chunk in resp:
 | 配置                 | 方式                                        | 说明                                                                                     |
 | -------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `ADMIN_PASSWORD`     | `wrangler secret put` / Dashboard Variables | 管理密码（可选；Secret 直接验证不写 KV，后台改密后存 KV 并覆盖它） |
-| `SESSION_SECRET`     | `wrangler secret put`                       | 会话签名密钥（可选，未设则自动派生存 KV）                                                |
-| KV Namespace         | `wrangler.jsonc`（自动创建）                | 存储 session / API Key / 管理密码 / `settings:probe` / `settings:touch_interval`；绑定省略 `id` 即自动资源供应，首次部署自动创建 |
+| `SESSION_SECRET`     | `wrangler secret put`                       | 会话签名密钥（可选，未设则自动派生存 KV；**建议 ≥ 32 字符**，过短会削弱 HMAC 强度并在控制台提示）                                                |
+| KV Namespace         | `wrangler.jsonc`（自动创建）                | 存储 session / API Key 元数据（`apikey:<sha256>`，密钥本身不落盘）/ 使用记录（`usage:<sha256>`）/ 管理密码 / `settings:probe` / `settings:touch_interval`；绑定省略 `id` 即自动资源供应，首次部署自动创建 |
 | DO `ModelProbeCoordinator` | `wrangler.jsonc`（`migrations`）      | 存储逐模型探测结果、上游前缀与实例快照（`instance_meta`）；随首次部署自动创建 |
 
 ## 免费层资源适配
 
 存储分两处，各自贴近数据的使用方式：
 
-**KV**（100k 读/天、1k 写/天；注意"约 1 写/秒"是**同键写入速率**，与每天 1,000 次的配额是两个不同的口径，不要混用）承载低频的部署级数据：session、API Key、管理凭证与 `settings:*`。
+**KV**（100k 读/天、1k 写/天；注意"约 1 写/秒"是**同键写入速率**，与每天 1,000 次的配额是两个不同的口径，不要混用）承载低频的部署级数据：session、API Key 元数据、使用记录、管理凭证与 `settings:*`。
 
-- API Key 校验为 O(1)：Key 明文即 KV 键名，无需遍历。`session` 在 Worker 实例内缓存 60 秒，因此**代理路径每次请求恒为 1 次 KV 读**（就是 API Key 这一次，不能缓存——删 Key 必须立即生效）。
-- 损坏、被截断或手改过的 KV 值（例如解析不出的 session）会退化为"不存在"或默认值，而不是让读它的请求失败，因此始终可以从控制台修复。
-- `last_used` 通过 `ctx.waitUntil` 异步写入并节流：从未使用的 Key 首次调用立即记录一次，之后至多按配置粒度写一次（默认每天，可在「API 管理 → 使用记录粒度」调整）。粒度选「关闭」后不再记录：历史数据仍保留在 KV 中，但「最近使用」列会显示"已关闭此功能"而不显示时间戳。
+- API Key 校验为 O(1)：对提交的 Key 求 SHA-256 后读取 `apikey:<sha256(key)>`，无需遍历；**密钥本身从不落盘**，因此 Dashboard、`wrangler kv key list` 或一份 KV 备份都无法交出一批可用凭证。旧布局（明文即键名）的 Key 仍可正常鉴权，并会在首次命中时于关键路径之外迁移到哈希键名。`session` 在 Worker 实例内缓存 60 秒，因此**代理路径每次请求恒为 1 次 KV 读**。
+- 损坏、被截断或手改过的 KV 值（例如解析不出的 session，或形状不对的 Key 记录）会退化为"不存在"或默认值，而不是让读它的请求失败，因此始终可以从控制台修复。
+- `last_used` 写在**独立的** `usage:<sha256(key)>` 键下，通过 `ctx.waitUntil` 异步写入并节流：从未使用的 Key 首次调用立即记录一次，之后至多按配置粒度写一次（默认每天，可在「API 管理 → 使用记录粒度」调整）。粒度选「关闭」后不再记录：历史数据保留，但「最近使用」列会显示"已关闭此功能"。使用记录与凭据记录分离是刻意的——它们共用同一个键时，一次与"删除 Key"并发的使用写入会把刚被撤销的 Key **重建**出来。
 - **写入预算**：免费层每天 1,000 次写入，「粒度 × 有效 API Key 数」决定消耗。10 分钟档每个 Key 每天写 144 次、7 个 Key 就会吃满全天配额，因此该档位已移除；保留的最细档位（30 分钟）对应约 20 个 Key 的安全线。
 
 **Durable Object `ModelProbeCoordinator`**（SQLite，每模型一行）承载探测事实与实例快照。
@@ -278,10 +281,19 @@ for chunk in resp:
 - 管理界面与 `/admin/api/*` 全部要求登录会话，请务必设置强密码。
 - 无任何密码配置（`none`，如 `ADMIN_PASSWORD` 被移除且从未设过网页密码）时，除首次设密相关接口外管理接口一律返回 403，管理功能不可用，需先在网页设置密码。
 - **请在域名公开之前预设 `ADMIN_PASSWORD` Secret。** 首次设密是为"尚未配置任何密码"的状态而存在的，而那个状态会被第一个访问 `/admin` 的人占住。Secret 绑定时 `POST /admin/api/setup` 会返回 403（`err.setup_secret_exists`），网页无法覆盖它；要回到设密流程，需先清除 Secret（并删除 KV 中的哈希）。
-- 后台「修改密码」会使所有已登录管理会话立即失效并需重新登录；来自 Secret 的密码在未被后台覆盖前不会写入 KV。
-- 登录接口带失败锁定：同一客户端 IP 15 分钟内连续失败 5 次将返回 429 并锁定，可有效减缓暴力破解。该计数保存在**Worker 实例本地**，跨 Cloudflare 边缘节点轮换可绕过它；需要硬性保证时，请在 Cloudflare WAF 中为 `/admin/api/login` 配置 Rate Limiting 规则兜底。
-- 客户端 API Key 请妥善保管；完整 Key 仅在生成时显示一次。
-- 导入的 Open WebUI 凭证仅存于 KV，界面只展示脱敏摘要。
+- **客户端 Key 的权限边界就是上面那张透传白名单**：Key 只能访问 `/models`、`/chat/completions`、`/embeddings` 与 `/images`、`/audio`、`/files`；上游的账号、用户、配置、会话等 API 对它不可达（403，且不发上游请求）。分享 Key 给第三方之前请先确认这一点符合预期。
+- **客户端 Key 只以摘要形式存储**：KV 里只有 `apikey:<sha256(key)>` 与展示用的脱敏串，完整 Key 仅在创建（或轮转）时回显一次。
+- 后台「修改密码」会吊销所有已登录管理会话；密码与 API Key 的吊销都依赖 KV，**最长约 60 秒在所有边缘节点收敛**（并非同一瞬间全局生效）。安全响应（发现泄露后的撤销）请把这个窗口计入。
+- 登录接口带失败锁定：同一客户端 IP 15 分钟内连续失败 5 次将返回 429 并锁定。该计数保存在 **Worker 实例本地**，且只信任 `CF-Connecting-IP`（`X-Forwarded-For` 由客户端控制，不再采信）；**部署必选项**：在 Cloudflare WAF 中为 `/admin/api/login`（及 `/admin/api/setup`）配置 Rate Limiting 规则兜底——跨边缘节点轮换只有 WAF 才拦得住。
+- **上游必须使用 HTTPS**（`https://`，标准端口；仅 `localhost` / `127.0.0.1` 回环地址允许 `http://`，供本地 mock 彩排）。导入时会拒绝私网、链路本地与云元数据地址，且代理**不会跟随上游的重定向**（3xx 视为错误），避免把 session 凭证以明文或经重定向交给第三方。**这是平台约束，而不是对本地部署的否定**：Worker 跑在 Cloudflare、上游在公网，`http://` 确实会把 JWT 与 Cookie 暴露在链路上；Python 原版是本地进程，支持 `http://localhost:8080` 与局域网地址是合理的——它不需要、也不适用这条规则。
+- 上游响应中的 `set-cookie` / `www-authenticate` 等会话与质询头**不会**回传给客户端；客户端自带的 `X-API-Key`、`Cookie`、`X-Forwarded-*`、`Forwarded`、`X-Real-IP` 等也不会被转发给上游（上游只会看到导入的 session 凭证）。
+- **客户端请求头按端点分策略转发**：JSON 端点（`/models`、`/models/{id}`、`/chat/completions`、`/embeddings`）使用**白名单**——只有 `accept`、`accept-language`、`content-type`、`range`、`x-request-id` 与 `openai-*` 会送到上游，其余默认丢弃；`/v1/{path}` 兜底透传保留黑名单（逐跳头、客户端凭证、`CF-*` 与转发头），因为通用转发必须保留客户端特有的头，否则 multipart 上传与 Range 下载会坏。
+- JSON 请求体上限 **10 MiB**（与上游项目同一数值），且作用于**实际读到的字节**——没有 `Content-Length` 的 chunked 请求体绕不过去；超限返回 `413 payload_too_large`。
+- 上游错误自带的 `Retry-After` 会透传给客户端（让 SDK 正确退避，而不是对着已经在请求暂停的上游继续重试）。
+- 管理响应统一带 `Cache-Control: no-store, private`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer` 与 CSP；HTTPS 下管理会话 Cookie 使用 `__Host-` 前缀。
+- 登出只会清除管理会话 Cookie，**不会**吊销已签发的令牌——令牌是无状态的，被盗的令牌在过期前依然有效。要让所有设备上的会话一起作废，请修改管理密码。升级前签发的会话仍可用，登出时两个 Cookie 名都会被清除。
+- `SESSION_SECRET`（绑定时）用于签发管理会话 Cookie，请使用**不少于 32 个字符**的随机串。未绑定时 Worker 会在 KV 中自动派生一个 32 字节随机密钥——单机房部署完全够用，但两个边缘机房在刚派生的一小段时间内可能各持一份（管理员可能需要在窗口内重新登录一次），因此更推荐显式绑定。
+- 导入的 Open WebUI 凭证仅存于 KV，界面只展示脱敏摘要。但**本地捕获的 `local/session.json` 是一份仍然有效的凭证**：导入成功后请删除该文件；一旦它离开你的机器，请重新登录上游以使其失效。
 
 ## 开源许可
 

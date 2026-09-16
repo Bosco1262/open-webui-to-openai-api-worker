@@ -29,7 +29,14 @@ import { fetchUpstream, sessionAuthHeaders, sessionHeaders, sessionIsUsable } fr
 import { AUTH_FAILURE_CODES, PREFIX_CANDIDATES, confirmUpstreamPrefix } from "./upstream.ts";
 import type { ConfirmedPrefix } from "./upstream.ts";
 import { getSession } from "./kv.ts";
-import { extractModelList, modelFingerprint, modelIdOf, normalizeModel, sharedDefaultCapabilities } from "./modelCatalog.ts";
+import {
+  extractModelList,
+  isModelListPayload,
+  modelFingerprint,
+  modelIdOf,
+  normalizeModel,
+  sharedDefaultCapabilities,
+} from "./modelCatalog.ts";
 import { instanceMetaToEnvelope, isInstanceMetaUsable } from "./instanceMeta.ts";
 import { readProbeSettings } from "./probeSettings.ts";
 import { looksLikeEffortError } from "./modelProbe.ts";
@@ -57,6 +64,7 @@ const HOP_BY_HOP_REQUEST = new Set([
   "keep-alive",
   "proxy-authenticate",
   "proxy-authorization",
+  "proxy-connection",
   "te",
   "trailer",
   "transfer-encoding",
@@ -65,7 +73,90 @@ const HOP_BY_HOP_REQUEST = new Set([
   "content-length",
   "accept-encoding",
   "authorization",
+  // Client credentials: the upstream must only ever see the imported session's
+  // credentials, never the caller's proxy key or its cookies. `authorization` and
+  // `x-api-key` are the two ways a client authenticates here (see
+  // `extractClientApiKey`); `cookie` is dropped outright rather than "kept unless
+  // the session has one", which used to let a client cookie ride along on any
+  // session that carried only an Authorization header.
+  //
+  // 客户端凭证：上游只能看到导入的 session 凭证，绝不能看到调用方的代理 Key 或其
+  // Cookie。`authorization` 与 `x-api-key` 是客户端在此鉴权的两种方式（见
+  // `extractClientApiKey`）；`cookie` 现在是**无条件**剔除，而不是"session 没有才
+  // 保留"——后者会让客户端 Cookie 搭上任何只带 Authorization 的 session 上行。
+  "x-api-key",
+  "api-key",
+  "cookie",
+  // Forwarding headers are client-controlled: passing them on lets a caller
+  // fabricate its own source address in the upstream's logs and in any IP-based
+  // trust or rate limiting the upstream applies.
+  //
+  // 转发头由客户端控制：放行它们等于让调用方在上游日志、以及上游任何基于 IP 的
+  // 信任或限流中伪造自己的来源地址。
+  "forwarded",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-forwarded-port",
+  "x-forwarded-server",
+  "x-real-ip",
+  "x-original-for",
+  "x-original-host",
 ]);
+
+/**
+ * Client headers the JSON-speaking endpoints (`/models`, `/models/{id}`,
+ * `/chat/completions`, `/embeddings`) forward upstream. Everything else is dropped.
+ *
+ * Two policies, on purpose (operator decision, 2026-09-15):
+ *   - JSON endpoints use an ALLOWLIST: they are a fixed, known surface, and the upstream
+ *     only needs content negotiation plus the odd tracing id. Unknown client headers
+ *     (SDK fingerprints, `x-trace`, cookies under another name, ...) are dropped by
+ *     DEFAULT -- a denylist would have to be extended every time someone invents a new
+ *     sensitive header, which is exactly how the client key and cookie travelled north
+ *     before this change.
+ *   - The catch-all passthrough keeps the denylist (`HOP_BY_HOP_REQUEST`): it is a
+ *     generic relay, and an allowlist there would break multipart uploads, Range
+ *     downloads and every client-specific header that makes those work.
+ *
+ * `HOP_BY_HOP_REQUEST` still applies to both: hop-by-hop headers, `cf-*` and the client's
+ * own credentials never travel, allowlist or not (defense in depth).
+ *
+ * JSON 端点（`/models`、`/models/{id}`、`/chat/completions`、`/embeddings`）可转发给上游的
+ * 客户端请求头；其余一律丢弃。
+ *
+ * 刻意分两套策略（运维决策，2026-09-15）：
+ *   - JSON 端点用**白名单**：它们是固定且已知的面，上游只需要内容协商加偶尔一个追踪 id。
+ *     未知客户端头（SDK 指纹、`x-trace`、换个名字的 Cookie……）**默认**丢弃——黑名单则每
+ *     出现一种新的敏感头就要补一次，而客户端 Key 与 Cookie 此前正是这样飘上去的。
+ *   - 兜底透传保留黑名单（`HOP_BY_HOP_REQUEST`）：它是通用转发，改成白名单会打断 multipart
+ *     上传、Range 下载以及让这些功能成立的各类客户端自定义头。
+ *
+ * `HOP_BY_HOP_REQUEST` 对两条路径都生效：逐跳头、`cf-*` 与客户端自己的凭证，无论是否在白
+ * 名单里都不外发（纵深防御）。
+ */
+const JSON_REQUEST_HEADER_ALLOWLIST = new Set([
+  "accept",
+  "accept-language",
+  "content-type",
+  "range",
+  "x-request-id",
+]);
+
+/** Additional allowlist entries matched by prefix (`openai-beta`, `openai-organization`,
+ *  ... — the tracing/attribution headers the official SDKs send). */
+/** 白名单里按前缀匹配的条目（`openai-beta`、`openai-organization`……即官方 SDK 发送的
+ *  追踪/归属类头）。 */
+const JSON_REQUEST_HEADER_ALLOWLIST_PREFIXES: readonly string[] = ["openai-"];
+
+/** Whether a lowercase header name may travel to the upstream from a JSON endpoint. */
+/** 小写头名是否可以从 JSON 端点转发给上游。 */
+function isJsonUpstreamHeader(lowerKey: string): boolean {
+  return (
+    JSON_REQUEST_HEADER_ALLOWLIST.has(lowerKey) ||
+    JSON_REQUEST_HEADER_ALLOWLIST_PREFIXES.some((prefix) => lowerKey.startsWith(prefix))
+  );
+}
 
 /** Response headers that must not be passed through to the client. */
 /** 不得透传给客户端的响应头。 */
@@ -74,6 +165,7 @@ const HOP_BY_HOP_RESPONSE = new Set([
   "keep-alive",
   "proxy-authenticate",
   "proxy-authorization",
+  "proxy-connection",
   "te",
   "trailer",
   "transfer-encoding",
@@ -82,7 +174,52 @@ const HOP_BY_HOP_RESPONSE = new Set([
   "content-encoding",
   "date",
   "server",
+  // Session material is NOT relayed: a `set-cookie` from the upstream would hand
+  // the client a directly usable Open WebUI session, bypassing this proxy (and its
+  // key checks) entirely -- and turning "the proxy key leaked" into "the upstream
+  // account leaked".
+  //
+  // 会话物料**不**转发：上游的 `set-cookie` 会把一个可直接使用的 Open WebUI 会话交给
+  // 客户端，从而完全绕开本代理（以及它的 Key 校验）——并把"代理 Key 泄露"升级为
+  // "上游账号泄露"。
+  "set-cookie",
+  "set-cookie2",
+  "www-authenticate",
 ]);
+
+/**
+ * Upstream paths the catch-all passthrough may forward to.
+ *
+ * Deny-by-default on purpose: the passthrough used to relay ANY `/v1/*` path with
+ * the operator's own imported credentials, so a client holding a proxy key could
+ * reach the upstream's entire business and admin API (`/auths`, `/users`,
+ * `/configs`, `/chats`, ...) -- i.e. the key was equivalent to full account access.
+ * Only these documented OpenAI-compatible media/file routes are forwarded now;
+ * everything else answers 403 `endpoint_not_allowed`.
+ *
+ * Extending this list is an explicit decision: add the prefix here AND document it
+ * in the README's Security Notes, because every entry hands key holders the
+ * operator's upstream privileges on that route.
+ *
+ * 兜底透传允许转发到的上游路径。
+ *
+ * 刻意"默认拒绝"：此前的透传会用运维导入的凭证原样转发**任意** `/v1/*` 路径，因此
+ * 持有代理 Key 的客户端可以触达上游的整套业务与管理 API（`/auths`、`/users`、
+ * `/configs`、`/chats`……）——也就是说一把 Key 等价于账号全权。现在只转发这些已在
+ * 文档中声明的 OpenAI 兼容媒体/文件路由，其余一律回 403 `endpoint_not_allowed`。
+ *
+ * 扩展本列表是一个显式决定：在这里加前缀**并且**在 README 的 Security Notes 中写明，
+ * 因为每一条都等于把运维在上游的权限交给 Key 持有者。
+ */
+const PASSTHROUGH_ALLOWLIST: readonly string[] = ["/images", "/audio", "/files"];
+
+/** Whether a `/v1` subpath is inside the passthrough allowlist (exact or subtree). */
+/** `/v1` 子路径是否落在透传白名单内（精确或其子树）。 */
+function isPassthroughAllowed(subpath: string): boolean {
+  return PASSTHROUGH_ALLOWLIST.some(
+    (allowed) => subpath === allowed || subpath.startsWith(`${allowed}/`),
+  );
+}
 
 // --------------------------------------------------------------------------- //
 // OpenAI-style errors
@@ -95,9 +232,18 @@ interface ErrorOpts {
   param?: string | null;
 }
 
-// Build an OpenAI-style error response body with the given status.
-// 用给定状态码构造 OpenAI 风格的错误响应体。
-function openaiError(message: string, status = 400, opts: ErrorOpts = {}): Response {
+// Build an OpenAI-style error response body with the given status. `extraHeaders`
+// carries transport-level facts that belong on the response, not in the body (today:
+// the upstream's own `Retry-After`).
+//
+// 用给定状态码构造 OpenAI 风格的错误响应体。`extraHeaders` 承载属于**响应头**而不是错误体
+// 的传输层事实（目前是上游自己的 `Retry-After`）。
+function openaiError(
+  message: string,
+  status = 400,
+  opts: ErrorOpts = {},
+  extraHeaders: Record<string, string> = {},
+): Response {
   return Response.json(
     {
       error: {
@@ -107,7 +253,7 @@ function openaiError(message: string, status = 400, opts: ErrorOpts = {}): Respo
         code: opts.code ?? null,
       },
     },
-    { status },
+    { status, headers: extraHeaders },
   );
 }
 
@@ -136,9 +282,62 @@ function authFailureResponse(status: number): Response {
 function upstreamErrorResponse(resp: Response, text: string, source: string, maxLen: number): Response {
   const status = resp.status;
   const where = source ? `${source} ` : "";
-  return openaiError(`Upstream ${where}returned HTTP ${status}: ${text.slice(0, maxLen)}`, status < 500 ? status : 502, {
-    type: status < 500 ? "invalid_request_error" : "server_error",
-    code: "upstream_error",
+  // The upstream's own `Retry-After` survives the wrapping (the upstream project does
+  // the same). A 429/503 that told US "come back in 30s" must tell OUR client too --
+  // otherwise every SDK retries immediately and hammers an upstream that is already
+  // asking for a pause.
+  //
+  // 上游自己的 `Retry-After` 在包装后依然保留（上游项目也如此）。一个对我们说了
+  // "30 秒后再来"的 429/503，必须也告诉我们的客户端——否则每个 SDK 都会立刻重试，把已经
+  // 在请求暂停的上游打得更狠。
+  const retryAfter = resp.headers.get("retry-after");
+  return openaiError(
+    `Upstream ${where}returned HTTP ${status}: ${text.slice(0, maxLen)}`,
+    status < 500 ? status : 502,
+    {
+      type: status < 500 ? "invalid_request_error" : "server_error",
+      code: "upstream_error",
+    },
+    retryAfter ? { "retry-after": retryAfter } : {},
+  );
+}
+
+// A correlation id for one request: Cloudflare's `cf-ray` when present, a fresh
+// UUID otherwise (tests, another runtime). It is echoed to the client in error
+// bodies so an operator can find the matching log line WITHOUT the response having
+// to carry any internal detail.
+//
+// 单次请求的关联 id：有 Cloudflare 的 `cf-ray` 就用它，否则新生成一个 UUID（测试、
+// 其它运行时）。它随错误体回给客户端，使运维能对上日志行，而**不必**让响应携带任何
+// 内部细节。
+function requestIdOf(request: Request): string {
+  return request.headers.get("cf-ray") ?? crypto.randomUUID();
+}
+
+// Log the real failure and answer a fixed, generic message. Internal error text
+// (KV/DO failures, host names, network detail) used to be echoed to API clients,
+// which leaks implementation detail to anyone holding a key and says nothing useful
+// to them anyway; the request id is what actually helps.
+//
+// 记录真实失败，对外只回固定文案。内部错误文本（KV/DO 故障、主机名、网络细节）
+// 此前会被回显给 API 客户端——这既向任何持有 Key 的人泄露实现细节，对他们又毫无用处；
+// 真正有用的是 request id。
+function loggedErrorResponse(
+  err: unknown,
+  requestId: string,
+  message: string,
+  options: { status: number; code: string; type: string; logMessage: string },
+): Response {
+  console.error(
+    JSON.stringify({
+      message: options.logMessage,
+      request_id: requestId,
+      error: err instanceof Error ? err.message : String(err),
+    }),
+  );
+  return openaiError(`${message} (request id: ${requestId})`, options.status, {
+    type: options.type,
+    code: options.code,
   });
 }
 
@@ -148,10 +347,23 @@ function upstreamErrorResponse(resp: Response, text: string, source: string, max
 //
 // 处理函数自己的配置读不出来（KV 故障）。这不是上游的问题，因此回它自己的错误码，
 // 而不是 `upstream_error`——后者会让运维去 Open WebUI 那一侧找故障。
-function settingsUnavailable(err: unknown): Response {
-  return openaiError(`Probe settings unavailable: ${String(err)}`, 500, {
+function settingsUnavailable(err: unknown, request: Request): Response {
+  return loggedErrorResponse(err, requestIdOf(request), "Probe settings are unavailable.", {
+    status: 500,
     type: "server_error",
     code: "settings_unavailable",
+    logMessage: "probe settings unavailable",
+  });
+}
+
+// The upstream could not be reached at all (DNS, TLS, timeout, refused redirect).
+// 完全无法触达上游（DNS、TLS、超时、拒绝跟随的重定向）。
+function upstreamUnreachable(err: unknown, request: Request): Response {
+  return loggedErrorResponse(err, requestIdOf(request), "The upstream service could not be reached.", {
+    status: 502,
+    type: "server_error",
+    code: "upstream_unavailable",
+    logMessage: "upstream request failed",
   });
 }
 
@@ -195,6 +407,11 @@ function buildUpstreamHeaders(request: Request, session: StoredSession, json: bo
     // Drop hop-by-hop, CF-internal and client auth headers.
     // 剔除逐跳头、CF 内部头与客户端鉴权头。
     if (HOP_BY_HOP_REQUEST.has(lowerKey) || lowerKey.startsWith("cf-")) continue;
+    // JSON endpoints: allowlist (see JSON_REQUEST_HEADER_ALLOWLIST); the passthrough
+    // keeps the denylist.
+    //
+    // JSON 端点：白名单（见 JSON_REQUEST_HEADER_ALLOWLIST）；透传保留黑名单。
+    if (json && !isJsonUpstreamHeader(lowerKey)) continue;
     headers.set(key, value);
   }
   // Session credentials override everything (the client can't set its own auth).
@@ -296,6 +513,96 @@ async function detectPrefix(request: Request, session: StoredSession): Promise<s
 // --------------------------------------------------------------------------- //
 
 /**
+ * Ceiling for a JSON request body (10 MiB -- the same number the upstream project uses
+ * as `MAX_BODY_BYTES`).
+ *
+ * The proxy re-serializes chat/embeddings payloads, so it must hold them in memory
+ * anyway; without a ceiling a single caller can make the Worker buffer an arbitrarily
+ * large body. The VALUE is deliberately not stricter than upstream: vision payloads
+ * (a 4K image base64-encodes to ~2-4 MB) and batch embeddings legitimately reach a few
+ * MiB, and rejecting them would break real clients. The MECHANISM is what matters here:
+ * unlike upstream, this cap is enforced on the bytes actually read, so a chunked body
+ * without a `Content-Length` cannot slip past it.
+ *
+ * JSON 请求体的上限（10 MiB——与上游项目 `MAX_BODY_BYTES` 同值）。
+ *
+ * 代理要重新序列化 chat/embeddings 负载，本来就必须把它读进内存；没有上限时单个调用方
+ * 就能让 Worker 缓冲任意大的请求体。**数值**刻意不比上游更严：视觉负载（4K 图片经
+ * base64 后约 2-4 MB）与批量 embedding 合法地就会到几 MB，拦掉它们会打断真实客户端。
+ * 这里真正重要的是**机制**：与上游不同，本上限作用于**实际读到的字节**，因此没有
+ * `Content-Length` 的 chunked 请求体绕不过去。
+ */
+const MAX_JSON_BODY_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Read the body as text, refusing anything above `maxBytes`.
+ *
+ * The declared `content-length` is checked first (cheap rejection), but the actual
+ * read is capped as well: a client can send a chunked body with no length at all, and
+ * a declared length can simply lie.
+ *
+ * 以文本读取请求体，超过 `maxBytes` 一律拒绝。
+ *
+ * 先检查声明的 `content-length`（廉价拒绝），但**实际读取**同样受限：客户端可以用
+ * chunked 完全不声明长度，而声明的长度也可以直接撒谎。
+ */
+async function readCappedText(request: Request, maxBytes: number): Promise<string | null> {
+  const declared = Number(request.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) return null;
+  const stream = request.body;
+  if (!stream) return "";
+  const reader = stream.getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        void reader.cancel().catch(() => {});
+        return null;
+      }
+      parts.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    merged.set(part, offset);
+    offset += part.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+
+/** Parse a size-capped JSON object body, or the error response to send. */
+/** 解析有大小上限的 JSON 对象请求体，或应发送的错误响应。 */
+async function readJsonObjectBody(
+  request: Request,
+): Promise<{ payload: Record<string, unknown> } | { error: Response }> {
+  const text = await readCappedText(request, MAX_JSON_BODY_BYTES);
+  if (text === null) {
+    return {
+      error: openaiError(`Request body is too large (limit ${MAX_JSON_BODY_BYTES} bytes).`, 413, {
+        code: "payload_too_large",
+      }),
+    };
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return { error: openaiError("Request body is not valid JSON.", 400, { code: "invalid_json" }) };
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return { error: openaiError("Request body must be a JSON object.", 400, { code: "invalid_json" }) };
+  }
+  return { payload: payload as Record<string, unknown> };
+}
+
+/**
  * Fetch and parse the upstream model list, mapping every failure to its
  * OpenAI-style error response. The list endpoint and the single-model read share
  * this: they used to carry ~40 identical lines, which is exactly the kind of copy
@@ -320,12 +627,7 @@ async function fetchUpstreamModels(
   try {
     resp = await fetchUpstream(`${base}${prefix}/models`, { method: "GET", headers }, { metadata: true });
   } catch (err) {
-    return {
-      error: openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {
-        type: "server_error",
-        code: "upstream_unavailable",
-      }),
-    };
+    return { error: upstreamUnreachable(err, request) };
   }
 
   if (AUTH_FAILURE_CODES.includes(resp.status)) {
@@ -342,14 +644,45 @@ async function fetchUpstreamModels(
   try {
     payload = JSON.parse(text);
   } catch {
-    return {
-      error: openaiError(`Upstream /models returned invalid JSON: ${text.slice(0, 500)}`, 502, {
-        type: "server_error",
-        code: "upstream_error",
-      }),
-    };
+    return { error: upstreamModelListUnreadable(request, "the body is not JSON") };
+  }
+  // A 200 that does not read as a model list is NOT "the upstream has no models".
+  // The coordinator already draws this line (see its use of `isModelListPayload`);
+  // without the same check here, an SPA page, a captive portal or an unexpected
+  // schema was reported to every client as an authoritative empty list.
+  //
+  // 读不成模型列表的 200 **不**等于"上游没有模型"。协调者已经划了这条线（见它对
+  // `isModelListPayload` 的使用）；这里不做同样的检查，会让 SPA 页面、门户拦截页或
+  // 意外结构被当成权威空列表报给每一个客户端。
+  if (!isModelListPayload(payload)) {
+    return { error: upstreamModelListUnreadable(request, `the body is ${describePayloadShape(payload)}`) };
   }
   return { cards: extractModelList(payload) };
+}
+
+/** A short, non-revealing description of a payload's shape, for error messages. */
+/** 对负载形状的简短描述（不泄露内容），用于错误消息。 */
+function describePayloadShape(payload: unknown): string {
+  if (Array.isArray(payload)) return `an array of ${payload.length} item(s)`;
+  if (payload !== null && typeof payload === "object") {
+    const keys = Object.keys(payload as Record<string, unknown>).slice(0, 8);
+    return `an object with keys [${keys.join(", ")}]`;
+  }
+  return payload === null ? "null" : `a ${typeof payload} value`;
+}
+
+// A 200 from /models that we cannot read as a model list: logged in full (it is the
+// only clue to what the upstream actually served), answered generically.
+//
+// /models 回了 200 但读不成模型列表：完整记入日志（它是判断上游究竟返回了什么
+// 的唯一线索），对外只回通用文案。
+function upstreamModelListUnreadable(request: Request, reason: string): Response {
+  return loggedErrorResponse(
+    new Error(`unreadable /models payload: ${reason}`),
+    requestIdOf(request),
+    "The upstream model list could not be read.",
+    { status: 502, type: "server_error", code: "upstream_error", logMessage: "upstream model list unreadable" },
+  );
 }
 
 // GET /v1/models — fetch and normalize the upstream model list.
@@ -390,7 +723,7 @@ async function handleModels(
   try {
     settings = await readProbeSettings(env);
   } catch (err) {
-    return settingsUnavailable(err);
+    return settingsUnavailable(err, request);
   }
   const wantsFields = settings.enabled;
   const wantsEnvelope = settings.exposeInstanceMeta;
@@ -545,7 +878,7 @@ async function handleRetrieveModel(
   try {
     settings = await readProbeSettings(env);
   } catch (err) {
-    return settingsUnavailable(err);
+    return settingsUnavailable(err, request);
   }
   if (settings.enabled) {
     try {
@@ -585,15 +918,9 @@ async function handleChat(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  let payload: Record<string, unknown>;
-  try {
-    payload = (await request.json()) as Record<string, unknown>;
-  } catch {
-    return openaiError("Request body is not valid JSON.", 400, { code: "invalid_json" });
-  }
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    return openaiError("Request body must be a JSON object.", 400, { code: "invalid_json" });
-  }
+  const body = await readJsonObjectBody(request);
+  if ("error" in body) return body.error;
+  const payload = body.payload;
   // `model` must be a non-empty STRING: `0` / `false` / `[]` / `{}` and a blank
   // string are all truthy or falsy in ways that let them slip through a plain falsy
   // check, and forwarding them upstream hands the client "an upstream error" instead
@@ -634,10 +961,7 @@ async function handleChat(
       body: JSON.stringify(payload),
     }, { stream: isStream });
   } catch (err) {
-    return openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {
-      type: "server_error",
-      code: "upstream_unavailable",
-    });
+    return upstreamUnreachable(err, request);
   }
 
   if (AUTH_FAILURE_CODES.includes(resp.status)) {
@@ -697,12 +1021,9 @@ async function handleChat(
 // POST /v1/embeddings — forward the embedding request to the upstream.
 // POST /v1/embeddings —— 将向量嵌入请求转发给上游。
 async function handleEmbeddings(request: Request, session: StoredSession): Promise<Response> {
-  let payload: Record<string, unknown>;
-  try {
-    payload = (await request.json()) as Record<string, unknown>;
-  } catch {
-    return openaiError("Request body is not valid JSON.", 400, { code: "invalid_json" });
-  }
+  const body = await readJsonObjectBody(request);
+  if ("error" in body) return body.error;
+  const payload = body.payload;
   // Same `model` rule as chat/completions, plus the required `input` field. The two
   // are reported separately so the client is told which one is wrong.
   //
@@ -733,10 +1054,7 @@ async function handleEmbeddings(request: Request, session: StoredSession): Promi
       body: JSON.stringify(payload),
     });
   } catch (err) {
-    return openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {
-      type: "server_error",
-      code: "upstream_unavailable",
-    });
+    return upstreamUnreachable(err, request);
   }
 
   if (AUTH_FAILURE_CODES.includes(resp.status)) {
@@ -750,13 +1068,30 @@ async function handleEmbeddings(request: Request, session: StoredSession): Promi
   return new Response(resp.body, { status: resp.status, headers: filterResponseHeaders(resp.headers) });
 }
 
-// ANY /v1/{path} — catch-all passthrough for every other upstream route.
-// ANY /v1/{path} —— 其余上游路由的兜底透传。
+// ANY /v1/{path} — passthrough for the allowlisted upstream media/file routes.
+// ANY /v1/{path} —— 白名单内的上游媒体/文件路由透传。
 async function handlePassthrough(request: Request, session: StoredSession): Promise<Response> {
   const url = new URL(request.url);
   const subpath = url.pathname.slice("/v1".length);
   if (!subpath.replace(/^\//, "")) {
     return openaiError("Please specify the upstream path to forward in the URL.", 404, { code: "not_found" });
+  }
+  // Deny-by-default (see PASSTHROUGH_ALLOWLIST): the client key is a proxy
+  // credential, not a delegation of the operator's upstream account. Anything
+  // outside the allowlist -- most importantly the upstream's user/auth/config/admin
+  // routes -- is refused BEFORE any upstream request is made.
+  //
+  // 默认拒绝（见 PASSTHROUGH_ALLOWLIST）：客户端 Key 是代理凭证，不是运维上游账号的
+  // 授权委托。白名单之外的一切——尤其是上游的用户/鉴权/配置/管理路由——在发出任何上游
+  // 请求**之前**就被拒绝。
+  if (!isPassthroughAllowed(subpath)) {
+    return openaiError(
+      `The path '${subpath.slice(0, 100)}' is not exposed by this proxy. Available: /models, ` +
+        `/models/{id}, /chat/completions, /embeddings and the passthrough routes ` +
+        `${PASSTHROUGH_ALLOWLIST.join(", ")}.`,
+      403,
+      { code: "endpoint_not_allowed" },
+    );
   }
 
   const prefix = await detectPrefix(request, session);
@@ -782,10 +1117,7 @@ async function handlePassthrough(request: Request, session: StoredSession): Prom
       body: request.body ?? undefined,
     }, { stream: true });
   } catch (err) {
-    return openaiError(`Failed to connect to upstream: ${String(err)}`, 502, {
-      type: "server_error",
-      code: "upstream_unavailable",
-    });
+    return upstreamUnreachable(err, request);
   }
 
   if (AUTH_FAILURE_CODES.includes(resp.status)) {
@@ -891,9 +1223,11 @@ export async function handleV1Request(
     //
     // 兜底处理管线自身的失败（KV、RPC、未预期的抛出）。上游失败由各处理函数自行处理并
     // 给出错误码，因此这一条说的是 "internal"，而不是甩锅给 Open WebUI。
-    return openaiError(`Proxy request failed: ${String(err)}`, 500, {
+    return loggedErrorResponse(err, requestIdOf(request), "The proxy request could not be completed.", {
+      status: 500,
       type: "server_error",
       code: "internal",
+      logMessage: "proxy request failed",
     });
   }
 }

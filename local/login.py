@@ -371,6 +371,17 @@ async def perform_browser_login(
                     await asyncio.wait_for(event.wait(), timeout=quiet_period)
                 except asyncio.TimeoutError:
                     pass
+                # Top up the capture from the browser BEFORE validating it: localStorage
+                # and the cookie jar hold the values that actually get SAVED, so
+                # validating first proved something about a value that could then be
+                # replaced by an unverified one (a token left behind by an earlier
+                # session, say). Every round now validates exactly what will be written
+                # out.
+                #
+                # 在**校验之前**先用浏览器补齐抓取结果：localStorage 与 Cookie Jar 里才是
+                # 最终要被保存的取值，因此先校验等于去证明一个随后可能被未校验值替换掉的
+                # 东西（比如上一次会话残留的 token）。现在每一轮校验的正是最终会落盘的那一份。
+                await _enrich_from_browser(page, context, captured)
                 # The critical step: captured credentials must pass a real
                 # upstream authentication to count as logged in
                 #
@@ -378,7 +389,6 @@ async def perform_browser_login(
                 if await credentials_are_valid(base_url, captured):
                     break
                 logger.info(lang.t("validate_failed"))
-            await _enrich_from_browser(page, context, captured)
         except asyncio.TimeoutError:
             await browser.close()
             raise SessionError(lang.t("login_timeout", timeout=timeout))
@@ -465,6 +475,14 @@ def save_session(path: Path, session: Session) -> None:
             os.chmod(path, 0o600)
         except OSError:
             pass
+    else:
+        # Windows has no POSIX mode bits to set: the file inherits the directory's
+        # ACL, which on a shared machine can be readable by other users. Say so
+        # instead of implying the credential is protected.
+        #
+        # Windows 没有可设置的 POSIX 权限位：文件继承所在目录的 ACL，在共用机器上可能被
+        # 其他用户读取。这里明确说出来，而不是让人以为凭证已被保护。
+        logger.warning(lang.t("warn_windows_acl", path=path))
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -542,6 +560,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     content = json.dumps(session.to_dict(), ensure_ascii=False, indent=2)
     print("\n" + "=" * 62, flush=True)
     print(lang.t("copy_hint"), flush=True)
+    print(lang.t("creds_live_warning"), flush=True)
     print("=" * 62, flush=True)
     print(content, flush=True)
     print("=" * 62, flush=True)

@@ -10,6 +10,14 @@
  *
  * 下面的指纹对照值由上游 Python 项目算出，因此这个用例把"与 Python 逐字节一致"
  * 钉住了。
+ *
+ * Contract anchors (docs/UPSTREAM-CONTRACTS.zh-CN.md):
+ *   #5  指纹字段集        upstream/models.py:141-168
+ *   #6  对外字段白名单    upstream/models.py:239-295
+ *   #7  量化正则（R4）    upstream/models.py:36-44
+ *   #8  偏差值键名（R9）  upstream/models.py:289-295
+ *   #9  共享能力模板语义  upstream/models.py:104-138
+ * 契约锚点（见 docs/UPSTREAM-CONTRACTS.zh-CN.md）：改动这些字段/规则前先看上游对应位置。
  */
 
 import { test } from "node:test";
@@ -212,17 +220,47 @@ test("normalization never echoes the upstream capability template", () => {
   // The whole template is shared here (one reporting model), so no deviations.
   // 只有一个上报模型，全部键都属于模板，因此没有偏离。
   const withTemplate = normalizeModel(QWEN_RAW, { vision: true, builtin_tools: true });
-  assert.equal("x_open_webui" in (withTemplate ?? {}), false);
+  assert.equal("x_open_webui_deviations" in (withTemplate ?? {}), false);
 });
 
-test("a model that deviates from the template carries the deviation under x_open_webui", () => {
+test("a model that deviates from the template carries the deviation under x_open_webui_deviations", () => {
+  // A dedicated key, NOT `x_open_webui`: that name belongs to the instance-level
+  // metadata on the /v1/models ENVELOPE, and the same key meaning two things at two
+  // levels was a real ambiguity (upstream's R9 rename -- contract with models.py:289-295).
+  //
+  // 专门的键，**不是** `x_open_webui`：后者是 /v1/models **信封**上实例级元信息的位置，同一个
+  // 键在两个层级含义不同是真实的歧义（上游 R9 改名——与 models.py:289-295 的契约）。
   const model = normalizeModel(
     { id: "DeepSeek-V4-Flash-0731", info: { meta: { capabilities: { vision: true, usage: true } } } },
     { vision: false, usage: true },
   );
   assert.ok(model);
-  assert.deepEqual(model.x_open_webui, { capabilities: { vision: true } });
+  assert.deepEqual(model.x_open_webui_deviations, { capabilities: { vision: true } });
+  assert.equal("x_open_webui" in model, false);
   assert.equal("capabilities" in model, false);
+});
+
+test("quantization is only claimed when the id really names one", () => {
+  // Contract with upstream models.py:36-44 (decision R4): the `Q<n>` branch needs at
+  // least one underscore segment, so a version-like fragment is left alone instead of
+  // being truncated into a value that looks like a real quantization level.
+  //
+  // 与上游 models.py:36-44 的契约（决策 R4）：`Q<n>` 分支要求至少一个下划线段，因此版本号
+  // 形状的片段会被放着不管，而不是被截断成一条看起来像真实量化等级的值。
+  const cases: Array<[string, string | null]> = [
+    ["Qwen3.8-27B-NVFP4", "NVFP4"],
+    ["Q4_K_M", "Q4_K_M"],
+    ["Q4_K_M-GGUF-00001-of-00002", "Q4_K_M"],
+    ["Q5_0", "Q5_0"],
+    ["q3-omni", null],
+    ["Q3.8-27B", null],
+    ["a_q3-omni", null],
+  ];
+  for (const [id, expected] of cases) {
+    const model = normalizeModel({ id });
+    assert.ok(model, id);
+    assert.equal(model.quantization ?? null, expected, `id=${id}`);
+  }
 });
 
 test("a bare string and an id-less object are handled like the upstream does", () => {

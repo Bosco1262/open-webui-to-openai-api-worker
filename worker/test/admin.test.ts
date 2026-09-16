@@ -36,15 +36,17 @@ import type { Env } from "../src/types.ts";
 
 /** A KV namespace holding nothing: only the auth path reads it here. */
 class EmptyKV {
-  async get(): Promise<null> {
+  async get(_key?: string): Promise<string | null> {
     return null;
   }
 
-  async put(): Promise<void> {}
+  async put(_key?: string, _value?: string, _options?: { metadata?: unknown }): Promise<void> {}
 
-  async delete(): Promise<void> {}
+  async delete(_key?: string): Promise<void> {}
 
-  async list(): Promise<{ keys: []; list_complete: boolean; cursor: string }> {
+  async list(
+    _options?: { prefix?: string; cursor?: string },
+  ): Promise<{ keys: Array<{ name: string; metadata: unknown }>; list_complete: boolean; cursor: string }> {
     return { keys: [], list_complete: true, cursor: "" };
   }
 }
@@ -449,4 +451,369 @@ test("a heartbeat step outside the shared table is a rejected settings write", a
   // A rejected write must not touch the coordinator's schedule either.
   // 被拒绝的写入同样绝不能碰协调者的排程。
   assert.equal(probe.calls(), 0);
+});
+
+// --------------------------------------------------------------------------- //
+// API keys: digest-only storage, id-addressed revocation, one-time reveal
+// API Key：仅存摘要、按 id 撤销、一次性回显
+// --------------------------------------------------------------------------- //
+
+/** A KV namespace that actually stores values, so key records can be inspected. */
+/** 真正存值的 KV 命名空间，便于检查 Key 记录。 */
+class StoringKV extends EmptyKV {
+  readonly store = new Map<string, string>();
+  readonly metadata = new Map<string, unknown>();
+
+  override async get(key: string): Promise<string | null> {
+    return this.store.get(key) ?? null;
+  }
+
+  override async put(key: string, value: string, options?: { metadata?: unknown }): Promise<void> {
+    this.store.set(key, value);
+    if (options?.metadata !== undefined) this.metadata.set(key, options.metadata);
+  }
+
+  override async delete(key: string): Promise<void> {
+    this.store.delete(key);
+    this.metadata.delete(key);
+  }
+
+  override async list(options: { prefix?: string } = {}): Promise<{
+    keys: Array<{ name: string; metadata: unknown }>;
+    list_complete: boolean;
+    cursor: string;
+  }> {
+    const prefix = options.prefix ?? "";
+    return {
+      keys: [...this.store.keys()]
+        .filter((name) => name.startsWith(prefix))
+        .map((name) => ({ name, metadata: this.metadata.get(name) ?? null })),
+      list_complete: true,
+      cursor: "",
+    };
+  }
+}
+
+function keyEnv(): { env: Env; kv: StoringKV } {
+  const kv = new StoringKV();
+  const env = makeEnv({ adminPassword: "preset" });
+  (env as { KV: KVNamespace }).KV = kv as unknown as KVNamespace;
+  return { env, kv };
+}
+
+async function get(env: Env, path: string, authed = true): Promise<Response> {
+  return handleAdminApiRequest(
+    env,
+    new Request(`https://worker.test${path}`, {
+      headers: authed ? { cookie: `ow2_admin=${await createAdminToken(env)}` } : {},
+    }),
+  );
+}
+
+async function del(env: Env, path: string, body: unknown, authed = true): Promise<Response> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (authed) headers.cookie = `ow2_admin=${await createAdminToken(env)}`;
+  return handleAdminApiRequest(
+    env,
+    new Request(`https://worker.test${path}`, {
+      method: "DELETE",
+      headers,
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+test("the key list never returns the secret, and revocation addresses the digest", async () => {
+  const { env, kv } = keyEnv();
+  const created = (await (
+    await post(env, "/admin/api/keys", { name: "client-a" }, true)
+  ).json()) as { id: string; key: string; masked: string };
+
+  // The one-time echo is real, the stored form is not the key.
+  assert.ok(created.key.startsWith("sk-"));
+  assert.equal(created.masked.includes(created.key), false);
+  assert.deepEqual([...kv.store.keys()], [`apikey:${created.id}`]);
+  assert.equal(
+    [...kv.store.keys()].some((name) => name.includes(created.key)),
+    false,
+    "the plaintext must appear in no KV name",
+  );
+
+  const listed = (await (await get(env, "/admin/api/keys")).json()) as {
+    keys: Array<Record<string, unknown>>;
+  };
+  assert.equal(listed.keys.length, 1);
+  assert.equal(listed.keys[0].id, created.id);
+  assert.equal("key" in listed.keys[0], false, "listing must not carry a usable key");
+  assert.equal(JSON.stringify(listed).includes(created.key), false);
+
+  // Revocation takes the id the list returned -- the plaintext is not needed (nor known).
+  const removed = await del(env, "/admin/api/keys", { id: created.id });
+  assert.equal(removed.status, 200);
+  assert.deepEqual([...kv.store.keys()], []);
+  const after = (await (await get(env, "/admin/api/keys")).json()) as { keys: unknown[] };
+  assert.equal(after.keys.length, 0);
+});
+
+test("a rotation issues a new key for the same name and revokes the old record", async () => {
+  const { env, kv } = keyEnv();
+  const created = (await (
+    await post(env, "/admin/api/keys", { name: "client-b" }, true)
+  ).json()) as { id: string; key: string };
+
+  const rotated = (await (
+    await post(env, "/admin/api/keys/rotate", { id: created.id }, true)
+  ).json()) as { id: string; key: string; name: string };
+
+  assert.notEqual(rotated.id, created.id);
+  assert.notEqual(rotated.key, created.key);
+  assert.equal(rotated.name, "client-b");
+  assert.deepEqual([...kv.store.keys()], [`apikey:${rotated.id}`]);
+});
+
+test("admin responses are never cached, never sniffed, and carry a CSP", async () => {
+  const { env } = keyEnv();
+  const response = await get(env, "/admin/api/status");
+  assert.equal(response.headers.get("cache-control"), "no-store, private");
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+  assert.ok((response.headers.get("content-security-policy") ?? "").includes("frame-ancestors 'none'"));
+});
+
+test("logging out expires both the prefixed and the legacy cookie", async () => {
+  // Sessions issued before the `__Host-` change still live in the browser, so logging
+  // out has to clear that name too -- otherwise the user stays signed in.
+  //
+  // 本改动之前签发的会话仍留在浏览器里，因此登出必须一并清除那个名字——否则用户仍然
+  // 处于登录状态。
+  const { env } = keyEnv();
+  const response = await post(env, "/admin/api/logout", {}, false);
+  assert.equal(response.status, 200);
+  const cookies = (response.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? [];
+  assert.equal(cookies.length, 2, "both cookie names must be expired");
+  assert.ok(cookies.some((cookie) => cookie.startsWith("__Host-ow2_admin=")));
+  assert.ok(cookies.some((cookie) => cookie.startsWith("ow2_admin=")));
+});
+
+// --------------------------------------------------------------------------- //
+// Upstream URL policy (HTTPS only, no private or metadata hosts)
+// 上游地址策略（仅 HTTPS，拒绝私网与元数据主机）
+// --------------------------------------------------------------------------- //
+
+function sessionJsonWith(baseUrl: string): string {
+  return JSON.stringify({
+    authorization: "Bearer pasted-token",
+    cookie: "",
+    user_agent: "test-agent",
+    base_url: baseUrl,
+  });
+}
+
+test("an http upstream is refused unless it is loopback", async () => {
+  const env = makeEnv({ adminPassword: "preset" });
+  const refused = await post(
+    env,
+    "/admin/api/session",
+    { json: sessionJsonWith("http://upstream.test"), save: true },
+    true,
+  );
+  assert.equal(refused.status, 400);
+  // Cleartext credentials are the single most direct way to lose the account; the
+  // documented mock rehearsal (loopback) is the one exception.
+  //
+  // 明文凭证是丢掉账号最直接的一条路；文档化的 mock 彩排（回环地址）是唯一的例外。
+  assert.equal(
+    ((await refused.json()) as { error: string }).error,
+    "err.base_url_https_required",
+  );
+
+  const loopback = await post(
+    env,
+    "/admin/api/session",
+    { json: sessionJsonWith("http://127.0.0.1:8799"), save: true },
+    true,
+  );
+  assert.equal(loopback.status, 200);
+});
+
+test("private, metadata and non-standard-port upstreams are refused", async () => {
+  const env = makeEnv({ adminPassword: "preset" });
+  const cases: Array<[string, string]> = [
+    ["https://10.0.0.5", "err.base_url_forbidden_host"],
+    ["https://169.254.169.254", "err.base_url_forbidden_host"],
+    ["https://metadata.google.internal", "err.base_url_forbidden_host"],
+    ["https://upstream.test:8443", "err.base_url_forbidden_host"],
+    ["not a url", "err.session_bad_base_url"],
+  ];
+  for (const [baseUrl, expected] of cases) {
+    const response = await post(
+      env,
+      "/admin/api/session",
+      { json: sessionJsonWith(baseUrl), save: true },
+      true,
+    );
+    assert.equal(response.status, 400, `${baseUrl} must be refused`);
+    assert.equal(((await response.json()) as { error: string }).error, expected, baseUrl);
+  }
+});
+
+test("oversized session fields are refused instead of being stored", async () => {
+  const env = makeEnv({ adminPassword: "preset" });
+  const response = await post(
+    env,
+    "/admin/api/session",
+    {
+      json: JSON.stringify({
+        authorization: `Bearer ${"x".repeat(9 * 1024)}`,
+        cookie: "",
+        user_agent: "ua",
+        base_url: "https://upstream.test",
+      }),
+      save: true,
+    },
+    true,
+  );
+  assert.equal(response.status, 400);
+  assert.equal(((await response.json()) as { error: string }).error, "err.session_too_large");
+});
+
+// --------------------------------------------------------------------------- //
+// First-visit setup: the write is verified by reading it back
+// 首次设密：写入后回读校验
+// --------------------------------------------------------------------------- //
+
+test("a setup whose write does not land is refused, not handed a session", async () => {
+  // Two concurrent setups used to be able to both pass the "is it free?" check and
+  // both write, leaving KV's last-write-wins to decide who owns the console. The
+  // read-back makes the loser fail cleanly instead.
+  //
+  // 两个并发的设密此前可能同时通过"是否空闲"的检查并各自写入，最后让 KV 的后写者胜决定
+  // 谁占有控制台。回读校验让失败的一方干净地失败。
+  class DroppingPutKV extends EmptyKV {
+    override async put(): Promise<void> {
+      // Simulates another writer winning between our check and our write.
+      // 模拟在我们检查与写入之间另一个写入者胜出。
+    }
+  }
+  const env = makeEnv();
+  (env as { KV: KVNamespace }).KV = new DroppingPutKV() as unknown as KVNamespace;
+
+  const response = await post(env, "/admin/api/setup", {
+    password: "a-long-enough-password",
+    confirm: "a-long-enough-password",
+  });
+  assert.equal(response.status, 400);
+  assert.equal(((await response.json()) as { error: string }).error, "err.already_setup");
+});
+
+// --------------------------------------------------------------------------- //
+// Probe health: the console hears why probing stopped, and how it can resume
+// 探测健康：控制台能知道探测为什么停了，以及怎么让它重新动起来
+// --------------------------------------------------------------------------- //
+
+/** A coordinator stub that reports a health record and counts the resume/suspend calls. */
+function healthProbe(health: Record<string, unknown>, cached = 3): {
+  namespace: DurableObjectNamespace;
+  resumes: () => number;
+  removals: () => number;
+} {
+  let resumes = 0;
+  let removals = 0;
+  const record = {
+    state: "ok",
+    since: 1,
+    last_round_at: 2,
+    last_success_at: 3,
+    consecutive_permanent_failures: 0,
+    last_error: "",
+    ...health,
+  };
+  const stub = {
+    healthView: async () => ({ health: record, cached }),
+    view: async () => ({ models: [], cached, now: 4, health: record }),
+    resumeProbes: async (): Promise<void> => {
+      resumes += 1;
+    },
+    noteSessionRemoved: async (): Promise<void> => {
+      removals += 1;
+    },
+  };
+  return {
+    namespace: { getByName: () => stub } as unknown as DurableObjectNamespace,
+    resumes: () => resumes,
+    removals: () => removals,
+  };
+}
+
+test("status carries the queue's health, and the public branch still does not", async () => {
+  const probe = healthProbe({ state: "suspended", consecutive_permanent_failures: 3, last_error: "HTTP 401" });
+  const env = makeEnv({ adminPassword: "preset", storedSession: STORED_SESSION, probe: probe.namespace });
+
+  // Unauthenticated: the console's first screen (which login view to show) and nothing
+  // else -- health is deployment-internal.
+  //
+  // 未鉴权：控制台首屏（显示哪个登录视图）别无其它——健康属于部署内部信息。
+  const anonymous = await handleAdminApiRequest(env, new Request("https://worker.test/admin/api/status"));
+  const anon = (await anonymous.json()) as Record<string, unknown>;
+  assert.equal("health" in anon, false);
+
+  const authed = (await (await get(env, "/admin/api/status")).json()) as {
+    health: { state: string; suspend_threshold: number; cached_models: number };
+  };
+  assert.equal(authed.health.state, "suspended");
+  assert.equal(authed.health.suspend_threshold, 3, "the UI must not hardcode the threshold");
+  assert.equal(authed.health.cached_models, 3);
+});
+
+test("status survives a coordinator that cannot even be named", async () => {
+  // No session (nothing to address the object with) or a broken binding must degrade to
+  // "health unknown", not break the whole status page.
+  //
+  // 没有 session（没有东西可以寻址那个对象）或绑定损坏时都必须退化成"健康未知"，而不是让
+  // 整个状态页失败。
+  const env = makeEnv({ adminPassword: "preset" });
+  const response = await get(env, "/admin/api/status");
+  assert.equal(response.status, 200);
+  assert.equal(((await response.json()) as { health: unknown }).health, null);
+});
+
+test("a rejected credential answers its own code, not the generic model-list one", async () => {
+  const env = makeEnv({
+    adminPassword: "preset",
+    storedSession: STORED_SESSION,
+    probe: failingProbe(Object.assign(new Error("auth_rejected"), { name: "RoundUnavailable:auth_rejected" })),
+  });
+  const response = await post(env, "/admin/api/probe/refresh", {}, true);
+  assert.equal(response.status, 502);
+  assert.equal(((await response.json()) as { error: string }).error, "err.probe_auth_rejected");
+});
+
+test("importing a session and a green connectivity check both resume a stopped queue", async () => {
+  const probe = healthProbe({ state: "suspended" });
+  const env = makeEnv({ adminPassword: "preset", storedSession: STORED_SESSION, probe: probe.namespace });
+
+  stubUpstream({ "/api/v1/models": { status: 200, body: MODEL_LIST } });
+  await post(env, "/admin/api/session", { json: sessionJson(), test: true, save: true }, true);
+  assert.equal(probe.resumes(), 1, "a fresh import is the fix for a rejected credential");
+
+  await post(env, "/admin/api/session/check", {}, true);
+  assert.equal(probe.resumes(), 2, "a green connectivity check is the second proof");
+
+  // Deleting the session stops the queue at once (and the console can say why).
+  // 删除 session 时立即停掉队列（并让控制台能说明原因）。
+  await del(env, "/admin/api/session", {});
+  assert.equal(probe.removals(), 1);
+});
+
+test("a short SESSION_SECRET is reported as a configuration warning", async () => {
+  const kv = new StoringKV();
+  const env = {
+    KV: kv as unknown as KVNamespace,
+    PROBE: {} as unknown as DurableObjectNamespace,
+    SESSION_SECRET: "too-short",
+    ADMIN_PASSWORD: "preset",
+  } as unknown as Env;
+  const response = await get(env, "/admin/api/status");
+  const payload = (await response.json()) as { warnings: string[] };
+  assert.deepEqual(payload.warnings, ["warn.session_secret_short"]);
 });

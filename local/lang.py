@@ -148,6 +148,18 @@ _MESSAGES: Dict[str, Tuple[str, str]] = {
         "  Copy the JSON below into 'Import Session' in the Worker admin console.",
         "  请复制下方全部 JSON 内容，粘贴到 Worker 管理界面的『导入 Session』中。",
     ),
+    "creds_live_warning": (
+        "  NOTE: this file holds a LIVE upstream credential (JWT + session cookies). "
+        "Once the import has succeeded, delete it, and re-run this tool if you ever need a fresh one.",
+        "  注意：该文件是一份**仍然有效**的上游凭证（JWT + 会话 Cookie）。导入成功后请将其删除；"
+        "日后需要新的凭证时重新运行本工具即可。",
+    ),
+    "warn_windows_acl": (
+        "Windows: file permissions are inherited from the directory, so {path} may be readable "
+        "by other local users. Save it inside a private folder (or delete it right after importing).",
+        "Windows：文件权限继承自所在目录，{path} 可能被同机其他用户读取。请保存在私有目录中"
+        "（或在导入后立即删除）。",
+    ),
     "describe_empty": (
         "<empty>",
         "<空>",

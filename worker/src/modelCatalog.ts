@@ -27,14 +27,26 @@
 import { isPlainObject } from "./json.ts";
 
 /** Quantization tokens recognizable in model ids: NVFP4, FP8, FP16, INT8, GPTQ, AWQ, ...
- *  Kept in sync with the pre-probe behaviour of this project.
- *  Known limitation: `Q[0-9]` also matches version-like fragments (e.g. "q3-omni"
- *  yields quantization "Q3"). Decorative served field only — accepted noise. */
-/** 模型名中可识别的量化标识：NVFP4、FP8、FP16、INT8、GPTQ、AWQ 等，与探测功能加入前的行为保持一致。
- *  已知限制：`Q[0-9]` 也会命中形如版本的片段（如 "q3-omni" 会得到 quantization "Q3"）。
- *  仅是对外装饰字段——接受该噪音。 */
+ *
+ *  The `Q<n>` branch requires at least one UNDERSCORE segment (`Q4_K_M`, `Q5_0`), which is
+ *  how llama.cpp actually names its quants. A bare `Q<n>` -- the shape a version-like
+ *  fragment such as "q3-omni" has -- is deliberately NOT matched: emitting `Q3` there was
+ *  not "one extra decorative field" but a claim that happens to equal a real quantization
+ *  level, and nothing downstream could tell it apart from a measured fact. Upstream's R4
+ *  decision draws the same line, so the two projects agree on this field again.
+ *
+ *  Decorative served field: it is parsed from the id, never probed.
+ *
+ *  模型名中可识别的量化标识：NVFP4、FP8、FP16、INT8、GPTQ、AWQ 等。
+ *
+ *  `Q<n>` 分支**要求至少一个下划线段**（`Q4_K_M`、`Q5_0`），这正是 llama.cpp 实际的量化命名
+ *  习惯。裸 `Q<n>`——也就是 "q3-omni" 这类版本号片段的形状——刻意**不**匹配：那种情况下输出
+ *  `Q3` 不是"多一个装饰字段"，而是一条恰好等于真实量化等级的声明，下游无法把它与实证事实区分
+ *  开。上游的 R4 决策划的是同一条线，因此两边在这个字段上重新对齐。
+ *
+ *  对外装饰字段：从模型名解析，绝不来自探测。 */
 const QUANT_PATTERN =
-  /\b(NVFP4|FP4|FP8|FP16|INT8|INT4|GPTQ(?:-?[0-9]+BIT)?|AWQ|GGUF|Q[0-9](?:_[A-Z0-9]+)*)\b/i;
+  /\b(NVFP4|FP4|FP8|FP16|INT8|INT4|GPTQ(?:-?[0-9]+BIT)?|AWQ|GGUF|Q[0-9](?:_[A-Z0-9]+)+)\b/i;
 
 /** Upstream versions return inconsistent shapes: {"data": [...]} / {"items": [...]} / a bare list. */
 /** 上游不同版本返回结构不一致：{"data": [...]} / {"items": [...]} / 裸列表。 */
@@ -141,7 +153,7 @@ export function rawModelCapabilities(raw: unknown): Record<string, boolean> {
  *
  * Keys the models disagree about (or that only some of them report) are left out; a
  * model's own value for those is published as a deviation under that model's
- * `x_open_webui`. Reporting the template once, as an instance-level fact, is honest;
+ * `x_open_webui_deviations`. Reporting the template once, as an instance-level fact, is honest;
  * repeating it inside each model's `capabilities` would claim something about the
  * model that is not true -- the same template was also handed to the model that
  * answers an image with "is not a multimodal model".
@@ -150,7 +162,7 @@ export function rawModelCapabilities(raw: unknown): Record<string, boolean> {
  * 模型的"默认模型元数据"模板。
  *
  * 各模型不一致（或只有部分模型上报）的键不纳入模板；某个模型对这些键自己的取值，
- * 作为"偏离"放在该模型的 `x_open_webui` 里。把模板作为实例级事实输出一次是诚实的；
+ * 作为"偏离"放在该模型的 `x_open_webui_deviations` 里。把模板作为实例级事实输出一次是诚实的；
  * 重复放进每个模型的 `capabilities` 则是在声称模型具备它并不具备的能力。
  */
 export function sharedDefaultCapabilities(
@@ -231,7 +243,7 @@ export async function modelFingerprint(raw: unknown, modelId: string): Promise<s
  * Standard fields stay intact; a whitelist of safe, useful extras is preserved when
  * present: name, description, max_model_len (kept for compatibility) plus
  * max_context_length and context_length, quantization (parsed from the model id),
- * and `x_open_webui.capabilities` carrying the model's DEVIATIONS from the shared
+ * and `x_open_webui_deviations.capabilities` carrying the model's DEVIATIONS from the shared
  * template. Private upstream fields (user_id, access_grants, permission, urlIdx,
  * ...) are never exposed.
  *
@@ -239,7 +251,7 @@ export async function modelFingerprint(raw: unknown, modelId: string): Promise<s
  *
  * 标准字段原样保留，另有一份白名单在存在时透出安全且有用的扩展字段：name、
  * description、max_model_len（兼容保留）+ max_context_length/context_length、
- * quantization（从模型名解析）、以及 `x_open_webui.capabilities`（该模型相对共享
+ * quantization（从模型名解析）、以及 `x_open_webui_deviations.capabilities`（该模型相对共享
  * 模板的**偏离**）。上游私有字段（user_id、access_grants、permission、urlIdx 等）
  * 一律不透出。
  */
@@ -320,12 +332,17 @@ export function normalizeModel(
   }
   if (Object.keys(deviation).length > 0) {
     // Open WebUI hands the deployment-wide template to every model, so a model that
-    // deviates from it is worth keeping -- but under the instance namespace, never
-    // inside `capabilities`, which holds probed facts only.
+    // deviates from it is worth keeping -- but under its OWN key, never inside
+    // `capabilities` (probed facts only) and never as `x_open_webui` (which names the
+    // instance-level metadata on the /v1/models ENVELOPE; reusing it per model made the
+    // same key mean two different things at two levels -- upstream aligned on the same
+    // rename, R9).
     //
-    // Open WebUI 把同一份部署级模板发给每个模型，因此偏离模板的模型值得保留——但放在
-    // 实例命名空间下，绝不放进只承载实证事实的 `capabilities`。
-    model.x_open_webui = { capabilities: deviation };
+    // Open WebUI 把同一份部署级模板发给每个模型，因此偏离模板的模型值得保留——但放在**自己
+    // 的**键下，绝不放进只承载实证事实的 `capabilities`，也不叫 `x_open_webui`（后者在
+    // /v1/models **信封**上指实例级元信息；同一个键在两个层级含义不同曾造成歧义——上游同样
+    // 改成了这个名字，见其 R9 决策）。
+    model.x_open_webui_deviations = { capabilities: deviation };
   }
 
   return model;

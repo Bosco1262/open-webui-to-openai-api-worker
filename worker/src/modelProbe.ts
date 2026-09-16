@@ -117,7 +117,13 @@ const STATUS_FAILED: ProbeStatus = "failed";
 /** Bumped whenever the stored shape changes; an older cache is ignored wholesale
  *  and every model is re-probed (a re-probe is annoying, not fatal). */
 /** 存储结构变化时自增；旧版本缓存整体忽略并全部重探（重探一遍很烦，但不致命）。 */
-export const CACHE_VERSION = 2;
+// Version 3 adds `invalidated_efforts` (the live-rejection blacklist): an older row has
+// no such field, and defaulting it to [] would silently drop facts we cannot reconstruct
+// -- so the version gate wipes and re-probes instead (see probeStore.migrate).
+//
+// 版本 3 增加了 `invalidated_efforts`（线上下线判定的黑名单）：旧行没有该字段，而把它默认
+// 成 [] 会静默丢掉无法重建的事实——因此版本闸门选择清空并重探（见 probeStore.migrate）。
+export const CACHE_VERSION = 3;
 
 /** Exponential backoff for retrying a model whose probe failed (or is
  *  incomplete). The bounds cap how often a broken model can be re-probed. */
@@ -624,6 +630,7 @@ export function createModelProbe(fingerprint: string, probedAt: number): ModelPr
     last_error: "",
     supported_efforts: [],
     efforts_verified: false,
+    invalidated_efforts: [],
     default_effort: null,
     default_enabled: null,
     capabilities: {},
@@ -645,6 +652,7 @@ export function modelProbeToDict(probe: ModelProbe): Record<string, unknown> {
     last_error: probe.last_error,
     supported_efforts: [...probe.supported_efforts],
     efforts_verified: probe.efforts_verified,
+    invalidated_efforts: [...probe.invalidated_efforts],
     default_effort: probe.default_effort,
     default_enabled: probe.default_enabled,
     capabilities: { ...probe.capabilities },
@@ -677,6 +685,7 @@ export function modelProbeFromDict(raw: unknown): ModelProbe {
     last_error: stringOr(source.last_error, ""),
     supported_efforts: stringArray(source.supported_efforts),
     efforts_verified: Boolean(source.efforts_verified),
+    invalidated_efforts: stringArray(source.invalidated_efforts),
     default_effort: source.default_effort ? String(source.default_effort) : null,
     default_enabled: typeof defaultEnabled === "boolean" ? defaultEnabled : null,
     capabilities,
@@ -847,6 +856,30 @@ export class ModelProbeCache {
   recordResult(modelId: string, probe: ModelProbe, now: number = nowSeconds()): ModelProbe {
     const previous = this.entries.get(modelId);
     const sameEngine = previous !== undefined && previous.fingerprint === probe.fingerprint;
+    // A level a LIVE request disproved must not come back before the engine changes:
+    // the probe that just finished may have been started BEFORE that rejection, so its
+    // "the engine accepts `high`" answer is older evidence than the 400 the client got.
+    // Strip the disproved levels from this result and carry the set forward.
+    //
+    // 被**线上请求**证伪的挡位在引擎变化前不得复活：刚结束的这次探测可能是**在那次证伪
+    // 之前**启动的，它那句"引擎接受 high"是比客户端收到的 400 更旧的证据。因此从本次
+    // 结果里剔除这些挡位，并把集合继续带下去。
+    const disproved = sameEngine ? (previous.invalidated_efforts ?? []) : [];
+    if (disproved.length > 0) {
+      if (probe.supported_efforts.some((level) => disproved.includes(level))) {
+        probe.supported_efforts = probe.supported_efforts.filter(
+          (level) => !disproved.includes(level),
+        );
+        // The merged list is no longer a fully verified result.
+        // 合并后的列表不再是完整实证的结果。
+        probe.efforts_verified = false;
+      }
+      probe.invalidated_efforts = [...disproved];
+    } else {
+      // No live counter-evidence, and a different engine clears it entirely.
+      // 没有线上反证；而换了引擎则整个清空。
+      probe.invalidated_efforts = sameEngine ? (probe.invalidated_efforts ?? []) : [];
+    }
     if (probe.status === STATUS_PARTIAL) {
       probe.attempts = (sameEngine ? previous.attempts : 0) + 1;
       probe.retry_after = now + backoffSeconds(probe.attempts);
@@ -910,6 +943,12 @@ export class ModelProbeCache {
       // 默认值不可能是一个刚被引擎拒绝的挡位。
       entry.default_effort = null;
     }
+    // Remember the level for the lifetime of this engine fingerprint: a later probe
+    // that accepts it again must not resurrect it (see recordResult).
+    //
+    // 在这个引擎指纹的生命周期内记住该挡位：之后某次又"接受"它的探测不得让它复活
+    // （见 recordResult）。
+    if (!entry.invalidated_efforts.includes(effort)) entry.invalidated_efforts.push(effort);
     entry.status = STATUS_PARTIAL;
     entry.retry_after = 0;
     entry.last_error = `upstream rejected reasoning_effort='${effort}'`;

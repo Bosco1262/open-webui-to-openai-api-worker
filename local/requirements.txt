@@ -1,3 +1,9 @@
 # Browser automation for the local login capture tool
 # 本地登录捕获工具所用的浏览器自动化库
 playwright>=1.40.0
+# Used directly by login.py for the upstream credential check; it is NOT a
+# playwright dependency, so a fresh `pip install -r requirements.txt` used to fail
+# with ModuleNotFoundError.
+# login.py 直接用它做上游凭证校验；它不是 playwright 的依赖，因此此前按 README
+# 全新 `pip install -r requirements.txt` 必然 ModuleNotFoundError。
+httpx>=0.27
