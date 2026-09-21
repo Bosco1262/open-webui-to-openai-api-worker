@@ -598,3 +598,126 @@ export async function verifyClientApiKey(
   );
   return true;
 }
+
+// --------------------------------------------------------------------------- //
+// Client-key brute-force interlock (/v1/*)
+// 客户端 Key 爆破联锁（/v1/*）
+// --------------------------------------------------------------------------- //
+
+/**
+ * Failed proxy-key attempts per client address, oldest first (upstream's L3).
+ *
+ * Key verification is already a digest lookup rather than a comparison, but on its
+ * own that only says the guess is cheap to REJECT -- nothing bounded how many guesses
+ * an address could make. Measured on the upstream project, 30 wrong-key requests were
+ * answered in 0.34s with no backoff, no lockout, and the correct key still working
+ * immediately afterwards; a public endpoint answers guesses at full request rate.
+ *
+ * Once one address has produced AUTH_FAILURE_LIMIT failures inside
+ * AUTH_FAILURE_WINDOW_MS, further attempts are answered 429 (with Retry-After) until
+ * the oldest failure ages out of the window. A valid key clears the address's streak.
+ *
+ * The numbers are the upstream project's defaults, kept as constants because this
+ * Worker has no `vars` and the login lockout above is likewise constant-only, so the
+ * two controls read the same way.
+ *
+ *
+ * 逐客户端地址的失败代理 Key 尝试，最早在前（上游的 L3）。
+ *
+ * Key 校验本就是摘要查找而非比较，但那只说明"猜错"很便宜地被拒绝，完全没有限制某个
+ * 地址能猜多少次。上游项目实测：30 次错误 Key 请求在 0.34 秒内被逐一应答，没有退避、
+ * 没有锁定，随后正确 Key 立即可用；公网端点等于以全速率应答猜测。
+ *
+ * 同一地址在 AUTH_FAILURE_WINDOW_MS 内失败达到 AUTH_FAILURE_LIMIT 次后，后续尝试一律
+ * 回 429（带 Retry-After），直到最早的失败滑出窗口。有效 Key 会清零该地址的计数。
+ *
+ * 数值取上游项目的默认值，并保持为常量：本 Worker 没有 `vars`，上面的登录锁定同样
+ * 只有常量，两道控制读起来才一致（对应上游 `AUTH_FAILURE_LIMIT=10` / `AUTH_FAILURE_WINDOW=60s`）。
+ */
+const AUTH_FAILURE_WINDOW_MS = 60_000;
+const AUTH_FAILURE_LIMIT = 10;
+
+/** How many client addresses are remembered at most, so the limiter itself cannot be
+ *  turned into a memory sink by a spray from many source addresses (upstream keeps the
+ *  same bound). */
+/** 最多记忆多少个客户端地址，避免攻击者用海量源地址把限速器本身变成内存池（上游同界限）。 */
+const AUTH_FAILURE_MAX_CLIENTS = 4096;
+
+/** ip -> failure timestamps (ms); isolate-local, no cross-isolate coordination.
+ *
+ *  Unlike the login lockout, the subject here is the caller of `/v1/*`, and an empty
+ *  address (no `CF-Connecting-IP`) disables the limiter for that request: every such
+ *  caller would otherwise share one bucket and lock each other out.
+ *
+ *  ip -> 失败时间戳（毫秒）；isolate 本地，不跨 isolate 协调。
+ *
+ *  与登录锁定不同，这里的对象是 `/v1/*` 的调用方；地址为空（没有 `CF-Connecting-IP`）
+ *  时该请求不受限速：否则这些调用方会共用一个桶、互相锁死。 */
+const clientAuthFailures = new Map<string, number[]>();
+
+/** Drop timestamps outside the window; remove empty entries. */
+/** 清除窗口之外的时间戳；删除空条目。 */
+function pruneAuthFailures(ip: string, now: number): number[] {
+  const list = (clientAuthFailures.get(ip) ?? []).filter((ts) => now - ts < AUTH_FAILURE_WINDOW_MS);
+  if (list.length === 0) clientAuthFailures.delete(ip);
+  else clientAuthFailures.set(ip, list);
+  return list;
+}
+
+/**
+ * Record one failed proxy-key attempt.
+ *
+ * Returns the `Retry-After` seconds the caller must answer 429 with when the address
+ * is already at the limit, or null when the caller answers its ordinary 401. The
+ * attempt that trips the limit is the one that gets the 429 and is NOT appended --
+ * mirroring the upstream project's `_record_auth_failure`, whose call site is what
+ * makes a throttled address answer `[401, 401, ..., 429]` rather than `[401, ..., 401]`.
+ *
+ *
+ * 记录一次失败的代理 Key 尝试。
+ *
+ * 地址已达上限时返回调用方应据以回 429 的 `Retry-After` 秒数；否则返回 null，由调用方
+ * 回它常规的 401。触发上限的那一次就是拿到 429 的那一次，且**不**被追记——与上游项目的
+ * `_record_auth_failure` 一致；正是这一取舍让被节流的地址给出 `[401, 401, ..., 429]`
+ * 而不是 `[401, ..., 401]`。
+ */
+export function authThrottleRecord(ip: string): number | null {
+  if (ip === "") return null;
+  const now = Date.now();
+  const failures = pruneAuthFailures(ip, now);
+  if (failures.length >= AUTH_FAILURE_LIMIT) {
+    // The window reopens when the OLDEST failure ages out -- that is the moment the
+    // count drops below the limit again. +1s of slack, floor 1s: a Retry-After of 0
+    // would invite an immediate retry that is still throttled.
+    //
+    // 窗口在**最早**那次失败滑出时重新打开——那一刻计数才会重新低于上限。+1 秒余量、
+    // 下限 1 秒：Retry-After 为 0 会招来一次立刻重试，而它仍会被节流。
+    const retryAfterSec = Math.max(
+      1,
+      Math.floor((failures[0] + AUTH_FAILURE_WINDOW_MS - now) / 1000) + 1,
+    );
+    clientAuthFailures.set(ip, failures);
+    return retryAfterSec;
+  }
+  failures.push(now);
+  clientAuthFailures.set(ip, failures);
+  // Bound the map like upstream: drop the addresses whose newest failure is already
+  // outside the window, i.e. the entries that no longer constrain anything.
+  //
+  // 像上游一样限制容量：丢弃"最新一次失败也已在窗口之外"的地址，即那些已不再起约束作用
+  // 的条目。
+  if (clientAuthFailures.size > AUTH_FAILURE_MAX_CLIENTS) {
+    for (const [entryIp, timestamps] of clientAuthFailures) {
+      const newest = timestamps[timestamps.length - 1] ?? 0;
+      if (now - newest >= AUTH_FAILURE_WINDOW_MS) clientAuthFailures.delete(entryIp);
+    }
+  }
+  return null;
+}
+
+/** A valid key clears the address's failure streak. */
+/** 有效 Key 会清零该地址的失败计数。 */
+export function authThrottleClear(ip: string): void {
+  if (ip === "") return;
+  clientAuthFailures.delete(ip);
+}

@@ -41,7 +41,13 @@ import { instanceMetaToEnvelope, isInstanceMetaUsable } from "./instanceMeta.ts"
 import { readProbeSettings } from "./probeSettings.ts";
 import { looksLikeEffortError } from "./modelProbe.ts";
 import type { ModelProbeCoordinator } from "./probeCoordinator.ts";
-import { verifyClientApiKey } from "./auth.ts";
+import { authThrottleClear, authThrottleRecord, clientIP, verifyClientApiKey } from "./auth.ts";
+import {
+  PASSTHROUGH_ALLOWLIST,
+  isPassthroughAllowed,
+  normalizePassthroughPath,
+  targetStaysWithinAllowlist,
+} from "./passthrough.ts";
 
 /**
  * Request headers that must not be forwarded upstream.
@@ -187,39 +193,12 @@ const HOP_BY_HOP_RESPONSE = new Set([
   "www-authenticate",
 ]);
 
-/**
- * Upstream paths the catch-all passthrough may forward to.
- *
- * Deny-by-default on purpose: the passthrough used to relay ANY `/v1/*` path with
- * the operator's own imported credentials, so a client holding a proxy key could
- * reach the upstream's entire business and admin API (`/auths`, `/users`,
- * `/configs`, `/chats`, ...) -- i.e. the key was equivalent to full account access.
- * Only these documented OpenAI-compatible media/file routes are forwarded now;
- * everything else answers 403 `endpoint_not_allowed`.
- *
- * Extending this list is an explicit decision: add the prefix here AND document it
- * in the README's Security Notes, because every entry hands key holders the
- * operator's upstream privileges on that route.
- *
- * 兜底透传允许转发到的上游路径。
- *
- * 刻意"默认拒绝"：此前的透传会用运维导入的凭证原样转发**任意** `/v1/*` 路径，因此
- * 持有代理 Key 的客户端可以触达上游的整套业务与管理 API（`/auths`、`/users`、
- * `/configs`、`/chats`……）——也就是说一把 Key 等价于账号全权。现在只转发这些已在
- * 文档中声明的 OpenAI 兼容媒体/文件路由，其余一律回 403 `endpoint_not_allowed`。
- *
- * 扩展本列表是一个显式决定：在这里加前缀**并且**在 README 的 Security Notes 中写明，
- * 因为每一条都等于把运维在上游的权限交给 Key 持有者。
- */
-const PASSTHROUGH_ALLOWLIST: readonly string[] = ["/images", "/audio", "/files"];
-
-/** Whether a `/v1` subpath is inside the passthrough allowlist (exact or subtree). */
-/** `/v1` 子路径是否落在透传白名单内（精确或其子树）。 */
-function isPassthroughAllowed(subpath: string): boolean {
-  return PASSTHROUGH_ALLOWLIST.some(
-    (allowed) => subpath === allowed || subpath.startsWith(`${allowed}/`),
-  );
-}
+// The passthrough allowlist and the path normalization that runs in front of it live in
+// passthrough.ts: they are one rule seen from both sides, and keeping them apart is
+// exactly how the checked value and the forwarded value drift.
+//
+// 透传白名单与它前面的路径归一化都在 passthrough.ts：它们是同一条规则的两面，而把它们分开
+// 正是"判定值"与"转发值"产生差异的由来。
 
 // --------------------------------------------------------------------------- //
 // OpenAI-style errors
@@ -1068,35 +1047,61 @@ async function handleEmbeddings(request: Request, session: StoredSession): Promi
   return new Response(resp.body, { status: resp.status, headers: filterResponseHeaders(resp.headers) });
 }
 
+// The allowlist refusal: one wording, used both for a path the allowlist does not cover
+// and for a target that would not resolve inside it.
+//
+// 白名单拒绝：同一文案，既用于白名单未覆盖的路径，也用于解析后仍不落在其中的目标。
+function passthroughRefused(rawSubpath: string): Response {
+  return openaiError(
+    `The path '${rawSubpath.slice(0, 100)}' is not exposed by this proxy. Available: /models, ` +
+      `/models/{id}, /chat/completions, /embeddings and the passthrough routes ` +
+      `${PASSTHROUGH_ALLOWLIST.join(", ")}.`,
+    403,
+    { code: "endpoint_not_allowed" },
+  );
+}
+
 // ANY /v1/{path} — passthrough for the allowlisted upstream media/file routes.
 // ANY /v1/{path} —— 白名单内的上游媒体/文件路由透传。
 async function handlePassthrough(request: Request, session: StoredSession): Promise<Response> {
   const url = new URL(request.url);
-  const subpath = url.pathname.slice("/v1".length);
-  if (!subpath.replace(/^\//, "")) {
+  const rawSubpath = url.pathname.slice("/v1".length);
+  if (!rawSubpath.replace(/^\//, "")) {
     return openaiError("Please specify the upstream path to forward in the URL.", 404, { code: "not_found" });
   }
-  // Deny-by-default (see PASSTHROUGH_ALLOWLIST): the client key is a proxy
-  // credential, not a delegation of the operator's upstream account. Anything
-  // outside the allowlist -- most importantly the upstream's user/auth/config/admin
-  // routes -- is refused BEFORE any upstream request is made.
+  // Deny-by-default (see PASSTHROUGH_ALLOWLIST), and the path is normalized BEFORE the
+  // check. The client key is a proxy credential, not a delegation of the operator's
+  // upstream account, and a path that cannot be forwarded AS WRITTEN -- one carrying a
+  // parent segment, a backslash or a control character -- is refused in every mode:
+  // "forward everything" was never meant to include "forward something other than what
+  // was asked for", which is exactly what the next decoder's dot-segment removal makes
+  // of `images/..%2f..%2fapi/config`. Anything outside the allowlist -- most
+  // importantly the upstream's user/auth/config/admin routes -- is refused BEFORE any
+  // upstream request is made.
   //
-  // 默认拒绝（见 PASSTHROUGH_ALLOWLIST）：客户端 Key 是代理凭证，不是运维上游账号的
-  // 授权委托。白名单之外的一切——尤其是上游的用户/鉴权/配置/管理路由——在发出任何上游
-  // 请求**之前**就被拒绝。
-  if (!isPassthroughAllowed(subpath)) {
-    return openaiError(
-      `The path '${subpath.slice(0, 100)}' is not exposed by this proxy. Available: /models, ` +
-        `/models/{id}, /chat/completions, /embeddings and the passthrough routes ` +
-        `${PASSTHROUGH_ALLOWLIST.join(", ")}.`,
-      403,
-      { code: "endpoint_not_allowed" },
-    );
+  // 默认拒绝（见 PASSTHROUGH_ALLOWLIST），且路径在判定**之前**先归一化。客户端 Key 是代理
+  // 凭证，不是运维上游账号的授权委托；无法"按原样转发"的路径——含父段、反斜杠或控制
+  // 字符——在任何模式下都拒绝："全量转发"从不意味着"转发一个与请求不符的东西"，而下一个
+  // 解码者的点段移除恰好会把 `images/..%2f..%2fapi/config` 变成那样。白名单之外的一切——
+  // 尤其是上游的用户/鉴权/配置/管理路由——在发出任何上游请求**之前**就被拒绝。
+  const subpath = normalizePassthroughPath(rawSubpath);
+  if (!subpath || !isPassthroughAllowed(subpath)) {
+    return passthroughRefused(rawSubpath);
   }
 
   const prefix = await detectPrefix(request, session);
   const base = session.base_url;
   const target = `${base}${prefix}${subpath}${url.search}`;
+  // Defence in depth (H1). The target above is built from the NORMALIZED subpath, so the
+  // URL parser has nothing left to resolve -- this re-derives that from the string which
+  // is actually about to be dialled, and is also where a nesting depth beyond the decode
+  // bound would show up.
+  //
+  // 纵深防御（H1）。上面的目标由**归一化后**的子路径拼成，URL 解析器已无从解析——这里从
+  // "真正即将拨出的那个字符串"重新推导一遍，超出解码层数的嵌套深度也只会在这里显形。
+  if (!targetStaysWithinAllowlist(prefix, target)) {
+    return passthroughRefused(rawSubpath);
+  }
   // The passthrough is generic: keep the client's own Content-Type/Accept (a JSON
   // pin used to break multipart uploads) and stream the body through untouched —
   // a `request.text()` round-trip used to mangle binary uploads (N1).
@@ -1163,10 +1168,35 @@ export async function handleV1Request(
   // 入口，返回 OpenAI 客户端无法解析的普通 500 响应体。下面的错误码刻意与上游错误区分：
   // 这些情况下根本没碰到上游。
   try {
+    // Brute-force interlock (upstream's L3). Verification runs FIRST, exactly as the
+    // upstream project's `require_proxy_key` does: what gets throttled is the FAILING
+    // attempt, so a client presenting a valid key is never answered 429 -- even from an
+    // address that is already at the limit -- and that key clears the address's streak.
+    //
+    // 爆破联锁（上游的 L3）。鉴权**先**执行，与上游项目的 `require_proxy_key` 完全一致：
+    // 被节流的是**失败的那次尝试**，因此持有效 Key 的调用方永远不会拿到 429——哪怕它来自
+    // 已达上限的地址——而该 Key 会清零这个地址的计数。
+    const ip = clientIP(request);
     const authorized = await verifyClientApiKey(env, request, ctx);
     if (!authorized) {
+      const retryAfterSec = authThrottleRecord(ip);
+      // The upstream's own status and header for this answer: a 401 would tell a
+      // guessing client "wrong key, try again", which is precisely the advice the
+      // limiter exists to withhold.
+      //
+      // 与上游同样用 429 加该响应头：401 等于对正在猜的客户端说"Key 错了，再试一次"，而这
+      // 恰恰是限速器要收回的那句建议。
+      if (retryAfterSec !== null) {
+        return openaiError(
+          `Too many failed attempts. Retry in ${retryAfterSec} seconds.`,
+          429,
+          { type: "invalid_request_error", code: "too_many_requests" },
+          { "retry-after": String(retryAfterSec) },
+        );
+      }
       return openaiError("Invalid proxy API key.", 401, { code: "invalid_api_key" });
     }
+    authThrottleClear(ip);
 
     const session = await getSession(env);
     if (!session) {

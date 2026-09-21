@@ -3,6 +3,7 @@
 > 上游：`open-webui-to-openai-api`（Python/FastAPI，同一作者）。本仓库是它的 Cloudflare Worker 移植版。
 > 背景与方案取舍见 [`UPSTREAM-DIFF.zh-CN.md`](../UPSTREAM-DIFF.zh-CN.md) 的 8.10 与 11.1（**已决策：方案 B——契约快照测试 + 对照表**）。
 > 首次建立：2026-09-15（对应上游快照：`ce7eac6` + 未提交工作区）。
+> 最近核对：2026-09-21（上游快照推进到 `b7599c6`：新增第 15/16 行，其余各行不变）。
 
 ## 这张表解决什么问题
 
@@ -40,6 +41,8 @@
 | 12 | 被线上请求证伪的挡位（`invalidated_efforts`）：同指纹内跨轮继承、从新结果剔除、并让 `efforts_verified=false` | `model_probe.py:880-911` | `modelProbe.ts`（`recordResult` / `invalidateEffort`）、`types.ts` | `modelProbe.test.ts`（"a level a live request disproved is not resurrected…"） | `tests/test_units.py` | 2026-09-15 |
 | 13 | 前缀候选与确认规则（`/api/v1` → `/api`；只有"真的是模型列表"或 401/403 才算确认） | `config.py:217-226`、`upstream.py:303-309` | `upstream.ts:33-39`、`modelCatalog.ts`（`looksLikeModelList`） | `upstream.test.ts` | `tests/test_units.py` | 2026-09-15 |
 | 14 | 错误体形状与错误码（`{error:{message,type,param,code}}`；4xx 透传、5xx → 502 `upstream_error`；401/403 → `upstream_unauthorized`；上游的 `Retry-After` 随响应头透传） | `app.py:283-330,595-616` | `proxy.ts`（`openaiError` / `upstreamErrorResponse` / `authFailureResponse`） | `proxyContract.test.ts` | `tests/test_smoke.py` | 2026-09-15 |
+| 15 | 透传路径归一化与白名单（H1）：判定值与转发值是同一字符串；含父段、反斜杠或控制字符一律拒绝（最多 3 轮解码，每轮复核）；空段与 `.` 段折叠；白名单为默认拒绝的精确/子树匹配；解析后的最终目标再复核一次 | `config.py:87-132`、`config.py:457-487`、`app.py:1245-1265` | `passthrough.ts`（`normalizePassthroughPath` / `isPassthroughAllowed` / `targetStaysWithinAllowlist`） | `passthrough.test.ts` | `tests/test_units.py:2385-2434` | 2026-09-21 |
+| 16 | 爆破联锁（L3）：同一客户端地址窗口内失败达上限 → 429 + `Retry-After`（`too_many_requests`）；触发上限的那次不追记；有效 Key 清零该地址计数；上限 10 / 窗口 60s / 最多记忆 4096 个地址 | `app.py:454-524`、`config.py:389-390` | `auth.ts`（`authThrottleRecord` / `authThrottleClear`）、`proxy.ts`（`handleV1Request` 接线） | `authThrottle.test.ts` | `tests/test_units.py:2565-2611` | 2026-09-21 |
 
 > 上表是与 8.10 的"10 组契约"对应的展开版：原 10 组中的"对外字段白名单 + 量化正则"拆成第 6/7 行、"偏差键名"单列为第 8 行、"被证伪挡位"单列为第 12 行。
 

@@ -281,15 +281,17 @@ for chunk in resp:
 - 管理界面与 `/admin/api/*` 全部要求登录会话，请务必设置强密码。
 - 无任何密码配置（`none`，如 `ADMIN_PASSWORD` 被移除且从未设过网页密码）时，除首次设密相关接口外管理接口一律返回 403，管理功能不可用，需先在网页设置密码。
 - **请在域名公开之前预设 `ADMIN_PASSWORD` Secret。** 首次设密是为"尚未配置任何密码"的状态而存在的，而那个状态会被第一个访问 `/admin` 的人占住。Secret 绑定时 `POST /admin/api/setup` 会返回 403（`err.setup_secret_exists`），网页无法覆盖它；要回到设密流程，需先清除 Secret（并删除 KV 中的哈希）。
-- **客户端 Key 的权限边界就是上面那张透传白名单**：Key 只能访问 `/models`、`/chat/completions`、`/embeddings` 与 `/images`、`/audio`、`/files`；上游的账号、用户、配置、会话等 API 对它不可达（403，且不发上游请求）。分享 Key 给第三方之前请先确认这一点符合预期。
+- **客户端 Key 的权限边界就是上面那张透传白名单**：Key 只能访问 `/models`、`/chat/completions`、`/embeddings` 与 `/images`、`/audio`、`/files`；上游的账号、用户、配置、会话等 API 对它不可达（403，且不发上游请求）。透传路径在判定**之前会先归一化，转发出去的也是归一化后的路径**，因此 `images/..%2f..%2fapi/config` 这类写法既通不过白名单，也不可能被下一个解码者解析成另一条上游路由；含父段、反斜杠或控制字符的路径一律直接拒绝。分享 Key 给第三方之前请先确认这一点符合预期。
 - **客户端 Key 只以摘要形式存储**：KV 里只有 `apikey:<sha256(key)>` 与展示用的脱敏串，完整 Key 仅在创建（或轮转）时回显一次。
 - 后台「修改密码」会吊销所有已登录管理会话；密码与 API Key 的吊销都依赖 KV，**最长约 60 秒在所有边缘节点收敛**（并非同一瞬间全局生效）。安全响应（发现泄露后的撤销）请把这个窗口计入。
 - 登录接口带失败锁定：同一客户端 IP 15 分钟内连续失败 5 次将返回 429 并锁定。该计数保存在 **Worker 实例本地**，且只信任 `CF-Connecting-IP`（`X-Forwarded-For` 由客户端控制，不再采信）；**部署必选项**：在 Cloudflare WAF 中为 `/admin/api/login`（及 `/admin/api/setup`）配置 Rate Limiting 规则兜底——跨边缘节点轮换只有 WAF 才拦得住。
+- `/v1/*` 另有自己的失败联锁：同一客户端地址 60 秒内失败 10 次代理 Key 后，后续尝试回 `429` + `Retry-After`，而不是又一个 `401`。它与上面那条一样保存在 **Worker 实例本地**、只认 `CF-Connecting-IP`，并**同样适用上面那条部署必选项**——真正有约束力的是 WAF 的 Rate Limiting 规则。鉴权在限速器**之前**执行（与上游项目一致），因此已达上限的地址用正确 Key 依然可用，且该次成功会清零它的失败计数。
 - **上游必须使用 HTTPS**（`https://`，标准端口；仅 `localhost` / `127.0.0.1` 回环地址允许 `http://`，供本地 mock 彩排）。导入时会拒绝私网、链路本地与云元数据地址，且代理**不会跟随上游的重定向**（3xx 视为错误），避免把 session 凭证以明文或经重定向交给第三方。**这是平台约束，而不是对本地部署的否定**：Worker 跑在 Cloudflare、上游在公网，`http://` 确实会把 JWT 与 Cookie 暴露在链路上；Python 原版是本地进程，支持 `http://localhost:8080` 与局域网地址是合理的——它不需要、也不适用这条规则。
 - 上游响应中的 `set-cookie` / `www-authenticate` 等会话与质询头**不会**回传给客户端；客户端自带的 `X-API-Key`、`Cookie`、`X-Forwarded-*`、`Forwarded`、`X-Real-IP` 等也不会被转发给上游（上游只会看到导入的 session 凭证）。
 - **客户端请求头按端点分策略转发**：JSON 端点（`/models`、`/models/{id}`、`/chat/completions`、`/embeddings`）使用**白名单**——只有 `accept`、`accept-language`、`content-type`、`range`、`x-request-id` 与 `openai-*` 会送到上游，其余默认丢弃；`/v1/{path}` 兜底透传保留黑名单（逐跳头、客户端凭证、`CF-*` 与转发头），因为通用转发必须保留客户端特有的头，否则 multipart 上传与 Range 下载会坏。
 - JSON 请求体上限 **10 MiB**（与上游项目同一数值），且作用于**实际读到的字节**——没有 `Content-Length` 的 chunked 请求体绕不过去；超限返回 `413 payload_too_large`。
 - 上游错误自带的 `Retry-After` 会透传给客户端（让 SDK 正确退避，而不是对着已经在请求暂停的上游继续重试）。
+- **与上游项目的刻意偏差：** 上游错误响应体**会**被（截断后）放进 OpenAI 错误消息回给客户端。Python 原版默认 `EXPOSE_UPSTREAM_ERROR=false`，只把响应体写进日志、对外回固定文案加 request id，理由是那些响应体常点名内部主机与路径。本仓库保留响应体：它才是让 SDK 使用者能自查失败的原因；而本代理**自身**的故障（KV、协调者）依然回固定文案 + request id。若你更想要严格那一侧的行为，可在 Python 项目里设置 `EXPOSE_UPSTREAM_ERROR`，或在这里收窄 `upstreamErrorResponse`。
 - 管理响应统一带 `Cache-Control: no-store, private`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer` 与 CSP；HTTPS 下管理会话 Cookie 使用 `__Host-` 前缀。
 - 登出只会清除管理会话 Cookie，**不会**吊销已签发的令牌——令牌是无状态的，被盗的令牌在过期前依然有效。要让所有设备上的会话一起作废，请修改管理密码。升级前签发的会话仍可用，登出时两个 Cookie 名都会被清除。
 - `SESSION_SECRET`（绑定时）用于签发管理会话 Cookie，请使用**不少于 32 个字符**的随机串。未绑定时 Worker 会在 KV 中自动派生一个 32 字节随机密钥——单机房部署完全够用，但两个边缘机房在刚派生的一小段时间内可能各持一份（管理员可能需要在窗口内重新登录一次），因此更推荐显式绑定。
